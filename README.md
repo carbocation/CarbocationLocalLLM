@@ -106,10 +106,52 @@ Host apps should still own:
 
 ## llama.cpp Build Notes
 
-SwiftPM links against a generated static library rather than building llama.cpp itself. Apps should add an Xcode Run Script phase before Swift compilation that invokes this package's build script:
+SwiftPM links against a generated static library rather than building llama.cpp itself. Apps that depend on `CarbocationLlamaRuntime` must invoke this package's build script before Xcode compiles that Swift package target. Prefer a scheme Build Pre-action or CI prebuild step; an app-target Run Script phase is only sufficient when your Xcode build graph runs it before package dependency compilation.
 
 ```sh
-/Users/james/projects/CarbocationLocalLLM/Scripts/build-llama-macos.sh
+"$SRCROOT/Scripts/build-carbocation-llama.sh"
 ```
 
-Then link/import the package normally. This keeps llama.cpp's C++/Metal build complexity out of the pure Swift core while still giving app users a normal Xcode Run experience.
+For a scheme Build Pre-action, set "Provide build settings from" to the host app target so `SRCROOT`, `BUILD_DIR`, and related Xcode paths are available.
+
+`Scripts/build-carbocation-llama.sh` should be a copy of this package's `Scripts/build-llama-from-xcode.sh`. The resolver keeps app source and project settings independent of a fixed sibling checkout path:
+
+- For local development, set `CARBOCATION_LOCAL_LLM_ROOT` to the package checkout path, or rely on the temporary `../CarbocationLocalLLM` fallback used by Carbocation app migrations.
+- For a Git URL/tag package dependency, the resolver searches Xcode's `SourcePackages/checkouts` directory and invokes the checked-out package's `Scripts/build-llama-macos.sh`.
+
+Then link/import the package normally. App source should only reference Swift module and product names such as `import CarbocationLocalLLM`; filesystem paths belong only in build wiring.
+
+This source-build flow is still an internal development integration. For broader reuse, replace the generated local static-library setup with a published binary artifact, such as an XCFramework-backed SwiftPM binary target, so consumers can depend on a Git URL/tag without running a llama.cpp build script.
+
+## Binary Artifact Publishing
+
+The package manifest supports three llama runtime modes:
+
+- default source-build mode, using `Vendor/llama-artifacts/current`
+- local binary validation mode, using `CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH`
+- published binary mode, using the `llamaBinaryArtifactURL` and `llamaBinaryArtifactChecksum` constants in `Package.swift`
+
+Build and validate a local XCFramework artifact:
+
+```sh
+Scripts/build-llama-xcframework.sh
+CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH=Vendor/llama-artifacts/release/llama.xcframework swift test
+```
+
+The packaging script emits:
+
+```text
+Vendor/llama-artifacts/release/llama.xcframework
+Vendor/llama-artifacts/release/llama.xcframework.zip
+Vendor/llama-artifacts/release/llama.xcframework.zip.checksum
+```
+
+To prepare a release manifest manually:
+
+```sh
+Scripts/set-llama-binary-artifact.sh \
+  "https://github.com/carbocation/CarbocationLocalLLM/releases/download/vX.Y.Z/llama.xcframework.zip" \
+  "$(cat Vendor/llama-artifacts/release/llama.xcframework.zip.checksum)"
+```
+
+The preferred release path is the `Publish Llama Binary Artifact` GitHub workflow. Run it first with `dry_run=true`; that builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing anything. Run it again with `dry_run=false` to create a tag-only release commit with the binary URL/checksum, create the tag, and upload the release asset. Keeping the manifest change on the release tag lets `main` stay source-build friendly while tagged consumers get the binary target.
