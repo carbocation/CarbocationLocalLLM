@@ -1,0 +1,795 @@
+import CarbocationLocalLLM
+import Foundation
+import llama
+
+public struct LlamaEngineConfiguration: Hashable, Sendable {
+    public var gpuLayerCount: Int32
+    public var useMemoryMap: Bool
+    public var batchSizeLimit: Int
+    public var threadCount: Int32?
+    public var promptReserveTokens: Int
+    public var heartbeatInterval: TimeInterval
+
+    public init(
+        gpuLayerCount: Int32 = 999,
+        useMemoryMap: Bool = true,
+        batchSizeLimit: Int = 2_048,
+        threadCount: Int32? = nil,
+        promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
+        heartbeatInterval: TimeInterval = 2
+    ) {
+        self.gpuLayerCount = gpuLayerCount
+        self.useMemoryMap = useMemoryMap
+        self.batchSizeLimit = batchSizeLimit
+        self.threadCount = threadCount
+        self.promptReserveTokens = promptReserveTokens
+        self.heartbeatInterval = heartbeatInterval
+    }
+}
+
+public struct LlamaModelDescriptor: Hashable, Sendable {
+    public var id: UUID?
+    public var url: URL
+    public var displayName: String?
+    public var filename: String
+    public var hfRepo: String?
+    public var hfFilename: String?
+
+    public init(
+        id: UUID? = nil,
+        url: URL,
+        displayName: String? = nil,
+        filename: String? = nil,
+        hfRepo: String? = nil,
+        hfFilename: String? = nil
+    ) {
+        self.id = id
+        self.url = url
+        self.displayName = displayName
+        self.filename = filename ?? url.lastPathComponent
+        self.hfRepo = hfRepo
+        self.hfFilename = hfFilename
+    }
+
+    public init(model: InstalledModel, root: URL) {
+        self.init(
+            id: model.id,
+            url: model.weightsURL(in: root),
+            displayName: model.displayName,
+            filename: model.filename,
+            hfRepo: model.hfRepo,
+            hfFilename: model.hfFilename
+        )
+    }
+}
+
+public struct LlamaLoadedModelInfo: Hashable, Sendable {
+    public var modelID: UUID?
+    public var modelPath: String
+    public var displayName: String?
+    public var filename: String
+    public var contextSize: Int
+    public var trainingContextSize: Int
+    public var hasEmbeddedChatTemplate: Bool
+
+    public init(
+        modelID: UUID?,
+        modelPath: String,
+        displayName: String?,
+        filename: String,
+        contextSize: Int,
+        trainingContextSize: Int,
+        hasEmbeddedChatTemplate: Bool
+    ) {
+        self.modelID = modelID
+        self.modelPath = modelPath
+        self.displayName = displayName
+        self.filename = filename
+        self.contextSize = contextSize
+        self.trainingContextSize = trainingContextSize
+        self.hasEmbeddedChatTemplate = hasEmbeddedChatTemplate
+    }
+}
+
+public actor LlamaEngine: LLMEngine {
+    public static let shared = LlamaEngine()
+
+    private let configuration: LlamaEngineConfiguration
+
+    private var model: OpaquePointer?
+    private var context: OpaquePointer?
+    private var vocabulary: OpaquePointer?
+    private var loadedDescriptor: LlamaModelDescriptor?
+    private var loadedInfo: LlamaLoadedModelInfo?
+    private var chatTemplate: String?
+
+    public init(configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()) {
+        self.configuration = configuration
+        LlamaBackend.ensureInitialized()
+    }
+
+    deinit {
+        if let context { llama_free(context) }
+        if let model { llama_model_free(model) }
+    }
+
+    public func currentModelID() -> UUID? {
+        loadedInfo?.modelID
+    }
+
+    public func currentContextSize() -> Int {
+        loadedInfo?.contextSize ?? 0
+    }
+
+    public func currentTrainingContextSize() -> Int {
+        loadedInfo?.trainingContextSize ?? 0
+    }
+
+    public func currentLoadedModelInfo() -> LlamaLoadedModelInfo? {
+        loadedInfo
+    }
+
+    public static func probeTrainingContext(at url: URL) -> Int? {
+        probeTrainingContext(atPath: url.path)
+    }
+
+    public static func probeTrainingContext(atPath path: String) -> Int? {
+        LlamaBackend.ensureInitialized()
+
+        var params = llama_model_default_params()
+        params.n_gpu_layers = 0
+        params.use_mmap = true
+
+        guard let model = path.withCString({ cPath in
+            llama_model_load_from_file(cPath, params)
+        }) else {
+            return nil
+        }
+        defer { llama_model_free(model) }
+
+        let trainingContext = Int(llama_model_n_ctx_train(model))
+        return trainingContext > 0 ? trainingContext : nil
+    }
+
+    @discardableResult
+    public func load(
+        model installed: InstalledModel,
+        from root: URL,
+        requestedContext: Int
+    ) throws -> LlamaLoadedModelInfo {
+        try load(descriptor: LlamaModelDescriptor(model: installed, root: root), requestedContext: requestedContext)
+    }
+
+    @discardableResult
+    public func load(
+        modelAt url: URL,
+        id: UUID? = nil,
+        displayName: String? = nil,
+        filename: String? = nil,
+        hfRepo: String? = nil,
+        hfFilename: String? = nil,
+        requestedContext: Int
+    ) throws -> LlamaLoadedModelInfo {
+        try load(
+            descriptor: LlamaModelDescriptor(
+                id: id,
+                url: url,
+                displayName: displayName,
+                filename: filename,
+                hfRepo: hfRepo,
+                hfFilename: hfFilename
+            ),
+            requestedContext: requestedContext
+        )
+    }
+
+    @discardableResult
+    public func load(
+        descriptor: LlamaModelDescriptor,
+        requestedContext: Int
+    ) throws -> LlamaLoadedModelInfo {
+        let path = descriptor.url.path
+
+        if let loadedInfo,
+           loadedInfo.modelPath == path,
+           context != nil {
+            let desiredContext = Self.clampedContextSize(
+                requestedContext: requestedContext,
+                trainingContext: loadedInfo.trainingContextSize
+            )
+            if desiredContext == loadedInfo.contextSize {
+                return loadedInfo
+            }
+        }
+
+        unload()
+
+        var modelParams = llama_model_default_params()
+        modelParams.n_gpu_layers = configuration.gpuLayerCount
+        modelParams.use_mmap = configuration.useMemoryMap
+
+        guard let loadedModel = path.withCString({ cPath in
+            llama_model_load_from_file(cPath, modelParams)
+        }) else {
+            throw LLMEngineError.modelLoadFailed("llama_model_load_from_file returned null")
+        }
+
+        let trainingContext = Int(llama_model_n_ctx_train(loadedModel))
+        let chosenContext = Self.clampedContextSize(
+            requestedContext: requestedContext,
+            trainingContext: trainingContext
+        )
+
+        var contextParams = llama_context_default_params()
+        contextParams.n_ctx = UInt32(chosenContext)
+        contextParams.n_batch = UInt32(min(chosenContext, max(1, configuration.batchSizeLimit)))
+
+        let threads = configuration.threadCount
+            ?? Int32(max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
+        contextParams.n_threads = threads
+        contextParams.n_threads_batch = threads
+
+        guard let loadedContext = llama_init_from_model(loadedModel, contextParams) else {
+            llama_model_free(loadedModel)
+            throw LLMEngineError.contextInitFailed("llama_init_from_model returned null")
+        }
+
+        guard let loadedVocabulary = llama_model_get_vocab(loadedModel) else {
+            llama_free(loadedContext)
+            llama_model_free(loadedModel)
+            throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
+        }
+        let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
+        let info = LlamaLoadedModelInfo(
+            modelID: descriptor.id,
+            modelPath: path,
+            displayName: descriptor.displayName,
+            filename: descriptor.filename,
+            contextSize: chosenContext,
+            trainingContextSize: max(0, trainingContext),
+            hasEmbeddedChatTemplate: template != nil
+        )
+
+        self.model = loadedModel
+        self.context = loadedContext
+        self.vocabulary = loadedVocabulary
+        self.loadedDescriptor = descriptor
+        self.loadedInfo = info
+        self.chatTemplate = template
+
+        return info
+    }
+
+    public func unload() {
+        if let context { llama_free(context) }
+        if let model { llama_model_free(model) }
+
+        self.model = nil
+        self.context = nil
+        self.vocabulary = nil
+        self.loadedDescriptor = nil
+        self.loadedInfo = nil
+        self.chatTemplate = nil
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        guard let context, let vocabulary else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        onEvent(.requestSent)
+        let startedAt = Date()
+
+        llama_memory_clear(llama_get_memory(context), false)
+
+        var templateMode: LLMChatTemplateMode = .unavailable
+        var promptTokenCount = 0
+        var generatedTokenCount = 0
+        var stopReason = "cancelled"
+        var emittedStats = false
+
+        defer {
+            if !emittedStats {
+                onEvent(.generationStats(
+                    promptTokens: promptTokenCount,
+                    generatedTokens: generatedTokenCount,
+                    stopReason: stopReason,
+                    templateMode: templateMode
+                ))
+            }
+        }
+
+        let renderedPrompt: String
+        do {
+            (renderedPrompt, templateMode) = try applyChatTemplate(system: system, user: prompt)
+        } catch let error as LLMEngineError {
+            if case .chatTemplateUnavailable = error {
+                stopReason = "template-unavailable"
+            }
+            throw error
+        }
+
+        let promptTokens = try tokenize(vocab: vocabulary, text: renderedPrompt, addSpecial: true)
+        promptTokenCount = promptTokens.count
+        guard !promptTokens.isEmpty else {
+            throw LLMEngineError.tokenizationFailed
+        }
+        guard promptTokens.count < currentContextSize() else {
+            throw LLMEngineError.insufficientGenerationBudget(
+                contextSize: currentContextSize(),
+                promptTokens: promptTokens.count,
+                reserve: configuration.promptReserveTokens
+            )
+        }
+
+        let sampler = try buildSampler(options: options, vocab: vocabulary)
+        defer { llama_sampler_free(sampler) }
+
+        let maxBatchSize = max(1, Int(llama_n_batch(context)))
+        for range in Self.prefillRanges(tokenCount: promptTokens.count, maxBatchSize: maxBatchSize) {
+            var chunk = Array(promptTokens[range])
+            try chunk.withUnsafeMutableBufferPointer { buffer in
+                let batch = llama_batch_get_one(buffer.baseAddress, Int32(buffer.count))
+                if llama_decode(context, batch) != 0 {
+                    throw LLMEngineError.decodeFailed
+                }
+            }
+        }
+
+        var accumulatedData = Data()
+        var accumulatedText = ""
+        var sawFirstToken = false
+        var lastHeartbeat = Date()
+        let contextMaxNew = Self.maxGenerationTokens(
+            contextSize: currentContextSize(),
+            promptTokenCount: promptTokens.count,
+            reserve: configuration.promptReserveTokens
+        )
+        let maxNew: Int
+        if let requestedMax = options.maxOutputTokens, requestedMax > 0 {
+            maxNew = min(contextMaxNew, requestedMax)
+        } else {
+            maxNew = contextMaxNew
+        }
+
+        guard maxNew > 0 else {
+            throw LLMEngineError.insufficientGenerationBudget(
+                contextSize: currentContextSize(),
+                promptTokens: promptTokens.count,
+                reserve: configuration.promptReserveTokens
+            )
+        }
+
+        var jsonDepth = 0
+        var jsonInString = false
+        var jsonEscaped = false
+        var jsonStarted = false
+
+        while generatedTokenCount < maxNew {
+            try Task.checkCancellation()
+
+            let next = llama_sampler_sample(sampler, context, -1)
+            if llama_vocab_is_eog(vocabulary, next) {
+                stopReason = "eog"
+                break
+            }
+
+            let piece = tokenToPiece(vocab: vocabulary, token: next)
+            if !piece.isEmpty {
+                accumulatedData.append(piece)
+                if let decoded = String(data: accumulatedData, encoding: .utf8) {
+                    accumulatedText = decoded
+                }
+
+                if let trimmed = Self.trimmingAtFirstStopSequence(
+                    accumulatedText,
+                    stopSequences: options.stopSequences
+                ) {
+                    accumulatedText = trimmed
+                    stopReason = "stop-sequence"
+                }
+
+                if options.stopAtBalancedJSON {
+                    for byte in piece {
+                        if jsonEscaped {
+                            jsonEscaped = false
+                            continue
+                        }
+                        if byte == 0x5C && jsonInString {
+                            jsonEscaped = true
+                            continue
+                        }
+                        if byte == 0x22 {
+                            jsonInString.toggle()
+                            continue
+                        }
+                        if jsonInString { continue }
+                        if byte == 0x7B {
+                            jsonDepth += 1
+                            jsonStarted = true
+                        } else if byte == 0x7D && jsonStarted {
+                            jsonDepth -= 1
+                            if jsonDepth == 0 {
+                                stopReason = "json-complete"
+                            }
+                        }
+                    }
+                }
+
+                if stopReason == "json-complete" || stopReason == "stop-sequence" {
+                    break
+                }
+            }
+
+            if !sawFirstToken {
+                sawFirstToken = true
+                onEvent(.firstByteReceived(after: Date().timeIntervalSince(startedAt)))
+            }
+
+            let now = Date()
+            if now.timeIntervalSince(lastHeartbeat) >= configuration.heartbeatInterval {
+                lastHeartbeat = now
+                onEvent(.tokenChunk(
+                    preview: String(accumulatedText.suffix(60)),
+                    bytesSoFar: accumulatedData.count
+                ))
+            }
+
+            var oneToken: [llama_token] = [next]
+            let decodeResult = oneToken.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                let batch = llama_batch_get_one(buffer.baseAddress, 1)
+                return llama_decode(context, batch)
+            }
+            if decodeResult != 0 {
+                throw LLMEngineError.decodeFailed
+            }
+
+            generatedTokenCount += 1
+        }
+
+        if stopReason == "cancelled" {
+            stopReason = "max-tokens"
+        }
+
+        if accumulatedText.isEmpty, !accumulatedData.isEmpty {
+            accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
+        }
+
+        emittedStats = true
+        onEvent(.generationStats(
+            promptTokens: promptTokens.count,
+            generatedTokens: generatedTokenCount,
+            stopReason: stopReason,
+            templateMode: templateMode
+        ))
+        onEvent(.done(totalBytes: accumulatedData.count, duration: Date().timeIntervalSince(startedAt)))
+        return accumulatedText
+    }
+
+    private enum KnownTemplateFamily {
+        case gemma
+        case chatML
+
+        var mode: LLMChatTemplateMode {
+            switch self {
+            case .gemma:
+                return .gemmaFallback
+            case .chatML:
+                return .chatMLFallback
+            }
+        }
+    }
+
+    private func applyChatTemplate(system: String, user: String) throws -> (text: String, mode: LLMChatTemplateMode) {
+        if let chatTemplate,
+           let formatted = formatMessages(template: chatTemplate, system: system, user: user) {
+            return (formatted, .embedded)
+        }
+
+        return try Self.fallbackPrompt(
+            system: system,
+            user: user,
+            embeddedTemplate: chatTemplate,
+            descriptor: loadedDescriptor
+        )
+    }
+
+    static func fallbackPrompt(
+        system: String,
+        user: String,
+        embeddedTemplate: String?,
+        descriptor: LlamaModelDescriptor?
+    ) throws -> (text: String, mode: LLMChatTemplateMode) {
+        guard let family = inferredTemplateFamily(
+            embeddedTemplate: embeddedTemplate,
+            descriptor: descriptor
+        ) else {
+            throw LLMEngineError.chatTemplateUnavailable(templateUnavailableDescription(
+                embeddedTemplate: embeddedTemplate,
+                descriptor: descriptor
+            ))
+        }
+
+        return (renderFallbackPrompt(system: system, user: user, family: family), family.mode)
+    }
+
+    private static func inferredTemplateFamily(
+        embeddedTemplate: String?,
+        descriptor: LlamaModelDescriptor?
+    ) -> KnownTemplateFamily? {
+        if let embeddedTemplate,
+           let family = templateFamily(from: embeddedTemplate) {
+            return family
+        }
+
+        let probes = [
+            descriptor?.displayName,
+            descriptor?.filename,
+            descriptor?.hfRepo,
+            descriptor?.hfFilename,
+            descriptor?.url.path
+        ]
+        .compactMap { $0?.lowercased() }
+
+        if probes.contains(where: { $0.contains("gemma") }) {
+            return .gemma
+        }
+        if probes.contains(where: { $0.contains("qwen") || $0.contains("chatml") }) {
+            return .chatML
+        }
+        return nil
+    }
+
+    private static func templateFamily(from template: String) -> KnownTemplateFamily? {
+        let lowered = template.lowercased()
+        if lowered.contains("start_of_turn") {
+            return .gemma
+        }
+        if lowered.contains("im_start") {
+            return .chatML
+        }
+        return nil
+    }
+
+    private static func templateUnavailableDescription(
+        embeddedTemplate: String?,
+        descriptor: LlamaModelDescriptor?
+    ) -> String {
+        if let descriptor {
+            return "Model: \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename))."
+        }
+        if embeddedTemplate != nil {
+            return "Embedded template exists but its family is not supported."
+        }
+        return "The GGUF metadata did not expose a known template family."
+    }
+
+    private static func renderFallbackPrompt(
+        system: String,
+        user: String,
+        family: KnownTemplateFamily
+    ) -> String {
+        switch family {
+        case .gemma:
+            return "<start_of_turn>user\n\(system)\n\n\(user)<end_of_turn>\n<start_of_turn>think\n<end_of_turn>\n<start_of_turn>model\n"
+        case .chatML:
+            return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+        }
+    }
+
+    private func formatMessages(template: String, system: String, user: String) -> String? {
+        guard let roleSystem = strdup("system"),
+              let roleUser = strdup("user"),
+              let systemContent = strdup(system),
+              let userContent = strdup(user)
+        else {
+            return nil
+        }
+        defer {
+            free(roleSystem)
+            free(roleUser)
+            free(systemContent)
+            free(userContent)
+        }
+
+        var messages = [
+            llama_chat_message(role: UnsafePointer(roleSystem), content: UnsafePointer(systemContent)),
+            llama_chat_message(role: UnsafePointer(roleUser), content: UnsafePointer(userContent))
+        ]
+
+        var capacity = max(2_048, (system.utf8.count + user.utf8.count) * 2 + 1_024)
+        for _ in 0..<3 {
+            var buffer = [CChar](repeating: 0, count: capacity)
+            let result: Int32 = template.withCString { templatePointer in
+                messages.withUnsafeMutableBufferPointer { messagePointer in
+                    buffer.withUnsafeMutableBufferPointer { bufferPointer in
+                        llama_chat_apply_template(
+                            templatePointer,
+                            messagePointer.baseAddress,
+                            messagePointer.count,
+                            true,
+                            bufferPointer.baseAddress,
+                            Int32(bufferPointer.count)
+                        )
+                    }
+                }
+            }
+
+            if result > 0 && Int(result) <= capacity {
+                return String(cString: buffer)
+            }
+            if result > 0 {
+                capacity = Int(result) + 64
+                continue
+            }
+            break
+        }
+        return nil
+    }
+
+    private func tokenize(vocab: OpaquePointer, text: String, addSpecial: Bool) throws -> [llama_token] {
+        let utf8 = Array(text.utf8CString)
+        let characterCount = Int32(utf8.count - 1)
+
+        var probe = [llama_token](repeating: 0, count: max(8, Int(characterCount)))
+        let probeCount = utf8.withUnsafeBufferPointer { cBuffer in
+            probe.withUnsafeMutableBufferPointer { tokenBuffer in
+                llama_tokenize(
+                    vocab,
+                    cBuffer.baseAddress,
+                    characterCount,
+                    tokenBuffer.baseAddress,
+                    Int32(tokenBuffer.count),
+                    addSpecial,
+                    true
+                )
+            }
+        }
+
+        if probeCount >= 0 {
+            return Array(probe.prefix(Int(probeCount)))
+        }
+
+        let neededCount = Int(-probeCount)
+        var tokens = [llama_token](repeating: 0, count: neededCount)
+        let tokenCount = utf8.withUnsafeBufferPointer { cBuffer in
+            tokens.withUnsafeMutableBufferPointer { tokenBuffer in
+                llama_tokenize(
+                    vocab,
+                    cBuffer.baseAddress,
+                    characterCount,
+                    tokenBuffer.baseAddress,
+                    Int32(tokenBuffer.count),
+                    addSpecial,
+                    true
+                )
+            }
+        }
+
+        guard tokenCount > 0 else {
+            throw LLMEngineError.tokenizationFailed
+        }
+        return Array(tokens.prefix(Int(tokenCount)))
+    }
+
+    private func tokenToPiece(vocab: OpaquePointer, token: llama_token) -> Data {
+        var probe = [CChar](repeating: 0, count: 32)
+        let probeCount = probe.withUnsafeMutableBufferPointer { buffer in
+            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, false)
+        }
+
+        if probeCount >= 0 {
+            return probe.withUnsafeBytes { rawBuffer in
+                Data(rawBuffer.prefix(Int(probeCount)))
+            }
+        }
+
+        let neededCount = Int(-probeCount)
+        var bytes = [CChar](repeating: 0, count: neededCount)
+        let byteCount = bytes.withUnsafeMutableBufferPointer { buffer in
+            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, false)
+        }
+
+        guard byteCount > 0 else {
+            return Data()
+        }
+        return bytes.withUnsafeBytes { rawBuffer in
+            Data(rawBuffer.prefix(Int(byteCount)))
+        }
+    }
+
+    private static let penaltyLastN: Int32 = 16
+    private static let penaltyRepeat: Float = 1.3
+
+    private func buildSampler(
+        options: GenerationOptions,
+        vocab: OpaquePointer
+    ) throws -> UnsafeMutablePointer<llama_sampler> {
+        let params = llama_sampler_chain_default_params()
+        guard let chain = llama_sampler_chain_init(params) else {
+            throw LLMEngineError.samplerInitFailed
+        }
+
+        llama_sampler_chain_add(
+            chain,
+            llama_sampler_init_penalties(Self.penaltyLastN, Self.penaltyRepeat, 0.0, 0.0)
+        )
+
+        if let grammar = options.grammar {
+            let grammarSampler: UnsafeMutablePointer<llama_sampler>? = grammar.withCString { grammarPointer in
+                "root".withCString { rootPointer in
+                    llama_sampler_init_grammar(vocab, grammarPointer, rootPointer)
+                }
+            }
+            guard let grammarSampler else {
+                llama_sampler_free(chain)
+                throw LLMEngineError.grammarParseFailed
+            }
+            llama_sampler_chain_add(chain, grammarSampler)
+        }
+
+        let temperature = Float(options.temperature ?? 0)
+        if temperature <= 0 {
+            llama_sampler_chain_add(chain, llama_sampler_init_greedy())
+        } else {
+            if let topK = options.topK, topK > 0 {
+                llama_sampler_chain_add(chain, llama_sampler_init_top_k(Int32(topK)))
+            }
+            if let topP = options.topP {
+                llama_sampler_chain_add(chain, llama_sampler_init_top_p(Float(topP), 1))
+            }
+            llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
+            let seed = options.seed ?? UInt32.random(in: 1...UInt32.max)
+            llama_sampler_chain_add(chain, llama_sampler_init_dist(seed))
+        }
+
+        return chain
+    }
+
+    static func trimmingAtFirstStopSequence(
+        _ text: String,
+        stopSequences: [String]
+    ) -> String? {
+        let matches = stopSequences
+            .filter { !$0.isEmpty }
+            .compactMap { sequence -> Range<String.Index>? in
+                text.range(of: sequence)
+            }
+
+        guard let earliest = matches.min(by: { $0.lowerBound < $1.lowerBound }) else {
+            return nil
+        }
+        return String(text[..<earliest.lowerBound])
+    }
+
+    static func prefillRanges(tokenCount: Int, maxBatchSize: Int) -> [Range<Int>] {
+        guard tokenCount > 0, maxBatchSize > 0 else { return [] }
+
+        var ranges: [Range<Int>] = []
+        var start = 0
+        while start < tokenCount {
+            let end = min(start + maxBatchSize, tokenCount)
+            ranges.append(start..<end)
+            start = end
+        }
+        return ranges
+    }
+
+    static func maxGenerationTokens(contextSize: Int, promptTokenCount: Int, reserve: Int) -> Int {
+        max(0, contextSize - promptTokenCount - reserve)
+    }
+
+    static func clampedContextSize(requestedContext: Int, trainingContext: Int) -> Int {
+        let normalizedTrainingContext = max(0, trainingContext)
+        let requested = requestedContext > 0
+            ? requestedContext
+            : (normalizedTrainingContext > 0 ? normalizedTrainingContext : LlamaContextPolicy.unknownTrainingFallback)
+        let upperBound = normalizedTrainingContext > 0 ? normalizedTrainingContext : requested
+        return max(LlamaContextPolicy.minimumContext, min(requested, upperBound))
+    }
+}

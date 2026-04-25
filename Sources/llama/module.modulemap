@@ -1,0 +1,13 @@
+module llama [system] {
+  header "../../Vendor/llama-artifacts/current/include/llama.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-alloc.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-backend.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-blas.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-cpu.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-metal.h"
+  header "../../Vendor/llama-artifacts/current/include/ggml-opt.h"
+  header "../../Vendor/llama-artifacts/current/include/gguf.h"
+  link "c++"
+  export *
+}

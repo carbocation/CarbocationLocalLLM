@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+DerivedData/
+Vendor/llama-artifacts/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+.DS_Store
