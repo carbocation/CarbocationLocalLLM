@@ -91,7 +91,7 @@ Host apps should depend on the package targets they need:
 - Use `CarbocationLocalLLMUI` when the app wants the standard shared model-management UI.
 - Use `CarbocationLlamaRuntime` when the app needs real llama.cpp generation.
 
-The shared UI should be embedded as a configurable component. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list for their workload.
+The shared UI should be embedded as a configurable component. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list for their workload. Apps can also pass `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
 
 Host apps should still own:
 

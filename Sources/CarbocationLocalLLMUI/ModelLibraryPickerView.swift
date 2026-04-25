@@ -11,6 +11,7 @@ public struct ModelLibraryPickerView: View {
     private let confirmTitle: String
     private let confirmDisabled: Bool
     private let curatedModels: [CuratedModel]
+    private let onModelDeleted: @MainActor (InstalledModel) -> Void
     private let onConfirm: @MainActor (InstalledModel) -> Void
 
     @State private var activeDownload: ModelLibraryDownload?
@@ -27,6 +28,7 @@ public struct ModelLibraryPickerView: View {
         confirmTitle: String = "Use Selected Model",
         confirmDisabled: Bool = false,
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
         self.library = library
@@ -35,6 +37,7 @@ public struct ModelLibraryPickerView: View {
         self.confirmTitle = confirmTitle
         self.confirmDisabled = confirmDisabled
         self.curatedModels = curatedModels
+        self.onModelDeleted = onModelDeleted
         self.onConfirm = onConfirm
     }
 
@@ -477,6 +480,7 @@ public struct ModelLibraryPickerView: View {
                 selectedModelID = library.models.first?.id.uuidString ?? ""
             }
             refresh()
+            onModelDeleted(model)
         } catch {
             downloadError = error.localizedDescription
         }
