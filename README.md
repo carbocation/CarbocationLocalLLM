@@ -7,7 +7,7 @@ This package provides neutral model storage, model library management, llama.cpp
 ## Targets
 
 - `CarbocationLocalLLM`: pure Swift core types and services.
-  Includes `InstalledModel`, `ModelLibrary`, `ModelDownloader`, `CuratedModelCatalog`, `GenerationOptions`, `LlamaContextPolicy`, `LLMEngine`, response sanitizing, JSON salvage, and shared helpers. Model downloads use resumable partials, parallel ranged chunks when the server supports them, and single-stream resume fallback otherwise.
+  Includes `InstalledModel`, `ModelLibrary`, `ModelDownloader`, `CuratedModelCatalog`, `GenerationOptions`, `LlamaContextPolicy`, `LLMEngine`, response sanitizing, JSON salvage, and shared helpers. Model downloads use resumable partials, 12-way parallel ranged chunks by default when the server supports them, and single-stream resume fallback otherwise.
 - `CarbocationLlamaRuntime`: llama.cpp-backed runtime.
   Includes `LlamaEngine`, model/context loading, chat-template fallback handling, grammar-aware generation, streaming events, cancellation, and model probing.
 - `CarbocationLocalLLMUI`: shared SwiftUI model-library UI.
@@ -50,7 +50,7 @@ swift test
 Expected current baseline:
 
 ```text
-23 tests, 0 failures
+24 tests, 0 failures
 ```
 
 ## Smoke Test In Xcode

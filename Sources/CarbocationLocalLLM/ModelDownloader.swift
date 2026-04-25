@@ -99,6 +99,31 @@ public struct ModelDownloadResult: Sendable, Hashable {
     }
 }
 
+public struct ModelDownloadConfiguration: Sendable, Hashable {
+    public static let defaultChunkSize: Int64 = 16 * 1_024 * 1_024
+    public static let defaultParallelConnections = 12
+    public static let maximumParallelConnections = 32
+
+    public var parallelConnections: Int
+    public var chunkSize: Int64
+    public var requestTimeout: TimeInterval
+
+    public init(
+        parallelConnections: Int = Self.defaultParallelConnections,
+        chunkSize: Int64 = Self.defaultChunkSize,
+        requestTimeout: TimeInterval = 3_600
+    ) {
+        self.parallelConnections = min(
+            max(1, parallelConnections),
+            Self.maximumParallelConnections
+        )
+        self.chunkSize = max(1_024 * 1_024, chunkSize)
+        self.requestTimeout = max(30, requestTimeout)
+    }
+
+    public static let `default` = ModelDownloadConfiguration()
+}
+
 private struct PartialSidecar: Codable, Sendable {
     var url: String
     var etag: String?
@@ -128,7 +153,7 @@ struct ChunkRange: Sendable, Hashable {
 }
 
 struct ChunkPlan: Sendable, Hashable {
-    static let defaultChunkSize: Int64 = 16 * 1_024 * 1_024
+    static let defaultChunkSize: Int64 = ModelDownloadConfiguration.defaultChunkSize
 
     let totalBytes: Int64
     let chunkSize: Int64
@@ -275,7 +300,6 @@ private actor ProgressTracker {
 
 public enum ModelDownloader {
     private static let currentPartialPrefix = "cllm-partial-"
-    private static let parallelConnections = 4
     private static let userAgent = "CarbocationLocalLLM/1.0"
 
     public static func huggingFaceResolveURL(hfRepo: String, hfFilename: String) throws -> URL {
@@ -292,6 +316,7 @@ public enum ModelDownloader {
         modelsRoot: URL,
         displayName: String? = nil,
         expectedSHA256: String? = nil,
+        configuration: ModelDownloadConfiguration = .default,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
     ) async throws -> ModelDownloadResult {
         try await download(
@@ -299,6 +324,7 @@ public enum ModelDownloader {
             modelsRoot: modelsRoot,
             displayName: displayName,
             expectedSHA256: expectedSHA256,
+            configuration: configuration,
             onProgress: onProgress
         )
     }
@@ -311,6 +337,7 @@ public enum ModelDownloader {
         modelsRoot: URL,
         displayName: String? = nil,
         expectedSHA256: String? = nil,
+        configuration: ModelDownloadConfiguration = .default,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
     ) async throws -> ModelDownloadResult {
         let (partialURL, sidecarURL) = try partialPaths(for: url, modelsRoot: modelsRoot)
@@ -336,6 +363,7 @@ public enum ModelDownloader {
                 sidecarURL: sidecarURL,
                 plan: plan,
                 sidecar: updatedSidecar,
+                configuration: configuration,
                 expectedSHA256: expectedSHA256,
                 onProgress: onProgress
             )
@@ -366,7 +394,7 @@ public enum ModelDownloader {
         var doneChunks = Set<Int>()
         if let legacy {
             if legacy.totalBytes == totalBytes {
-                let fullChunks = legacy.existingSize / ChunkPlan.defaultChunkSize
+                let fullChunks = legacy.existingSize / configuration.chunkSize
                 for index in 0..<Int(fullChunks) {
                     doneChunks.insert(index)
                 }
@@ -376,7 +404,11 @@ public enum ModelDownloader {
             }
         }
 
-        let plan = ChunkPlan(totalBytes: totalBytes, doneChunks: doneChunks)
+        let plan = ChunkPlan(
+            totalBytes: totalBytes,
+            chunkSize: configuration.chunkSize,
+            doneChunks: doneChunks
+        )
         let sidecar = PartialSidecar(
             url: url.absoluteString,
             etag: probe.etag,
@@ -384,7 +416,7 @@ public enum ModelDownloader {
             totalBytes: totalBytes,
             displayName: displayName,
             schemaVersion: 2,
-            chunkSize: ChunkPlan.defaultChunkSize,
+            chunkSize: configuration.chunkSize,
             doneChunks: Array(doneChunks).sorted()
         )
 
@@ -398,7 +430,7 @@ public enum ModelDownloader {
         writeSidecarValue(sidecar, to: sidecarURL)
 
         modelDownloaderLog.info(
-            "Starting parallel download \(url.lastPathComponent, privacy: .public) (\(totalBytes) bytes, \(plan.chunkCount) chunks, \(parallelConnections) connections)"
+            "Starting parallel download \(url.lastPathComponent, privacy: .public) (\(totalBytes) bytes, \(plan.chunkCount) chunks, \(configuration.parallelConnections) connections)"
         )
 
         return try await downloadParallel(
@@ -407,6 +439,7 @@ public enum ModelDownloader {
             sidecarURL: sidecarURL,
             plan: plan,
             sidecar: sidecar,
+            configuration: configuration,
             expectedSHA256: expectedSHA256,
             onProgress: onProgress
         )
@@ -476,6 +509,7 @@ public enum ModelDownloader {
         sidecarURL: URL,
         plan: ChunkPlan,
         sidecar: PartialSidecar,
+        configuration: ModelDownloadConfiguration,
         expectedSHA256: String?,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void
     ) async throws -> ModelDownloadResult {
@@ -489,10 +523,12 @@ public enum ModelDownloader {
         let tracker = ProgressTracker(alreadyHad: alreadyHad, totalBytes: plan.totalBytes)
         let writer = try FileWriter(url: partialURL)
         let validator = sidecar.etag ?? sidecar.lastModified
+        let session = makeURLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<parallelConnections {
+                for _ in 0..<configuration.parallelConnections {
                     group.addTask {
                         while let chunk = await queue.nextChunk() {
                             try Task.checkCancellation()
@@ -500,6 +536,8 @@ public enum ModelDownloader {
                                 chunk: chunk,
                                 from: url,
                                 validator: validator,
+                                session: session,
+                                requestTimeout: configuration.requestTimeout,
                                 writer: writer,
                                 queue: queue,
                                 tracker: tracker,
@@ -553,6 +591,8 @@ public enum ModelDownloader {
         chunk: ChunkRange,
         from url: URL,
         validator: String?,
+        session: URLSession,
+        requestTimeout: TimeInterval,
         writer: FileWriter,
         queue: ChunkWorkQueue,
         tracker: ProgressTracker,
@@ -564,46 +604,36 @@ public enum ModelDownloader {
         if let validator {
             request.setValue(validator, forHTTPHeaderField: "If-Range")
         }
-        request.timeoutInterval = 3_600
+        request.timeoutInterval = requestTimeout
 
-        let (stream, response) = try await URLSession.shared.bytes(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw ModelDownloaderError.httpStatus(-1)
         }
         guard http.statusCode == 206 else {
             throw ModelDownloaderError.httpStatus(http.statusCode)
         }
+        try Task.checkCancellation()
 
-        var offset = chunk.start
-        var buffer: [UInt8] = []
-        buffer.reserveCapacity(1 << 20)
-
-        for try await byte in stream {
-            try Task.checkCancellation()
-            buffer.append(byte)
-            if buffer.count >= (1 << 20) {
-                let data = Data(buffer)
-                try await writer.write(data, at: offset)
-                await tracker.add(Int64(data.count), forChunk: chunk.index)
-                await tracker.maybeEmit(onProgress)
-                offset += Int64(data.count)
-                buffer.removeAll(keepingCapacity: true)
-            }
-        }
-
-        if !buffer.isEmpty {
-            let data = Data(buffer)
-            try await writer.write(data, at: offset)
-            await tracker.add(Int64(data.count), forChunk: chunk.index)
-            offset += Int64(data.count)
-        }
-
-        guard offset == chunk.end + 1 else {
+        guard Int64(data.count) == chunk.length else {
             throw ModelDownloaderError.incompleteResponse
         }
 
+        try await writer.write(data, at: chunk.start)
+        await tracker.add(Int64(data.count), forChunk: chunk.index)
         await queue.markDone(chunk.index)
         await tracker.maybeEmit(onProgress)
+    }
+
+    private static func makeURLSession(configuration: ModelDownloadConfiguration) -> URLSession {
+        let urlSessionConfiguration = URLSessionConfiguration.default
+        urlSessionConfiguration.httpMaximumConnectionsPerHost = configuration.parallelConnections
+        urlSessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        urlSessionConfiguration.timeoutIntervalForRequest = configuration.requestTimeout
+        urlSessionConfiguration.timeoutIntervalForResource = configuration.requestTimeout
+        urlSessionConfiguration.urlCache = nil
+        urlSessionConfiguration.waitsForConnectivity = true
+        return URLSession(configuration: urlSessionConfiguration)
     }
 
     private struct ProbeResult: Sendable {

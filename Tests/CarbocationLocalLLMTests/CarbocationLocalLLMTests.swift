@@ -140,6 +140,24 @@ final class CarbocationLocalLLMTests: XCTestCase {
         ])
     }
 
+    func testModelDownloadConfigurationNormalizesUnsafeValues() {
+        let defaults = ModelDownloadConfiguration.default
+        XCTAssertEqual(defaults.parallelConnections, 12)
+        XCTAssertEqual(defaults.chunkSize, 16 * 1_024 * 1_024)
+
+        let normalized = ModelDownloadConfiguration(
+            parallelConnections: 100,
+            chunkSize: 128,
+            requestTimeout: 1
+        )
+        XCTAssertEqual(
+            normalized.parallelConnections,
+            ModelDownloadConfiguration.maximumParallelConnections
+        )
+        XCTAssertEqual(normalized.chunkSize, 1_024 * 1_024)
+        XCTAssertEqual(normalized.requestTimeout, 30)
+    }
+
     func testListPartialsUsesDoneChunksForPreallocatedChunkedFiles() throws {
         let root = try makeTemporaryDirectory()
         let partialsRoot = try ModelDownloader.partialsDirectory(in: root)
