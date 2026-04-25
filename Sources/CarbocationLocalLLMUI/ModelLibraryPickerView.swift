@@ -4,6 +4,7 @@ import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
 public struct ModelLibraryPickerView: View {
     private let library: ModelLibrary
     @Binding private var selectedModelID: String
