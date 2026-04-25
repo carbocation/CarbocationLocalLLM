@@ -4,21 +4,41 @@ Shared local-LLM infrastructure for Carbocation macOS apps.
 
 This package provides neutral model storage, model library management, llama.cpp runtime access, shared SwiftUI model-management UI, and a smoke-test app. Host apps should keep app-specific prompting, settings policy, migrations, onboarding, and workflows in the host app.
 
-## Users
+## Consuming Apps
 
-Use a tagged release unless you are actively developing this library. Tagged releases are intended to resolve the llama runtime through a published SwiftPM binary artifact, so consuming apps do not need a sibling checkout or a local llama.cpp build.
+Use a tagged release for normal app integration. A release tag points SwiftPM at a published `llama.xcframework.zip` asset, so the host app does not need a sibling checkout, a llama.cpp submodule, or a build script for the llama runtime.
 
-### Add The Package
+A GitHub release does not replace the Swift package dependency. The host app still adds `CarbocationLocalLLM` by Git URL and selects a release version; Xcode/SwiftPM then reads that tag's `Package.swift` and downloads the binary artifact automatically.
 
-Add the package by Git URL in Xcode or SwiftPM:
+Current public release: [`v0.1.0`](https://github.com/carbocation/CarbocationLocalLLM/releases/tag/v0.1.0).
+
+### Add The Release In Xcode
+
+1. Open the host macOS app project in Xcode.
+2. Choose `File > Add Package Dependencies...`.
+3. Paste the package URL:
 
 ```text
 https://github.com/carbocation/CarbocationLocalLLM.git
 ```
 
-Select a release tag such as `vX.Y.Z`. Do not depend on `main` for normal app integration; `main` stays source-build friendly for library development.
+4. Choose release `0.1.0` / tag `v0.1.0`.
+   Prefer `Exact Version` while integrating, or `Up to Next Major Version` once the app has a tested upgrade policy.
+5. Add the package products to the app target that will use them.
 
-Host app source should only use Swift module and product names:
+Do not choose a branch rule for `main` for a shipping app. `main` stays source-build friendly for library development, while release tags are the path that should resolve the llama runtime through the binary artifact.
+
+Do not download or drag `llama.xcframework` into the app project manually. The release asset is referenced by the package manifest and is fetched by SwiftPM during package resolution.
+
+### Pick Products
+
+- `CarbocationLocalLLM`: core model-library types, selected-model state, context policy, generation options, JSON helpers, download/import support, and fake-engine testing helpers.
+- `CarbocationLocalLLMUI`: shared SwiftUI model-library UI for installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted downloads, delete, refresh, and reveal folder.
+- `CarbocationLlamaRuntime`: llama.cpp-backed generation, model/context loading, model probing, chat-template fallback handling, grammar-aware generation, streaming events, and cancellation.
+
+Most apps that provide real local generation should add all three products to the app target. Apps that only need shared model storage or metadata can use `CarbocationLocalLLM` alone.
+
+Host app source should import module names only:
 
 ```swift
 import CarbocationLocalLLM
@@ -26,16 +46,103 @@ import CarbocationLocalLLMUI
 import CarbocationLlamaRuntime
 ```
 
-Filesystem paths such as `../CarbocationLocalLLM` should not appear in app source.
+Filesystem paths such as `../CarbocationLocalLLM` should not appear in app source or Xcode package dependencies for the binary-release path.
 
-### Pick Products
+### What Xcode Should Build
 
-- `CarbocationLocalLLM`: pure Swift core types and services.
-  Use this for model library state, selected-model preferences, generation options, context policy, curated model metadata, fake-engine tests, response sanitizing, JSON salvage, and shared helpers.
-- `CarbocationLocalLLMUI`: shared SwiftUI model-library UI.
-  Use this when the app wants standard model selection, installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted download handling, delete, refresh, and reveal folder.
-- `CarbocationLlamaRuntime`: llama.cpp-backed runtime.
-  Use this when the app needs real local generation, model/context loading, chat-template fallback handling, grammar-aware generation, streaming events, cancellation, or model probing.
+For a release tag, Xcode should:
+
+1. Resolve `CarbocationLocalLLM` from GitHub.
+2. Download `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`.
+3. Link the selected products into the host app target.
+4. Build the app normally.
+
+The host app should not add `Scripts/build-llama-from-xcode.sh`, initialize `Vendor/llama.cpp`, set `CARBOCATION_LOCAL_LLM_ROOT`, or prebuild `Vendor/llama-artifacts/current`. Those steps are only for local package development or temporary adjacent-checkout migration work.
+
+The binary artifact is a static XCFramework. SwiftPM handles the package link step, and `CarbocationLlamaRuntime` declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
+
+### Minimal Host-App Wiring
+
+Create a single model library for the app and use the runtime probe when you want imported models to record their training context:
+
+```swift
+import CarbocationLocalLLM
+import CarbocationLlamaRuntime
+
+@MainActor
+let modelLibrary = ModelLibrary(
+    root: ModelStorage.modelsDirectory(
+        sharedGroupIdentifier: ModelStorage.defaultSharedGroupID,
+        appSupportFolderName: "YourAppName"
+    ),
+    contextLengthProbe: { url in
+        LlamaEngine.probeTrainingContext(at: url)
+    }
+)
+```
+
+Add the shared picker wherever the app lets the user choose, download, import, or delete models:
+
+```swift
+import CarbocationLocalLLM
+import CarbocationLocalLLMUI
+import CarbocationLlamaRuntime
+import SwiftUI
+
+struct LocalModelSettingsView: View {
+    let library: ModelLibrary
+    @AppStorage("SelectedLocalModelID") private var selectedModelID = ""
+
+    var body: some View {
+        ModelLibraryPickerView(
+            library: library,
+            selectedModelID: $selectedModelID,
+            onModelDeleted: { deleted in
+                Task {
+                    if await LlamaEngine.shared.currentModelID() == deleted.id {
+                        await LlamaEngine.shared.unload()
+                    }
+                }
+            },
+            onConfirm: { model in
+                selectedModelID = model.id.uuidString
+            }
+        )
+    }
+}
+```
+
+Before generation, load the selected model and resolve the requested context through the shared policy helpers:
+
+```swift
+guard let model = modelLibrary.model(id: selectedModelID) else {
+    return
+}
+
+let requestedContext = LlamaContextPolicy.resolvedRequestedContext(for: model)
+let engine = LlamaEngine.shared
+
+try await engine.load(
+    model: model,
+    from: modelLibrary.root,
+    requestedContext: requestedContext
+)
+
+let response = try await engine.generate(
+    system: "You are a concise assistant.",
+    prompt: userPrompt,
+    options: .extractionSafe
+) { event in
+    // Update host-app progress UI if desired.
+}
+```
+
+### Xcode Target Settings
+
+- Minimum deployment target: macOS 14.
+- App Sandbox network client entitlement: required if the app downloads models from Hugging Face or another remote URL.
+- App Group entitlement: required only if the app wants shared model storage through `ModelStorage.defaultSharedGroupID` or another shared group. Without a usable App Group container, `ModelStorage.modelsDirectory` falls back to the app's Application Support folder.
+- Model files: `.gguf` weights are user data, not part of the Swift package. Let the app download/import them into the model library instead of bundling large model files into the app binary.
 
 ### Host-App Responsibilities
 
@@ -52,25 +159,15 @@ This library deliberately avoids owning app policy. Host apps should still own:
 
 `ModelLibraryPickerView` is configurable. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list. Apps can also pass `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
 
-### Binary Release Path
-
-The preferred consumer path is:
-
-1. Depend on a release tag.
-2. Link the products your app needs.
-3. Build normally in Xcode.
-
-No llama build script should be required by consuming apps when the selected tag contains a published binary artifact URL/checksum in `Package.swift`.
-
 ### Temporary Adjacent-Checkout Path
 
-For active migration work, a host app can use a local package reference to a sibling checkout:
+For active library development or migration work, a host app can temporarily use a local package reference to a sibling checkout:
 
 ```text
 ../CarbocationLocalLLM
 ```
 
-Treat this as development wiring only. It is riskier than the binary release path because the app build must generate this package's ignored llama artifacts before Xcode compiles `CarbocationLlamaRuntime`.
+Treat this as development wiring only. It is not the release-consumer path. It is riskier because the app build must generate this package's ignored llama artifacts before Xcode compiles `CarbocationLlamaRuntime`.
 
 For that temporary setup:
 
