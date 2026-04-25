@@ -118,3 +118,18 @@ jobs:
             --title "$TITLE" \
             --notes-file release-notes.md \
             $PRERELEASE_FLAG
+
+      - name: Validate published binary release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if Scripts/test-binary-release.sh "${{ steps.artifact.outputs.tag }}"; then
+              exit 0
+            fi
+
+            echo "release smoke failed on attempt $attempt; retrying after release asset propagation delay"
+            sleep 10
+          done
+
+          echo "release smoke failed after retries" >&2
+          exit 1

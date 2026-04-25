@@ -2,20 +2,107 @@
 
 Shared local-LLM infrastructure for Carbocation macOS apps.
 
-This package provides neutral model storage, model library management, llama.cpp runtime access, shared SwiftUI model-management UI, and a smoke-test app. App-specific prompting, settings policy, migrations, and workflows should stay in the host apps.
+This package provides neutral model storage, model library management, llama.cpp runtime access, shared SwiftUI model-management UI, and a smoke-test app. Host apps should keep app-specific prompting, settings policy, migrations, onboarding, and workflows in the host app.
 
-## Targets
+## Users
+
+Use a tagged release unless you are actively developing this library. Tagged releases are intended to resolve the llama runtime through a published SwiftPM binary artifact, so consuming apps do not need a sibling checkout or a local llama.cpp build.
+
+### Add The Package
+
+Add the package by Git URL in Xcode or SwiftPM:
+
+```text
+https://github.com/carbocation/CarbocationLocalLLM.git
+```
+
+Select a release tag such as `vX.Y.Z`. Do not depend on `main` for normal app integration; `main` stays source-build friendly for library development.
+
+Host app source should only use Swift module and product names:
+
+```swift
+import CarbocationLocalLLM
+import CarbocationLocalLLMUI
+import CarbocationLlamaRuntime
+```
+
+Filesystem paths such as `../CarbocationLocalLLM` should not appear in app source.
+
+### Pick Products
 
 - `CarbocationLocalLLM`: pure Swift core types and services.
-  Includes `InstalledModel`, `ModelLibrary`, `ModelDownloader`, `CuratedModelCatalog`, `GenerationOptions`, `LlamaContextPolicy`, `LLMEngine`, response sanitizing, JSON salvage, and shared helpers. Model downloads use resumable partials, 12-way parallel ranged chunks by default when the server supports them, and single-stream resume fallback otherwise.
-- `CarbocationLlamaRuntime`: llama.cpp-backed runtime.
-  Includes `LlamaEngine`, model/context loading, chat-template fallback handling, grammar-aware generation, streaming events, cancellation, and model probing.
+  Use this for model library state, selected-model preferences, generation options, context policy, curated model metadata, fake-engine tests, response sanitizing, JSON salvage, and shared helpers.
 - `CarbocationLocalLLMUI`: shared SwiftUI model-library UI.
-  Includes model selection, installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted download handling, delete, refresh, and reveal folder.
-- `CLLMSmoke`: Xcode-friendly smoke app.
-  Embeds the shared model-library UI, lets you select an installed model, and runs a tiny grammar-constrained generation test.
+  Use this when the app wants standard model selection, installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted download handling, delete, refresh, and reveal folder.
+- `CarbocationLlamaRuntime`: llama.cpp-backed runtime.
+  Use this when the app needs real local generation, model/context loading, chat-template fallback handling, grammar-aware generation, streaming events, cancellation, or model probing.
 
-## Fresh Checkout Setup
+### Host-App Responsibilities
+
+This library deliberately avoids owning app policy. Host apps should still own:
+
+- selected-model preference key
+- app-specific curated-model list, when the shared default is not the right fit
+- app-specific onboarding/settings copy
+- context cap defaults
+- generation settings UI
+- app-specific prompts, grammars, and operations
+- active-engine unload policy after deletion
+- migrations and invalid-selection warnings
+
+`ModelLibraryPickerView` is configurable. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list. Apps can also pass `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
+
+### Binary Release Path
+
+The preferred consumer path is:
+
+1. Depend on a release tag.
+2. Link the products your app needs.
+3. Build normally in Xcode.
+
+No llama build script should be required by consuming apps when the selected tag contains a published binary artifact URL/checksum in `Package.swift`.
+
+### Temporary Adjacent-Checkout Path
+
+For active migration work, a host app can use a local package reference to a sibling checkout:
+
+```text
+../CarbocationLocalLLM
+```
+
+Treat this as development wiring only. It is riskier than the binary release path because the app build must generate this package's ignored llama artifacts before Xcode compiles `CarbocationLlamaRuntime`.
+
+For that temporary setup:
+
+1. Copy this package's `Scripts/build-llama-from-xcode.sh` into the host app, for example as `Scripts/build-carbocation-llama.sh`.
+2. Add a scheme Build Pre-action or CI prebuild step that runs:
+
+```sh
+"$SRCROOT/Scripts/build-carbocation-llama.sh"
+```
+
+3. For a scheme Build Pre-action, set "Provide build settings from" to the host app target so `SRCROOT`, `BUILD_DIR`, and related Xcode paths are available.
+4. Prefer setting `CARBOCATION_LOCAL_LLM_ROOT` to the package checkout path. The resolver also has a temporary `../CarbocationLocalLLM` fallback for Carbocation app migrations.
+
+An app-target Run Script phase is only sufficient if your Xcode build graph runs it before Swift package dependency compilation. Scheme pre-actions and CI prebuild steps are safer.
+
+## Developers
+
+Use this section when you are modifying `CarbocationLocalLLM` itself.
+
+### Package Layout
+
+- `Sources/CarbocationLocalLLM`: core Swift services and shared types.
+- `Sources/CarbocationLocalLLMUI`: shared SwiftUI model-library UI.
+- `Sources/CarbocationLlamaRuntime`: llama.cpp-backed runtime.
+- `Sources/CLLMSmoke`: Xcode-friendly smoke app.
+- `Sources/llama`: source-build module map for generated llama headers.
+- `Scripts/build-llama-macos.sh`: local llama.cpp source build.
+- `Scripts/build-llama-xcframework.sh`: binary artifact packager.
+- `Scripts/set-llama-binary-artifact.sh`: release manifest stamper.
+- `Scripts/test-binary-release.sh`: clean downstream release smoke test.
+
+### Fresh Checkout
 
 Initialize llama.cpp:
 
@@ -23,7 +110,7 @@ Initialize llama.cpp:
 git submodule update --init --recursive
 ```
 
-Build llama.cpp artifacts:
+Build local llama artifacts:
 
 ```sh
 ARCHS=arm64 Scripts/build-llama-macos.sh
@@ -35,11 +122,11 @@ The script writes generated headers and the combined static library under:
 Vendor/llama-artifacts/current
 ```
 
-`Vendor/llama-artifacts/` is intentionally ignored by git. The script uses a build lock so multiple app builds do not corrupt the shared artifacts.
+`Vendor/llama-artifacts/` is intentionally ignored by git. The script uses a build lock so concurrent app builds do not corrupt shared artifacts.
 
 For CI or a universal local build, omit `ARCHS=arm64`; the script defaults to `arm64 x86_64`.
 
-## Verify
+### Test
 
 Run the package tests:
 
@@ -53,7 +140,7 @@ Expected current baseline:
 24 tests, 0 failures
 ```
 
-## Smoke Test In Xcode
+### Smoke App
 
 Open `Package.swift` in Xcode.
 
@@ -73,8 +160,6 @@ For unsigned/dev builds where the App Group container is unavailable, the core s
 
 If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmoke` again.
 
-## Expected Smoke Output
-
 A successful run prints model load details, streaming events, a normalized JSON response, and:
 
 ```text
@@ -83,53 +168,17 @@ smoke: ok
 
 For Gemma GGUFs, seeing `embeddedTemplate: true` together with `templateMode=gemma-fallback` is acceptable. It means the model exposes a template, but llama.cpp did not apply it successfully through the native template path, so the shared runtime used its known Gemma fallback prompt format.
 
-## App Integration Pattern
+### llama Runtime Modes
 
-Host apps should depend on the package targets they need:
-
-- Use `CarbocationLocalLLM` for model library state, selected-model preferences, options, context policy, and fake-engine tests.
-- Use `CarbocationLocalLLMUI` when the app wants the standard shared model-management UI.
-- Use `CarbocationLlamaRuntime` when the app needs real llama.cpp generation.
-
-The shared UI should be embedded as a configurable component. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list for their workload. Apps can also pass `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
-
-Host apps should still own:
-
-- selected-model preference key
-- app-specific curated-model list, when the shared default is not the right fit
-- app-specific onboarding/settings copy
-- context cap defaults
-- generation settings UI
-- app-specific prompts, grammars, and operations
-- active-engine unload policy after deletion
-- migrations and invalid-selection warnings
-
-## llama.cpp Build Notes
-
-SwiftPM links against a generated static library rather than building llama.cpp itself. Apps that depend on `CarbocationLlamaRuntime` must invoke this package's build script before Xcode compiles that Swift package target. Prefer a scheme Build Pre-action or CI prebuild step; an app-target Run Script phase is only sufficient when your Xcode build graph runs it before package dependency compilation.
-
-```sh
-"$SRCROOT/Scripts/build-carbocation-llama.sh"
-```
-
-For a scheme Build Pre-action, set "Provide build settings from" to the host app target so `SRCROOT`, `BUILD_DIR`, and related Xcode paths are available.
-
-`Scripts/build-carbocation-llama.sh` should be a copy of this package's `Scripts/build-llama-from-xcode.sh`. The resolver keeps app source and project settings independent of a fixed sibling checkout path:
-
-- For local development, set `CARBOCATION_LOCAL_LLM_ROOT` to the package checkout path, or rely on the temporary `../CarbocationLocalLLM` fallback used by Carbocation app migrations.
-- For a Git URL/tag package dependency, the resolver searches Xcode's `SourcePackages/checkouts` directory and invokes the checked-out package's `Scripts/build-llama-macos.sh`.
-
-Then link/import the package normally. App source should only reference Swift module and product names such as `import CarbocationLocalLLM`; filesystem paths belong only in build wiring.
-
-This source-build flow is still an internal development integration. For broader reuse, replace the generated local static-library setup with a published binary artifact, such as an XCFramework-backed SwiftPM binary target, so consumers can depend on a Git URL/tag without running a llama.cpp build script.
-
-## Binary Artifact Publishing
-
-The package manifest supports three llama runtime modes:
+`Package.swift` supports three llama runtime modes:
 
 - default source-build mode, using `Vendor/llama-artifacts/current`
 - local binary validation mode, using `CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH`
 - published binary mode, using the `llamaBinaryArtifactURL` and `llamaBinaryArtifactChecksum` constants in `Package.swift`
+
+`main` should normally keep `llamaBinaryArtifactURL` and `llamaBinaryArtifactChecksum` empty so library development uses the source-build path. Release tags can point those constants at the published binary artifact.
+
+### Build A Binary Artifact
 
 Build and validate a local XCFramework artifact:
 
@@ -154,4 +203,28 @@ Scripts/set-llama-binary-artifact.sh \
   "$(cat Vendor/llama-artifacts/release/llama.xcframework.zip.checksum)"
 ```
 
-The preferred release path is the `Publish Llama Binary Artifact` GitHub workflow. Run it first with `dry_run=true`; that builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing anything. Run it again with `dry_run=false` to create a tag-only release commit with the binary URL/checksum, create the tag, and upload the release asset. Keeping the manifest change on the release tag lets `main` stay source-build friendly while tagged consumers get the binary target.
+### Publish A Binary Release
+
+The preferred release path is the `Publish Llama Binary Artifact` GitHub workflow.
+
+First run it with:
+
+- `tag`: the intended release tag, for example `vX.Y.Z`
+- `prerelease`: `true` for shakedown releases
+- `dry_run`: `true`
+
+The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing anything.
+
+Then run the workflow again with the same tag and `dry_run=false`. The release run creates a tag-only release commit with the binary URL/checksum, creates the tag, uploads the release asset, and validates the published release from a clean temporary consumer package.
+
+Keeping the manifest change on the release tag lets `main` stay source-build friendly while tagged consumers get the binary target.
+
+### Validate A Published Release
+
+After publishing, verify the release from a clean temporary consumer package:
+
+```sh
+Scripts/test-binary-release.sh vX.Y.Z
+```
+
+The release workflow runs the same smoke test after uploading the GitHub release asset. This catches problems that local binary validation cannot see, including tag resolution, checksum mismatch, release asset availability, downstream product imports, and llama symbol linkage from the published binary target.
