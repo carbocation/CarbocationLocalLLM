@@ -115,6 +115,10 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(resolve?.repo, "bartowski/Qwen2.5-7B-Instruct-GGUF")
         XCTAssertEqual(resolve?.filename, "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
 
+        let nested = HuggingFaceURL.parse("https://huggingface.co/bartowski/model/resolve/main/quantized/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+        XCTAssertEqual(nested?.repo, "bartowski/model")
+        XCTAssertEqual(nested?.filename, "quantized/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+
         let blob = HuggingFaceURL.parse("https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/blob/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
         XCTAssertEqual(blob?.repo, "bartowski/Qwen2.5-7B-Instruct-GGUF")
         XCTAssertEqual(blob?.filename, "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
@@ -124,6 +128,98 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(compact?.filename, "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
 
         XCTAssertNil(HuggingFaceURL.parse("https://huggingface.co/bartowski/model/blob/main/README.md"))
+    }
+
+    func testChunkPlanComputesPendingRangesAndCompletedBytes() {
+        let plan = ChunkPlan(totalBytes: 25, chunkSize: 10, doneChunks: [0, 2])
+
+        XCTAssertEqual(plan.chunkCount, 3)
+        XCTAssertEqual(plan.completedBytes(), 15)
+        XCTAssertEqual(plan.pendingRanges(), [
+            ChunkRange(index: 1, start: 10, end: 19)
+        ])
+    }
+
+    func testListPartialsUsesDoneChunksForPreallocatedChunkedFiles() throws {
+        let root = try makeTemporaryDirectory()
+        let partialsRoot = try ModelDownloader.partialsDirectory(in: root)
+        let stem = "cllm-partial-abcdef123456"
+        let sidecarURL = partialsRoot.appendingPathComponent("\(stem).json")
+        let partialURL = partialsRoot.appendingPathComponent("\(stem).gguf")
+
+        FileManager.default.createFile(atPath: partialURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: partialURL)
+        try handle.truncate(atOffset: 100)
+        try handle.close()
+
+        let sidecar = #"""
+        {
+          "url": "https://huggingface.co/bartowski/model/resolve/main/nested/foo-Q4_K_M.gguf",
+          "totalBytes": 100,
+          "displayName": "Foo",
+          "schemaVersion": 2,
+          "chunkSize": 10,
+          "doneChunks": [0, 2, 3]
+        }
+        """#
+        try Data(sidecar.utf8).write(to: sidecarURL)
+
+        let partials = ModelDownloader.listPartials(in: root)
+        XCTAssertEqual(partials.count, 1)
+        XCTAssertEqual(partials[0].displayName, "Foo")
+        XCTAssertEqual(partials[0].hfRepo, "bartowski/model")
+        XCTAssertEqual(partials[0].hfFilename, "nested/foo-Q4_K_M.gguf")
+        XCTAssertEqual(partials[0].totalBytes, 100)
+        XCTAssertEqual(partials[0].bytesOnDisk, 30)
+        XCTAssertEqual(partials[0].fractionComplete, 0.3, accuracy: 0.000_001)
+    }
+
+    func testListPartialsUsesFileSizeForSingleStreamPartials() throws {
+        let root = try makeTemporaryDirectory()
+        let partialsRoot = try ModelDownloader.partialsDirectory(in: root)
+        let stem = "cllm-partial-fedcba654321"
+        let sidecarURL = partialsRoot.appendingPathComponent("\(stem).json")
+        let partialURL = partialsRoot.appendingPathComponent("\(stem).gguf")
+
+        try Data("partial data".utf8).write(to: partialURL)
+        let sidecar = #"""
+        {
+          "url": "https://huggingface.co/bartowski/model/resolve/main/foo-Q4_K_M.gguf",
+          "totalBytes": 100,
+          "displayName": "Foo",
+          "schemaVersion": 1
+        }
+        """#
+        try Data(sidecar.utf8).write(to: sidecarURL)
+
+        let partials = ModelDownloader.listPartials(in: root)
+        XCTAssertEqual(partials.count, 1)
+        XCTAssertEqual(partials[0].bytesOnDisk, 12)
+    }
+
+    func testDeletePartialRemovesSidecarAndPartialFile() throws {
+        let root = try makeTemporaryDirectory()
+        let partialsRoot = try ModelDownloader.partialsDirectory(in: root)
+        let stem = "cllm-partial-001122334455"
+        let sidecarURL = partialsRoot.appendingPathComponent("\(stem).json")
+        let partialURL = partialsRoot.appendingPathComponent("\(stem).gguf")
+
+        try Data("partial data".utf8).write(to: partialURL)
+        let sidecar = #"""
+        {
+          "url": "https://huggingface.co/bartowski/model/resolve/main/foo-Q4_K_M.gguf",
+          "totalBytes": 100,
+          "displayName": "Foo",
+          "schemaVersion": 1
+        }
+        """#
+        try Data(sidecar.utf8).write(to: sidecarURL)
+
+        let partial = try XCTUnwrap(ModelDownloader.listPartials(in: root).first)
+        ModelDownloader.deletePartial(partial)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partialURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecarURL.path))
     }
 
     func testSanitizerAndJSONSalvageStripReasoningAndFences() throws {

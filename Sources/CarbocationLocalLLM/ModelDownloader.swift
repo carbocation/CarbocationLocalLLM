@@ -1,11 +1,18 @@
 import CryptoKit
 import Foundation
+import OSLog
+
+private let modelDownloaderLog = Logger(
+    subsystem: "com.carbocation.CarbocationLocalLLM",
+    category: "ModelDownloader"
+)
 
 public enum ModelDownloaderError: Error, LocalizedError, Sendable {
     case httpStatus(Int)
     case badURL(String)
     case hashMismatch(expected: String, actual: String)
     case noContentLength
+    case incompleteResponse
     case cancelled
 
     public var errorDescription: String? {
@@ -18,6 +25,8 @@ public enum ModelDownloaderError: Error, LocalizedError, Sendable {
             return "SHA256 mismatch; expected \(expected.prefix(12)), got \(actual.prefix(12))."
         case .noContentLength:
             return "Server did not report a content length."
+        case .incompleteResponse:
+            return "Server closed the connection before the model download completed."
         case .cancelled:
             return "Download cancelled."
         }
@@ -90,23 +99,185 @@ public struct ModelDownloadResult: Sendable, Hashable {
     }
 }
 
-private struct PartialSidecar: Codable {
+private struct PartialSidecar: Codable, Sendable {
     var url: String
     var etag: String?
     var lastModified: String?
     var totalBytes: Int64
     var displayName: String?
     var schemaVersion: Int?
+    var chunkSize: Int64?
+    var doneChunks: [Int]?
 }
 
-private struct PartialDownloadState {
+private struct PartialDownloadState: Sendable {
     let existingSize: Int64
     let totalBytes: Int64
     let etag: String?
     let lastModified: String?
 }
 
+struct ChunkRange: Sendable, Hashable {
+    let index: Int
+    let start: Int64
+    let end: Int64
+
+    var length: Int64 {
+        end - start + 1
+    }
+}
+
+struct ChunkPlan: Sendable, Hashable {
+    static let defaultChunkSize: Int64 = 16 * 1_024 * 1_024
+
+    let totalBytes: Int64
+    let chunkSize: Int64
+    var doneChunks: Set<Int>
+
+    init(
+        totalBytes: Int64,
+        chunkSize: Int64 = defaultChunkSize,
+        doneChunks: Set<Int> = []
+    ) {
+        self.totalBytes = totalBytes
+        self.chunkSize = chunkSize
+        self.doneChunks = doneChunks
+    }
+
+    var chunkCount: Int {
+        Int((totalBytes + chunkSize - 1) / chunkSize)
+    }
+
+    var isComplete: Bool {
+        doneChunks.count == chunkCount
+    }
+
+    func chunkRange(for index: Int) -> ChunkRange {
+        let start = Int64(index) * chunkSize
+        let end = min(start + chunkSize - 1, totalBytes - 1)
+        return ChunkRange(index: index, start: start, end: end)
+    }
+
+    func pendingRanges() -> [ChunkRange] {
+        (0..<chunkCount)
+            .filter { !doneChunks.contains($0) }
+            .map { chunkRange(for: $0) }
+    }
+
+    func completedBytes() -> Int64 {
+        doneChunks.reduce(Int64(0)) { partial, index in
+            partial + chunkRange(for: index).length
+        }
+    }
+}
+
+private actor FileWriter {
+    private let handle: FileHandle
+
+    init(url: URL) throws {
+        handle = try FileHandle(forWritingTo: url)
+    }
+
+    func write(_ data: Data, at offset: Int64) throws {
+        try handle.seek(toOffset: UInt64(offset))
+        try handle.write(contentsOf: data)
+    }
+
+    func close() throws {
+        try handle.close()
+    }
+}
+
+private actor ChunkWorkQueue {
+    private var pending: [ChunkRange]
+    private var done: Set<Int>
+    private let sidecarURL: URL
+    private var sidecar: PartialSidecar
+    private var lastPersist: Date = .distantPast
+
+    init(
+        pending: [ChunkRange],
+        done: Set<Int>,
+        sidecarURL: URL,
+        sidecar: PartialSidecar
+    ) {
+        self.pending = pending
+        self.done = done
+        self.sidecarURL = sidecarURL
+        self.sidecar = sidecar
+    }
+
+    func nextChunk() -> ChunkRange? {
+        guard !pending.isEmpty else { return nil }
+        return pending.removeFirst()
+    }
+
+    func markDone(_ index: Int) {
+        done.insert(index)
+        let now = Date()
+        if now.timeIntervalSince(lastPersist) >= 1 {
+            lastPersist = now
+            persistSidecar()
+        }
+    }
+
+    func flush() {
+        persistSidecar()
+    }
+
+    var completedCount: Int {
+        done.count
+    }
+
+    private func persistSidecar() {
+        sidecar.doneChunks = Array(done).sorted()
+        if let data = try? JSONEncoder().encode(sidecar) {
+            try? data.write(to: sidecarURL, options: .atomic)
+        }
+    }
+}
+
+private actor ProgressTracker {
+    private var chunkBytes: [Int: Int64] = [:]
+    private let alreadyHad: Int64
+    private let totalBytes: Int64
+    private let started = Date()
+    private var lastEmit = Date(timeIntervalSince1970: 0)
+
+    init(alreadyHad: Int64, totalBytes: Int64) {
+        self.alreadyHad = alreadyHad
+        self.totalBytes = totalBytes
+    }
+
+    func add(_ bytes: Int64, forChunk index: Int) {
+        chunkBytes[index, default: 0] += bytes
+    }
+
+    var received: Int64 {
+        alreadyHad + chunkBytes.values.reduce(0, +)
+    }
+
+    func maybeEmit(_ onProgress: @Sendable (DownloadProgress) -> Void) {
+        let now = Date()
+        guard now.timeIntervalSince(lastEmit) >= 0.25 else { return }
+        lastEmit = now
+
+        let received = received
+        let elapsed = now.timeIntervalSince(started)
+        let bytesPerSecond = elapsed > 0 ? Double(received - alreadyHad) / elapsed : 0
+        onProgress(DownloadProgress(
+            bytesReceived: received,
+            totalBytes: totalBytes,
+            bytesPerSecond: bytesPerSecond
+        ))
+    }
+}
+
 public enum ModelDownloader {
+    private static let currentPartialPrefix = "cllm-partial-"
+    private static let parallelConnections = 4
+    private static let userAgent = "CarbocationLocalLLM/1.0"
+
     public static func huggingFaceResolveURL(hfRepo: String, hfFilename: String) throws -> URL {
         let urlString = "https://huggingface.co/\(hfRepo)/resolve/main/\(hfFilename)?download=true"
         guard let url = URL(string: urlString) else {
@@ -133,8 +304,8 @@ public enum ModelDownloader {
     }
 
     /// Downloads a GGUF file to the model cache's `.partials` directory.
-    /// The returned file should be registered with `ModelLibrary.add(...)`,
-    /// which moves it into its final per-model directory.
+    /// Range-capable servers use a chunked v2 sidecar and parallel workers.
+    /// Servers without Range support fall back to single-stream resume.
     public static func download(
         from url: URL,
         modelsRoot: URL,
@@ -143,16 +314,346 @@ public enum ModelDownloader {
         onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
     ) async throws -> ModelDownloadResult {
         let (partialURL, sidecarURL) = try partialPaths(for: url, modelsRoot: modelsRoot)
-        let prior = loadPartialState(partialURL: partialURL, sidecarURL: sidecarURL, sourceURL: url)
+
+        if let (plan, sidecar) = loadChunkedState(
+            partialURL: partialURL,
+            sidecarURL: sidecarURL,
+            sourceURL: url
+        ) {
+            var updatedSidecar = sidecar
+            if updatedSidecar.displayName == nil, let displayName {
+                updatedSidecar.displayName = displayName
+                writeSidecarValue(updatedSidecar, to: sidecarURL)
+            }
+
+            modelDownloaderLog.info(
+                "Resuming chunked \(url.lastPathComponent, privacy: .public) (\(plan.doneChunks.count)/\(plan.chunkCount) chunks done)"
+            )
+
+            return try await downloadParallel(
+                url: url,
+                partialURL: partialURL,
+                sidecarURL: sidecarURL,
+                plan: plan,
+                sidecar: updatedSidecar,
+                expectedSHA256: expectedSHA256,
+                onProgress: onProgress
+            )
+        }
+
+        let legacy = loadSingleStreamState(
+            partialURL: partialURL,
+            sidecarURL: sidecarURL,
+            sourceURL: url
+        )
+
+        guard let probe = try await probeServer(url: url) else {
+            modelDownloaderLog.info(
+                "Server does not support Range for \(url.lastPathComponent, privacy: .public); using single stream"
+            )
+            return try await downloadSingleStream(
+                url: url,
+                partialURL: partialURL,
+                sidecarURL: sidecarURL,
+                prior: legacy,
+                displayName: displayName,
+                expectedSHA256: expectedSHA256,
+                onProgress: onProgress
+            )
+        }
+
+        let totalBytes = probe.totalBytes
+        var doneChunks = Set<Int>()
+        if let legacy {
+            if legacy.totalBytes == totalBytes {
+                let fullChunks = legacy.existingSize / ChunkPlan.defaultChunkSize
+                for index in 0..<Int(fullChunks) {
+                    doneChunks.insert(index)
+                }
+                modelDownloaderLog.info("Credited \(fullChunks) legacy chunks from single-stream partial")
+            } else {
+                discardPartial(partialURL: partialURL, sidecarURL: sidecarURL)
+            }
+        }
+
+        let plan = ChunkPlan(totalBytes: totalBytes, doneChunks: doneChunks)
+        let sidecar = PartialSidecar(
+            url: url.absoluteString,
+            etag: probe.etag,
+            lastModified: probe.lastModified,
+            totalBytes: totalBytes,
+            displayName: displayName,
+            schemaVersion: 2,
+            chunkSize: ChunkPlan.defaultChunkSize,
+            doneChunks: Array(doneChunks).sorted()
+        )
+
+        if !FileManager.default.fileExists(atPath: partialURL.path) {
+            FileManager.default.createFile(atPath: partialURL.path, contents: nil)
+        }
+        let allocationHandle = try FileHandle(forWritingTo: partialURL)
+        try allocationHandle.truncate(atOffset: UInt64(totalBytes))
+        try allocationHandle.close()
+
+        writeSidecarValue(sidecar, to: sidecarURL)
+
+        modelDownloaderLog.info(
+            "Starting parallel download \(url.lastPathComponent, privacy: .public) (\(totalBytes) bytes, \(plan.chunkCount) chunks, \(parallelConnections) connections)"
+        )
+
+        return try await downloadParallel(
+            url: url,
+            partialURL: partialURL,
+            sidecarURL: sidecarURL,
+            plan: plan,
+            sidecar: sidecar,
+            expectedSHA256: expectedSHA256,
+            onProgress: onProgress
+        )
+    }
+
+    public static func partialsDirectory(in modelsRoot: URL) throws -> URL {
+        let directory = modelsRoot.appendingPathComponent(".partials", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    public static func listPartials(in modelsRoot: URL) -> [PartialDownload] {
+        guard let partialsRoot = try? partialsDirectory(in: modelsRoot),
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: partialsRoot,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: []
+              )
+        else { return [] }
+
+        var result: [PartialDownload] = []
+        for sidecarURL in entries where isPartialSidecar(sidecarURL) {
+            let stem = sidecarURL.deletingPathExtension().lastPathComponent
+            let partialURL = sidecarURL.deletingLastPathComponent().appendingPathComponent("\(stem).gguf")
+            guard FileManager.default.fileExists(atPath: partialURL.path) else {
+                try? FileManager.default.removeItem(at: sidecarURL)
+                continue
+            }
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  let sidecar = try? JSONDecoder().decode(PartialSidecar.self, from: data),
+                  let sourceURL = URL(string: sidecar.url),
+                  sidecar.totalBytes > 0
+            else { continue }
+
+            let key = partialKey(fromStem: stem) ?? stem
+            let bytesOnDisk = bytesOnDisk(for: sidecar, partialURL: partialURL)
+            let (hfRepo, hfFilename) = parseHFCoords(from: sourceURL) ?? (nil, nil)
+            let displayName = sidecar.displayName
+                ?? hfFilename?.replacingOccurrences(of: ".gguf", with: "")
+                ?? sourceURL.lastPathComponent
+
+            result.append(PartialDownload(
+                id: key,
+                partialURL: partialURL,
+                sidecarURL: sidecarURL,
+                sourceURL: sourceURL,
+                displayName: displayName,
+                hfRepo: hfRepo,
+                hfFilename: hfFilename,
+                totalBytes: sidecar.totalBytes,
+                bytesOnDisk: min(bytesOnDisk, sidecar.totalBytes)
+            ))
+        }
+
+        return result.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    public static func deletePartial(_ partial: PartialDownload) {
+        discardPartial(partialURL: partial.partialURL, sidecarURL: partial.sidecarURL)
+    }
+
+    private static func downloadParallel(
+        url: URL,
+        partialURL: URL,
+        sidecarURL: URL,
+        plan: ChunkPlan,
+        sidecar: PartialSidecar,
+        expectedSHA256: String?,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void
+    ) async throws -> ModelDownloadResult {
+        let alreadyHad = plan.completedBytes()
+        let queue = ChunkWorkQueue(
+            pending: plan.pendingRanges(),
+            done: plan.doneChunks,
+            sidecarURL: sidecarURL,
+            sidecar: sidecar
+        )
+        let tracker = ProgressTracker(alreadyHad: alreadyHad, totalBytes: plan.totalBytes)
+        let writer = try FileWriter(url: partialURL)
+        let validator = sidecar.etag ?? sidecar.lastModified
+
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<parallelConnections {
+                    group.addTask {
+                        while let chunk = await queue.nextChunk() {
+                            try Task.checkCancellation()
+                            try await downloadChunk(
+                                chunk: chunk,
+                                from: url,
+                                validator: validator,
+                                writer: writer,
+                                queue: queue,
+                                tracker: tracker,
+                                onProgress: onProgress
+                            )
+                        }
+                    }
+                }
+                try await group.waitForAll()
+            }
+            try await writer.close()
+        } catch is CancellationError {
+            try? await writer.close()
+            await queue.flush()
+            throw ModelDownloaderError.cancelled
+        } catch let error as URLError where error.code == .cancelled {
+            try? await writer.close()
+            await queue.flush()
+            throw ModelDownloaderError.cancelled
+        } catch {
+            try? await writer.close()
+            await queue.flush()
+            throw error
+        }
+
+        await queue.flush()
+        let completedCount = await queue.completedCount
+        guard completedCount == plan.chunkCount else {
+            throw ModelDownloaderError.httpStatus(-2)
+        }
+
+        let digest: String
+        do {
+            digest = try verifyFinalHash(at: partialURL, expected: expectedSHA256)
+        } catch {
+            discardPartial(partialURL: partialURL, sidecarURL: sidecarURL)
+            throw error
+        }
+
+        try? FileManager.default.removeItem(at: sidecarURL)
+        onProgress(DownloadProgress(
+            bytesReceived: plan.totalBytes,
+            totalBytes: plan.totalBytes,
+            bytesPerSecond: 0
+        ))
+
+        return ModelDownloadResult(tempURL: partialURL, sizeBytes: plan.totalBytes, sha256: digest)
+    }
+
+    private static func downloadChunk(
+        chunk: ChunkRange,
+        from url: URL,
+        validator: String?,
+        writer: FileWriter,
+        queue: ChunkWorkQueue,
+        tracker: ProgressTracker,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void
+    ) async throws {
         var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("bytes=\(chunk.start)-\(chunk.end)", forHTTPHeaderField: "Range")
+        if let validator {
+            request.setValue(validator, forHTTPHeaderField: "If-Range")
+        }
         request.timeoutInterval = 3_600
-        request.setValue("CarbocationLocalLLM/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (stream, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw ModelDownloaderError.httpStatus(-1)
+        }
+        guard http.statusCode == 206 else {
+            throw ModelDownloaderError.httpStatus(http.statusCode)
+        }
+
+        var offset = chunk.start
+        var buffer: [UInt8] = []
+        buffer.reserveCapacity(1 << 20)
+
+        for try await byte in stream {
+            try Task.checkCancellation()
+            buffer.append(byte)
+            if buffer.count >= (1 << 20) {
+                let data = Data(buffer)
+                try await writer.write(data, at: offset)
+                await tracker.add(Int64(data.count), forChunk: chunk.index)
+                await tracker.maybeEmit(onProgress)
+                offset += Int64(data.count)
+                buffer.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !buffer.isEmpty {
+            let data = Data(buffer)
+            try await writer.write(data, at: offset)
+            await tracker.add(Int64(data.count), forChunk: chunk.index)
+            offset += Int64(data.count)
+        }
+
+        guard offset == chunk.end + 1 else {
+            throw ModelDownloaderError.incompleteResponse
+        }
+
+        await queue.markDone(chunk.index)
+        await tracker.maybeEmit(onProgress)
+    }
+
+    private struct ProbeResult: Sendable {
+        let totalBytes: Int64
+        let etag: String?
+        let lastModified: String?
+    }
+
+    private static func probeServer(url: URL) async throws -> ProbeResult? {
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        request.timeoutInterval = 30
+
+        let (_, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 206 else {
+            return nil
+        }
+        guard let totalBytes = parseContentRangeTotal(http), totalBytes > 0 else {
+            return nil
+        }
+
+        return ProbeResult(
+            totalBytes: totalBytes,
+            etag: http.value(forHTTPHeaderField: "ETag"),
+            lastModified: http.value(forHTTPHeaderField: "Last-Modified")
+        )
+    }
+
+    private static func downloadSingleStream(
+        url: URL,
+        partialURL: URL,
+        sidecarURL: URL,
+        prior: PartialDownloadState?,
+        displayName: String?,
+        expectedSHA256: String?,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void
+    ) async throws -> ModelDownloadResult {
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 3_600
 
         if let prior {
             request.setValue("bytes=\(prior.existingSize)-", forHTTPHeaderField: "Range")
             if let validator = prior.etag ?? prior.lastModified {
                 request.setValue(validator, forHTTPHeaderField: "If-Range")
             }
+            modelDownloaderLog.info(
+                "Resuming single-stream \(url.lastPathComponent, privacy: .public) from byte \(prior.existingSize)"
+            )
         }
 
         let (stream, response) = try await URLSession.shared.bytes(for: request)
@@ -167,8 +668,12 @@ public enum ModelDownloader {
         let existingSize: Int64
         let totalBytes: Int64
         if isResume, let prior {
+            if let rangeTotal = parseContentRangeTotal(http), rangeTotal != prior.totalBytes {
+                discardPartial(partialURL: partialURL, sidecarURL: sidecarURL)
+                throw ModelDownloaderError.httpStatus(200)
+            }
             existingSize = prior.existingSize
-            totalBytes = parseContentRangeTotal(http) ?? prior.totalBytes
+            totalBytes = prior.totalBytes
         } else {
             existingSize = 0
             totalBytes = http.expectedContentLength
@@ -178,17 +683,16 @@ public enum ModelDownloader {
                 withIntermediateDirectories: true
             )
             FileManager.default.createFile(atPath: partialURL.path, contents: nil)
-        }
-
-        if totalBytes > 0 {
-            writeSidecar(
-                to: sidecarURL,
-                sourceURL: url,
-                totalBytes: totalBytes,
-                etag: http.value(forHTTPHeaderField: "ETag"),
-                lastModified: http.value(forHTTPHeaderField: "Last-Modified"),
-                displayName: displayName
-            )
+            if totalBytes > 0 {
+                writeSingleStreamSidecar(
+                    to: sidecarURL,
+                    sourceURL: url,
+                    totalBytes: totalBytes,
+                    etag: http.value(forHTTPHeaderField: "ETag"),
+                    lastModified: http.value(forHTTPHeaderField: "Last-Modified"),
+                    displayName: displayName
+                )
+            }
         }
 
         var hasher = SHA256()
@@ -227,15 +731,21 @@ public enum ModelDownloader {
                     buffer.removeAll(keepingCapacity: true)
                 }
             }
-
-            if !buffer.isEmpty {
-                let data = Data(buffer)
-                try handle.write(contentsOf: data)
-                hasher.update(data: data)
-                received += Int64(data.count)
-            }
         } catch is CancellationError {
             throw ModelDownloaderError.cancelled
+        } catch let error as URLError where error.code == .cancelled {
+            throw ModelDownloaderError.cancelled
+        }
+
+        if !buffer.isEmpty {
+            let data = Data(buffer)
+            try handle.write(contentsOf: data)
+            hasher.update(data: data)
+            received += Int64(data.count)
+        }
+
+        guard totalBytes <= 0 || received == totalBytes else {
+            throw ModelDownloaderError.incompleteResponse
         }
 
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -247,74 +757,29 @@ public enum ModelDownloader {
         }
 
         try? FileManager.default.removeItem(at: sidecarURL)
-        onProgress(DownloadProgress(bytesReceived: received, totalBytes: max(totalBytes, received), bytesPerSecond: 0))
+        onProgress(DownloadProgress(
+            bytesReceived: received,
+            totalBytes: max(totalBytes, received),
+            bytesPerSecond: 0
+        ))
         return ModelDownloadResult(tempURL: partialURL, sizeBytes: received, sha256: digest)
-    }
-
-    public static func partialsDirectory(in modelsRoot: URL) throws -> URL {
-        let directory = modelsRoot.appendingPathComponent(".partials", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
-    }
-
-    public static func listPartials(in modelsRoot: URL) -> [PartialDownload] {
-        guard let partialsRoot = try? partialsDirectory(in: modelsRoot),
-              let entries = try? FileManager.default.contentsOfDirectory(
-                at: partialsRoot,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: []
-              )
-        else { return [] }
-
-        var result: [PartialDownload] = []
-        for sidecarURL in entries where sidecarURL.pathExtension == "json" && sidecarURL.lastPathComponent.hasPrefix("cllm-partial-") {
-            let stem = sidecarURL.deletingPathExtension().lastPathComponent
-            let partialURL = sidecarURL.deletingLastPathComponent().appendingPathComponent("\(stem).gguf")
-            guard FileManager.default.fileExists(atPath: partialURL.path) else {
-                try? FileManager.default.removeItem(at: sidecarURL)
-                continue
-            }
-            guard let data = try? Data(contentsOf: sidecarURL),
-                  let sidecar = try? JSONDecoder().decode(PartialSidecar.self, from: data),
-                  let sourceURL = URL(string: sidecar.url),
-                  sidecar.totalBytes > 0
-            else { continue }
-
-            let key = String(stem.dropFirst("cllm-partial-".count))
-            let bytesOnDisk = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? Int64) ?? 0
-            let (hfRepo, hfFilename) = parseHFCoords(from: sourceURL) ?? (nil, nil)
-            let displayName = sidecar.displayName
-                ?? hfFilename?.replacingOccurrences(of: ".gguf", with: "")
-                ?? sourceURL.lastPathComponent
-
-            result.append(PartialDownload(
-                id: key,
-                partialURL: partialURL,
-                sidecarURL: sidecarURL,
-                sourceURL: sourceURL,
-                displayName: displayName,
-                hfRepo: hfRepo,
-                hfFilename: hfFilename,
-                totalBytes: sidecar.totalBytes,
-                bytesOnDisk: min(bytesOnDisk, sidecar.totalBytes)
-            ))
-        }
-
-        return result.sorted {
-            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-        }
-    }
-
-    public static func deletePartial(_ partial: PartialDownload) {
-        discardPartial(partialURL: partial.partialURL, sidecarURL: partial.sidecarURL)
     }
 
     private static func partialPaths(for url: URL, modelsRoot: URL) throws -> (partial: URL, sidecar: URL) {
         let directory = try partialsDirectory(in: modelsRoot)
         let key = partialKey(for: url)
-        return (
-            directory.appendingPathComponent("cllm-partial-\(key).gguf"),
-            directory.appendingPathComponent("cllm-partial-\(key).json")
+
+        return partialURLs(prefix: currentPartialPrefix, key: key, directory: directory)
+    }
+
+    private static func partialURLs(
+        prefix: String,
+        key: String,
+        directory: URL
+    ) -> (partial: URL, sidecar: URL) {
+        (
+            directory.appendingPathComponent("\(prefix)\(key).gguf"),
+            directory.appendingPathComponent("\(prefix)\(key).json")
         )
     }
 
@@ -325,7 +790,42 @@ public enum ModelDownloader {
             .joined()
     }
 
-    private static func loadPartialState(
+    private static func isPartialSidecar(_ url: URL) -> Bool {
+        guard url.pathExtension == "json" else { return false }
+        return partialKey(fromStem: url.deletingPathExtension().lastPathComponent) != nil
+    }
+
+    private static func partialKey(fromStem stem: String) -> String? {
+        guard stem.hasPrefix(currentPartialPrefix) else { return nil }
+        return String(stem.dropFirst(currentPartialPrefix.count))
+    }
+
+    private static func loadChunkedState(
+        partialURL: URL,
+        sidecarURL: URL,
+        sourceURL: URL
+    ) -> (ChunkPlan, PartialSidecar)? {
+        guard FileManager.default.fileExists(atPath: partialURL.path),
+              FileManager.default.fileExists(atPath: sidecarURL.path),
+              let data = try? Data(contentsOf: sidecarURL),
+              var sidecar = try? JSONDecoder().decode(PartialSidecar.self, from: data),
+              sidecar.schemaVersion == 2,
+              sidecar.url == sourceURL.absoluteString,
+              sidecar.totalBytes > 0
+        else { return nil }
+
+        let chunkSize = sidecar.chunkSize ?? ChunkPlan.defaultChunkSize
+        var plan = ChunkPlan(
+            totalBytes: sidecar.totalBytes,
+            chunkSize: chunkSize,
+            doneChunks: Set(sidecar.doneChunks ?? [])
+        )
+        plan.doneChunks = plan.doneChunks.filter { $0 >= 0 && $0 < plan.chunkCount }
+        sidecar.doneChunks = Array(plan.doneChunks).sorted()
+        return (plan, sidecar)
+    }
+
+    private static func loadSingleStreamState(
         partialURL: URL,
         sidecarURL: URL,
         sourceURL: URL
@@ -334,25 +834,26 @@ public enum ModelDownloader {
               FileManager.default.fileExists(atPath: sidecarURL.path),
               let data = try? Data(contentsOf: sidecarURL),
               let sidecar = try? JSONDecoder().decode(PartialSidecar.self, from: data),
+              sidecar.schemaVersion == nil || sidecar.schemaVersion == 1,
               sidecar.url == sourceURL.absoluteString,
               sidecar.totalBytes > 0
         else { return nil }
 
-        let size = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? Int64) ?? 0
-        guard size > 0, size < sidecar.totalBytes else {
+        let existingSize = fileSize(at: partialURL)
+        guard existingSize > 0, existingSize < sidecar.totalBytes else {
             discardPartial(partialURL: partialURL, sidecarURL: sidecarURL)
             return nil
         }
 
         return PartialDownloadState(
-            existingSize: size,
+            existingSize: existingSize,
             totalBytes: sidecar.totalBytes,
             etag: sidecar.etag,
             lastModified: sidecar.lastModified
         )
     }
 
-    private static func writeSidecar(
+    private static func writeSingleStreamSidecar(
         to url: URL,
         sourceURL: URL,
         totalBytes: Int64,
@@ -366,8 +867,14 @@ public enum ModelDownloader {
             lastModified: lastModified,
             totalBytes: totalBytes,
             displayName: displayName,
-            schemaVersion: 1
+            schemaVersion: 1,
+            chunkSize: nil,
+            doneChunks: nil
         )
+        writeSidecarValue(sidecar, to: url)
+    }
+
+    private static func writeSidecarValue(_ sidecar: PartialSidecar, to url: URL) {
         if let data = try? JSONEncoder().encode(sidecar) {
             try? data.write(to: url, options: .atomic)
         }
@@ -376,6 +883,37 @@ public enum ModelDownloader {
     private static func discardPartial(partialURL: URL, sidecarURL: URL) {
         try? FileManager.default.removeItem(at: partialURL)
         try? FileManager.default.removeItem(at: sidecarURL)
+    }
+
+    private static func bytesOnDisk(for sidecar: PartialSidecar, partialURL: URL) -> Int64 {
+        if sidecar.schemaVersion == 2,
+           let chunkSize = sidecar.chunkSize,
+           let doneChunks = sidecar.doneChunks {
+            var plan = ChunkPlan(totalBytes: sidecar.totalBytes, chunkSize: chunkSize, doneChunks: Set(doneChunks))
+            plan.doneChunks = plan.doneChunks.filter { $0 >= 0 && $0 < plan.chunkCount }
+            return plan.completedBytes()
+        }
+        return fileSize(at: partialURL)
+    }
+
+    private static func fileSize(at url: URL) -> Int64 {
+        guard let value = try? FileManager.default
+            .attributesOfItem(atPath: url.path)[.size]
+        else { return 0 }
+
+        if let number = value as? NSNumber {
+            return number.int64Value
+        }
+        if let size = value as? Int64 {
+            return size
+        }
+        if let size = value as? UInt64 {
+            return Int64(size)
+        }
+        if let size = value as? Int {
+            return Int64(size)
+        }
+        return 0
     }
 
     private static func updateHasher(_ hasher: inout SHA256, withPrefixOf url: URL, byteCount: Int64) throws {
@@ -406,6 +944,28 @@ public enum ModelDownloader {
         onProgress(DownloadProgress(bytesReceived: received, totalBytes: total, bytesPerSecond: bytesPerSecond))
     }
 
+    private static func verifyFinalHash(at url: URL, expected: String?) throws -> String {
+        let actual = try computeSHA256(at: url)
+        if let expected = expected?.lowercased(),
+           !expected.isEmpty,
+           expected != actual.lowercased() {
+            throw ModelDownloaderError.hashMismatch(expected: expected, actual: actual)
+        }
+        return actual
+    }
+
+    private static func computeSHA256(at url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func parseContentRangeTotal(_ response: HTTPURLResponse) -> Int64? {
         guard let header = response.value(forHTTPHeaderField: "Content-Range"),
               let slash = header.lastIndex(of: "/")
@@ -417,7 +977,7 @@ public enum ModelDownloader {
         guard url.host?.contains("huggingface.co") == true else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" }
         guard parts.count >= 5, parts[2] == "resolve" || parts[2] == "blob" else { return nil }
-        return ("\(parts[0])/\(parts[1])", parts.last ?? "")
+        return ("\(parts[0])/\(parts[1])", parts.suffix(from: 4).joined(separator: "/"))
     }
 }
 
@@ -432,7 +992,7 @@ public enum HuggingFaceURL {
             let parts = url.pathComponents.filter { $0 != "/" }
             if parts.count >= 5, parts[2] == "resolve" || parts[2] == "blob" {
                 let repo = "\(parts[0])/\(parts[1])"
-                let filename = parts.last ?? ""
+                let filename = parts.suffix(from: 4).joined(separator: "/")
                 if filename.lowercased().hasSuffix(".gguf") {
                     return (repo, filename)
                 }
@@ -447,4 +1007,3 @@ public enum HuggingFaceURL {
         return nil
     }
 }
-
