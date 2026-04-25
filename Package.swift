@@ -5,8 +5,8 @@ import Foundation
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let llamaCombinedLibrary = "\(packageRoot)/Vendor/llama-artifacts/current/lib/libllama-combined.a"
-let llamaBinaryArtifactURL = ""
-let llamaBinaryArtifactChecksum = ""
+let llamaBinaryArtifactURL = "https://github.com/carbocation/CarbocationLocalLLM/releases/download/v0.1.0/llama.xcframework.zip"
+let llamaBinaryArtifactChecksum = "66bb2ab17fbf453b89a280e9d753c12febae4c2819b88f7d55f4e3dfe9ff0bb5"
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
 let forceSourceLlama = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA"] == "1"
 
