@@ -10,6 +10,7 @@ public struct ModelLibraryPickerView: View {
     private let title: String
     private let confirmTitle: String
     private let confirmDisabled: Bool
+    private let curatedModels: [CuratedModel]
     private let onConfirm: @MainActor (InstalledModel) -> Void
 
     @State private var activeDownload: ModelLibraryDownload?
@@ -25,6 +26,7 @@ public struct ModelLibraryPickerView: View {
         title: String = "Choose a Local Model",
         confirmTitle: String = "Use Selected Model",
         confirmDisabled: Bool = false,
+        curatedModels: [CuratedModel] = CuratedModelCatalog.all,
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
         self.library = library
@@ -32,6 +34,7 @@ public struct ModelLibraryPickerView: View {
         self.title = title
         self.confirmTitle = confirmTitle
         self.confirmDisabled = confirmDisabled
+        self.curatedModels = curatedModels
         self.onConfirm = onConfirm
     }
 
@@ -40,7 +43,10 @@ public struct ModelLibraryPickerView: View {
     }
 
     private var recommendedCuratedModel: CuratedModel? {
-        CuratedModelCatalog.recommendedModel(forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+        CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            among: curatedModels
+        )
     }
 
     public var body: some View {
@@ -280,7 +286,7 @@ public struct ModelLibraryPickerView: View {
             if let activeDownload {
                 activeDownloadRow(activeDownload)
             } else {
-                ForEach(CuratedModelCatalog.all) { entry in
+                ForEach(curatedModels) { entry in
                     curatedRow(entry, isRecommended: recommendedID == entry.id)
                 }
                 Button {
@@ -429,7 +435,7 @@ public struct ModelLibraryPickerView: View {
 
     private func resume(_ partial: PartialDownload) {
         guard let repo = partial.hfRepo, let filename = partial.hfFilename else { return }
-        let curated = CuratedModelCatalog.all.first {
+        let curated = curatedModels.first {
             $0.hfRepo == repo && $0.hfFilename == filename
         }
         startDownload(
