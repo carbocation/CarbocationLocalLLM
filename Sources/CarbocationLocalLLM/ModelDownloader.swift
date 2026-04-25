@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import OSLog
 
@@ -196,20 +197,63 @@ struct ChunkPlan: Sendable, Hashable {
     }
 }
 
-private actor FileWriter {
-    private let handle: FileHandle
+private final class RandomAccessFileWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32
 
     init(url: URL) throws {
-        handle = try FileHandle(forWritingTo: url)
+        let openedFD = url.withUnsafeFileSystemRepresentation { path in
+            path.map { Darwin.open($0, O_RDWR) } ?? -1
+        }
+        guard openedFD >= 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
+        fd = openedFD
     }
 
     func write(_ data: Data, at offset: Int64) throws {
-        try handle.seek(toOffset: UInt64(offset))
-        try handle.write(contentsOf: data)
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress, rawBuffer.count > 0 else { return }
+
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard fd >= 0 else {
+                throw POSIXError(.EBADF)
+            }
+
+            var bytesRemaining = rawBuffer.count
+            var localOffset = 0
+            while bytesRemaining > 0 {
+                let written = Darwin.pwrite(
+                    fd,
+                    baseAddress.advanced(by: localOffset),
+                    bytesRemaining,
+                    off_t(offset + Int64(localOffset))
+                )
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+                }
+                guard written > 0 else {
+                    throw POSIXError(.EIO)
+                }
+                bytesRemaining -= written
+                localOffset += written
+            }
+        }
     }
 
     func close() throws {
-        try handle.close()
+        lock.lock()
+        defer { lock.unlock() }
+        guard fd >= 0 else { return }
+
+        let result = Darwin.close(fd)
+        fd = -1
+        if result != 0 {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
     }
 }
 
@@ -262,7 +306,8 @@ private actor ChunkWorkQueue {
     }
 }
 
-private actor ProgressTracker {
+private final class ProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
     private var chunkBytes: [Int: Int64] = [:]
     private let alreadyHad: Int64
     private let totalBytes: Int64
@@ -275,26 +320,221 @@ private actor ProgressTracker {
     }
 
     func add(_ bytes: Int64, forChunk index: Int) {
+        lock.lock()
+        defer { lock.unlock() }
         chunkBytes[index, default: 0] += bytes
     }
 
     var received: Int64 {
-        alreadyHad + chunkBytes.values.reduce(0, +)
+        lock.lock()
+        defer { lock.unlock() }
+        return alreadyHad + chunkBytes.values.reduce(0, +)
     }
 
     func maybeEmit(_ onProgress: @Sendable (DownloadProgress) -> Void) {
+        let progress: DownloadProgress?
         let now = Date()
-        guard now.timeIntervalSince(lastEmit) >= 0.25 else { return }
-        lastEmit = now
+        lock.lock()
+        if now.timeIntervalSince(lastEmit) >= 0.25 {
+            lastEmit = now
+            let received = alreadyHad + chunkBytes.values.reduce(0, +)
+            let elapsed = now.timeIntervalSince(started)
+            let bytesPerSecond = elapsed > 0 ? Double(received - alreadyHad) / elapsed : 0
+            progress = DownloadProgress(
+                bytesReceived: received,
+                totalBytes: totalBytes,
+                bytesPerSecond: bytesPerSecond
+            )
+        } else {
+            progress = nil
+        }
+        lock.unlock()
 
-        let received = received
-        let elapsed = now.timeIntervalSince(started)
-        let bytesPerSecond = elapsed > 0 ? Double(received - alreadyHad) / elapsed : 0
-        onProgress(DownloadProgress(
-            bytesReceived: received,
-            totalBytes: totalBytes,
-            bytesPerSecond: bytesPerSecond
-        ))
+        if let progress {
+            onProgress(progress)
+        }
+    }
+}
+
+private final class URLSessionTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var cancelled = false
+
+    func set(_ task: URLSessionTask) {
+        lock.lock()
+        self.task = task
+        let shouldCancel = cancelled
+        lock.unlock()
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let task = task
+        lock.unlock()
+        task?.cancel()
+    }
+}
+
+private final class RangedChunkDownloadState {
+    let chunk: ChunkRange
+    let writer: RandomAccessFileWriter
+    let tracker: ProgressTracker
+    let onProgress: @Sendable (DownloadProgress) -> Void
+    let continuation: CheckedContinuation<Void, Error>
+
+    private let lock = NSLock()
+    private var receivedBytes: Int64 = 0
+
+    init(
+        chunk: ChunkRange,
+        writer: RandomAccessFileWriter,
+        tracker: ProgressTracker,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        self.chunk = chunk
+        self.writer = writer
+        self.tracker = tracker
+        self.onProgress = onProgress
+        self.continuation = continuation
+    }
+
+    func reserveWriteOffset(byteCount: Int) throws -> Int64 {
+        let byteCount = Int64(byteCount)
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard receivedBytes + byteCount <= chunk.length else {
+            throw ModelDownloaderError.incompleteResponse
+        }
+
+        let offset = chunk.start + receivedBytes
+        receivedBytes += byteCount
+        return offset
+    }
+
+    var isComplete: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedBytes == chunk.length
+    }
+}
+
+private final class RangedDownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [Int: RangedChunkDownloadState] = [:]
+
+    func download(
+        request: URLRequest,
+        chunk: ChunkRange,
+        session: URLSession,
+        writer: RandomAccessFileWriter,
+        tracker: ProgressTracker,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void
+    ) async throws {
+        let taskBox = URLSessionTaskBox()
+
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request)
+                let state = RangedChunkDownloadState(
+                    chunk: chunk,
+                    writer: writer,
+                    tracker: tracker,
+                    onProgress: onProgress,
+                    continuation: continuation
+                )
+                register(state, for: task)
+                taskBox.set(task)
+                task.resume()
+            }
+        } onCancel: {
+            taskBox.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            complete(taskIdentifier: dataTask.taskIdentifier, with: .failure(ModelDownloaderError.httpStatus(-1)))
+            completionHandler(.cancel)
+            return
+        }
+
+        guard http.statusCode == 206 else {
+            complete(taskIdentifier: dataTask.taskIdentifier, with: .failure(ModelDownloaderError.httpStatus(http.statusCode)))
+            completionHandler(.cancel)
+            return
+        }
+
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let state = state(for: dataTask.taskIdentifier) else { return }
+
+        do {
+            let offset = try state.reserveWriteOffset(byteCount: data.count)
+            try state.writer.write(data, at: offset)
+            state.tracker.add(Int64(data.count), forChunk: state.chunk.index)
+            state.tracker.maybeEmit(state.onProgress)
+        } catch {
+            complete(taskIdentifier: dataTask.taskIdentifier, with: .failure(error))
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let state = state(for: task.taskIdentifier) else { return }
+
+        if let error {
+            complete(taskIdentifier: task.taskIdentifier, with: .failure(error))
+            return
+        }
+
+        guard state.isComplete else {
+            complete(taskIdentifier: task.taskIdentifier, with: .failure(ModelDownloaderError.incompleteResponse))
+            return
+        }
+
+        complete(taskIdentifier: task.taskIdentifier, with: .success(()))
+    }
+
+    private func register(_ state: RangedChunkDownloadState, for task: URLSessionTask) {
+        lock.lock()
+        states[task.taskIdentifier] = state
+        lock.unlock()
+    }
+
+    private func state(for taskIdentifier: Int) -> RangedChunkDownloadState? {
+        lock.lock()
+        defer { lock.unlock() }
+        return states[taskIdentifier]
+    }
+
+    private func complete(taskIdentifier: Int, with result: Result<Void, Error>) {
+        lock.lock()
+        let state = states.removeValue(forKey: taskIdentifier)
+        lock.unlock()
+
+        guard let state else { return }
+
+        switch result {
+        case .success:
+            state.continuation.resume()
+        case .failure(let error):
+            state.continuation.resume(throwing: error)
+        }
     }
 }
 
@@ -521,9 +761,10 @@ public enum ModelDownloader {
             sidecar: sidecar
         )
         let tracker = ProgressTracker(alreadyHad: alreadyHad, totalBytes: plan.totalBytes)
-        let writer = try FileWriter(url: partialURL)
+        let writer = try RandomAccessFileWriter(url: partialURL)
         let validator = sidecar.etag ?? sidecar.lastModified
-        let session = makeURLSession(configuration: configuration)
+        let delegate = RangedDownloadDelegate()
+        let session = makeURLSession(configuration: configuration, delegate: delegate)
         defer { session.invalidateAndCancel() }
 
         do {
@@ -537,6 +778,7 @@ public enum ModelDownloader {
                                 from: url,
                                 validator: validator,
                                 session: session,
+                                delegate: delegate,
                                 requestTimeout: configuration.requestTimeout,
                                 writer: writer,
                                 queue: queue,
@@ -548,17 +790,17 @@ public enum ModelDownloader {
                 }
                 try await group.waitForAll()
             }
-            try await writer.close()
+            try writer.close()
         } catch is CancellationError {
-            try? await writer.close()
+            try? writer.close()
             await queue.flush()
             throw ModelDownloaderError.cancelled
         } catch let error as URLError where error.code == .cancelled {
-            try? await writer.close()
+            try? writer.close()
             await queue.flush()
             throw ModelDownloaderError.cancelled
         } catch {
-            try? await writer.close()
+            try? writer.close()
             await queue.flush()
             throw error
         }
@@ -592,8 +834,9 @@ public enum ModelDownloader {
         from url: URL,
         validator: String?,
         session: URLSession,
+        delegate: RangedDownloadDelegate,
         requestTimeout: TimeInterval,
-        writer: FileWriter,
+        writer: RandomAccessFileWriter,
         queue: ChunkWorkQueue,
         tracker: ProgressTracker,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void
@@ -606,26 +849,23 @@ public enum ModelDownloader {
         }
         request.timeoutInterval = requestTimeout
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ModelDownloaderError.httpStatus(-1)
-        }
-        guard http.statusCode == 206 else {
-            throw ModelDownloaderError.httpStatus(http.statusCode)
-        }
         try Task.checkCancellation()
-
-        guard Int64(data.count) == chunk.length else {
-            throw ModelDownloaderError.incompleteResponse
-        }
-
-        try await writer.write(data, at: chunk.start)
-        await tracker.add(Int64(data.count), forChunk: chunk.index)
+        try await delegate.download(
+            request: request,
+            chunk: chunk,
+            session: session,
+            writer: writer,
+            tracker: tracker,
+            onProgress: onProgress
+        )
         await queue.markDone(chunk.index)
-        await tracker.maybeEmit(onProgress)
+        tracker.maybeEmit(onProgress)
     }
 
-    private static func makeURLSession(configuration: ModelDownloadConfiguration) -> URLSession {
+    private static func makeURLSession(
+        configuration: ModelDownloadConfiguration,
+        delegate: URLSessionDataDelegate? = nil
+    ) -> URLSession {
         let urlSessionConfiguration = URLSessionConfiguration.default
         urlSessionConfiguration.httpMaximumConnectionsPerHost = configuration.parallelConnections
         urlSessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -633,7 +873,16 @@ public enum ModelDownloader {
         urlSessionConfiguration.timeoutIntervalForResource = configuration.requestTimeout
         urlSessionConfiguration.urlCache = nil
         urlSessionConfiguration.waitsForConnectivity = true
-        return URLSession(configuration: urlSessionConfiguration)
+
+        let delegateQueue = OperationQueue()
+        delegateQueue.name = "com.carbocation.CarbocationLocalLLM.ModelDownloader"
+        delegateQueue.maxConcurrentOperationCount = 1
+
+        return URLSession(
+            configuration: urlSessionConfiguration,
+            delegate: delegate,
+            delegateQueue: delegate == nil ? nil : delegateQueue
+        )
     }
 
     private struct ProbeResult: Sendable {
