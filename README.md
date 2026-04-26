@@ -75,7 +75,7 @@ import CarbocationLocalLLMRuntime
 @MainActor
 let modelLibrary = ModelLibrary(
     root: ModelStorage.modelsDirectory(
-        sharedGroupIdentifier: ModelStorage.defaultSharedGroupID,
+        sharedGroupIdentifier: "group.com.yourcompany.yourapp.shared",
         appSupportFolderName: "YourAppName"
     ),
     contextLengthProbe: { url in
@@ -172,7 +172,7 @@ For JSON extraction, keep grammar-constrained options for GGUF models. For Apple
 
 - Minimum deployment target: macOS 14.
 - App Sandbox network client entitlement: required if the app downloads models from Hugging Face or another remote URL.
-- App Group entitlement: required only if the app wants shared model storage through `ModelStorage.defaultSharedGroupID` or another shared group. Without a usable App Group container, `ModelStorage.modelsDirectory` falls back to the app's Application Support folder.
+- App Group entitlement: required only if the app wants shared model storage. Pass the same App Group ID enabled in Xcode, for example `group.com.yourcompany.yourapp.shared`, as `ModelStorage.modelsDirectory(sharedGroupIdentifier:appSupportFolderName:)`. Without a usable App Group container, `ModelStorage.modelsDirectory` falls back to the app's Application Support folder.
 - Model files: `.gguf` weights are user data, not part of the Swift package. Let the app download/import them into the model library instead of bundling large model files into the app binary.
 - Apple Intelligence through the unified runtime: requires a supported device, Apple Intelligence enabled in System Settings, macOS 26 or newer, and an app build made with an SDK that includes Foundation Models.
 

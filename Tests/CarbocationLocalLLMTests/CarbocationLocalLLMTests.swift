@@ -2,6 +2,43 @@ import XCTest
 @testable import CarbocationLocalLLM
 
 final class CarbocationLocalLLMTests: XCTestCase {
+    func testModelStorageKeepsCarbocationSharedGroupAlias() {
+        XCTAssertEqual(ModelStorage.carbocationSharedGroupID, "group.com.carbocation.shared")
+        XCTAssertEqual(ModelStorage.defaultSharedGroupID, ModelStorage.carbocationSharedGroupID)
+    }
+
+    func testModelStorageUsesCustomSharedGroupIdentifier() throws {
+        let groupRoot = try makeTemporaryDirectory()
+        var requestedIdentifier: String?
+
+        let modelsDirectory = ModelStorage.modelsDirectory(
+            sharedGroupIdentifier: "group.com.example.shared",
+            appSupportFolderName: "ExampleApp",
+            sharedGroupRootResolver: { identifier, _ in
+                requestedIdentifier = identifier
+                return identifier == "group.com.example.shared" ? groupRoot : nil
+            }
+        )
+
+        let expected = groupRoot.appendingPathComponent("Models", isDirectory: true)
+        XCTAssertEqual(requestedIdentifier, "group.com.example.shared")
+        XCTAssertEqual(modelsDirectory.standardizedFileURL.path, expected.standardizedFileURL.path)
+    }
+
+    func testModelStorageFallsBackToApplicationSupportWhenSharedGroupUnavailable() {
+        let appSupportFolderName = "ExampleApp-\(UUID().uuidString)"
+
+        let modelsDirectory = ModelStorage.modelsDirectory(
+            sharedGroupIdentifier: "group.com.example.missing",
+            appSupportFolderName: appSupportFolderName,
+            sharedGroupRootResolver: { _, _ in nil }
+        )
+
+        let expected = ModelStorage.appSupportDirectory(appSupportFolderName: appSupportFolderName)
+            .appendingPathComponent("Models", isDirectory: true)
+        XCTAssertEqual(modelsDirectory.standardizedFileURL.path, expected.standardizedFileURL.path)
+    }
+
     func testInstalledModelInfersQuantization() {
         XCTAssertEqual(InstalledModel.inferQuantization(from: "Qwen2.5-7B-Instruct-Q4_K_M.gguf"), "Q4_K_M")
         XCTAssertEqual(InstalledModel.inferQuantization(from: "Phi-3.5-mini-instruct-Q5_K_M.gguf"), "Q5_K_M")
