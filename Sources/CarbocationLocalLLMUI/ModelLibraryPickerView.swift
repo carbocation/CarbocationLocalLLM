@@ -13,6 +13,7 @@ public struct ModelLibraryPickerView: View {
     private let confirmDisabled: Bool
     private let systemModels: [LLMSystemModelOption]
     private let curatedModels: [CuratedModel]
+    private let labelPolicy: ModelLibraryPickerLabelPolicy
     private let onConfirmSelection: (@MainActor (LLMModelSelection) -> Void)?
     private let onModelDeleted: @MainActor (InstalledModel) -> Void
     private let onConfirmInstalledModel: (@MainActor (InstalledModel) -> Void)?
@@ -31,6 +32,7 @@ public struct ModelLibraryPickerView: View {
         confirmTitle: String = "Use Selected Model",
         confirmDisabled: Bool = false,
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        labelPolicy: ModelLibraryPickerLabelPolicy = .default,
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
@@ -41,6 +43,7 @@ public struct ModelLibraryPickerView: View {
         self.confirmDisabled = confirmDisabled
         self.systemModels = []
         self.curatedModels = curatedModels
+        self.labelPolicy = labelPolicy
         self.onConfirmSelection = nil
         self.onModelDeleted = onModelDeleted
         self.onConfirmInstalledModel = onConfirm
@@ -54,6 +57,7 @@ public struct ModelLibraryPickerView: View {
         confirmDisabled: Bool = false,
         systemModels: [LLMSystemModelOption],
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        labelPolicy: ModelLibraryPickerLabelPolicy = .default,
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirmSelection: @escaping @MainActor (LLMModelSelection) -> Void
     ) {
@@ -64,6 +68,7 @@ public struct ModelLibraryPickerView: View {
         self.confirmDisabled = confirmDisabled
         self.systemModels = systemModels
         self.curatedModels = curatedModels
+        self.labelPolicy = labelPolicy
         self.onConfirmSelection = onConfirmSelection
         self.onModelDeleted = onModelDeleted
         self.onConfirmInstalledModel = nil
@@ -95,6 +100,14 @@ public struct ModelLibraryPickerView: View {
         CuratedModelCatalog.recommendedModel(
             forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             among: curatedModels
+        )
+    }
+
+    private var bestInstalledCuratedModel: CuratedModel? {
+        ModelLibraryPickerLabelPolicy.bestInstalledCuratedModel(
+            forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            installedModels: library.models,
+            curatedModels: curatedModels
         )
     }
 
@@ -214,6 +227,7 @@ public struct ModelLibraryPickerView: View {
 
     private func systemModelRow(_ model: LLMSystemModelOption) -> some View {
         let isSelected = model.id == selectedModelID
+        let statusLabel = labelPolicy.systemModelLabel(for: model)
         return Button {
             selectedModelID = model.id
         } label: {
@@ -225,9 +239,14 @@ public struct ModelLibraryPickerView: View {
                     .foregroundStyle(.tint)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.displayName)
-                        .font(.body)
-                        .foregroundStyle(.primary)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(model.displayName)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                        if let statusLabel {
+                            statusBadge(statusLabel)
+                        }
+                    }
                     HStack(spacing: 6) {
                         Text(model.subtitle)
                         if model.contextLength > 0 {
@@ -295,6 +314,11 @@ public struct ModelLibraryPickerView: View {
 
     private func installedRow(_ model: InstalledModel) -> some View {
         let isSelected = model.id.uuidString == selectedModelID
+        let statusLabel = labelPolicy.installedModelLabel(
+            for: model,
+            recommendedCuratedModel: recommendedCuratedModel,
+            bestInstalledCuratedModel: bestInstalledCuratedModel
+        )
         return Button {
             selectedModelID = model.id.uuidString
         } label: {
@@ -303,9 +327,14 @@ public struct ModelLibraryPickerView: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.displayName)
-                        .font(.body)
-                        .foregroundStyle(.primary)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(model.displayName)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                        if let statusLabel {
+                            statusBadge(statusLabel)
+                        }
+                    }
                     HStack(spacing: 6) {
                         if let quantization = model.quantization {
                             Text(quantization)
@@ -416,14 +445,8 @@ public struct ModelLibraryPickerView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(entry.displayName)
                         .font(.body)
-                    if isRecommended {
-                        Text("Recommended")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.accentColor.opacity(0.15), in: Capsule())
-                            .foregroundStyle(Color.accentColor)
+                    if isRecommended, let recommendedLabel = labelPolicy.recommendedLabel {
+                        statusBadge(recommendedLabel)
                     }
                 }
                 Text(entry.subtitle)
@@ -454,6 +477,34 @@ public struct ModelLibraryPickerView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func statusBadge(_ label: ModelLibraryPickerStatusLabel) -> some View {
+        HStack(spacing: 3) {
+            if let systemImageName = label.systemImageName {
+                Image(systemName: systemImageName)
+            }
+            Text(label.title)
+        }
+        .font(.caption2)
+        .fontWeight(.semibold)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(statusBadgeColor(for: label.tone).opacity(0.15), in: Capsule())
+        .foregroundStyle(statusBadgeColor(for: label.tone))
+    }
+
+    private func statusBadgeColor(for tone: ModelLibraryPickerStatusLabel.Tone) -> Color {
+        switch tone {
+        case .accent:
+            return .accentColor
+        case .positive:
+            return .green
+        case .warning:
+            return .orange
+        case .secondary:
+            return .secondary
+        }
     }
 
     private func activeDownloadRow(_ download: ModelLibraryDownload) -> some View {

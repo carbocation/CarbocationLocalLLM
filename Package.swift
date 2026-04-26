@@ -123,6 +123,10 @@ let package = Package(
         .testTarget(
             name: "CarbocationLocalLLMRuntimeTests",
             dependencies: ["CarbocationLocalLLMRuntime"]
+        ),
+        .testTarget(
+            name: "CarbocationLocalLLMUITests",
+            dependencies: ["CarbocationLocalLLMUI"]
         )
     ]
 )

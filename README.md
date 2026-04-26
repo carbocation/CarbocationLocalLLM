@@ -190,7 +190,7 @@ This library deliberately avoids owning app policy. Host apps should still own:
 - active-engine unload policy after deletion
 - migrations and invalid-selection warnings
 
-`ModelLibraryPickerView` is configurable. By default it shows `CuratedModelCatalog.all`, but host apps can pass `curatedModels:` to replace the recommended download list. Apps can also pass `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
+`ModelLibraryPickerView` is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended. Host apps can pass `curatedModels:` to replace the recommended download list, `labelPolicy:` to replace or suppress picker labels, and `onModelDeleted:` to unload active engines or perform other host-owned cleanup after a model deletion succeeds.
 
 ### Temporary Adjacent-Checkout Path
 
