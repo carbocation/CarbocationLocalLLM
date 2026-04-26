@@ -35,8 +35,9 @@ Do not download or drag `llama.xcframework` into the app project manually. The r
 - `CarbocationLocalLLM`: core model-library types, selected-model state, context policy, generation options, JSON helpers, download/import support, and fake-engine testing helpers.
 - `CarbocationLocalLLMUI`: shared SwiftUI model-library UI for installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted downloads, delete, refresh, and reveal folder.
 - `CarbocationLlamaRuntime`: llama.cpp-backed generation, model/context loading, model probing, chat-template fallback handling, grammar-aware generation, streaming events, and cancellation.
+- `CarbocationAppleIntelligenceRuntime`: optional Apple Intelligence / Foundation Models-backed generation for systems where Apple's on-device model is available. This product builds on older SDKs, but reports unavailable unless the app is built with the Foundation Models SDK and runs on a supported device with Apple Intelligence enabled.
 
-Most apps that provide real local generation should add all three products to the app target. Apps that only need shared model storage or metadata can use `CarbocationLocalLLM` alone.
+Most apps that provide GGUF-backed local generation should add `CarbocationLocalLLM`, `CarbocationLocalLLMUI`, and `CarbocationLlamaRuntime` to the app target. Apps that want to offer Apple's system model before a user downloads a larger GGUF can also add `CarbocationAppleIntelligenceRuntime`. Apps that only need shared model storage or metadata can use `CarbocationLocalLLM` alone.
 
 Host app source should import module names only:
 
@@ -44,6 +45,7 @@ Host app source should import module names only:
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
 import CarbocationLlamaRuntime
+import CarbocationAppleIntelligenceRuntime
 ```
 
 Filesystem paths such as `../CarbocationLocalLLM` should not appear in app source or Xcode package dependencies for the binary-release path.
@@ -60,6 +62,8 @@ For a release tag, Xcode should:
 The host app should not add `Scripts/build-llama-from-xcode.sh`, initialize `Vendor/llama.cpp`, set `CARBOCATION_LOCAL_LLM_ROOT`, or prebuild `Vendor/llama-artifacts/current`. Those steps are only for local package development or temporary adjacent-checkout migration work.
 
 The binary artifact is a static XCFramework. SwiftPM handles the package link step, and `CarbocationLlamaRuntime` declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
+
+`CarbocationAppleIntelligenceRuntime` has no model artifact. It calls Apple's system model through Foundation Models when the runtime reports available.
 
 ### Minimal Host-App Wiring
 
@@ -87,6 +91,7 @@ Add the shared picker wherever the app lets the user choose, download, import, o
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
 import CarbocationLlamaRuntime
+import CarbocationAppleIntelligenceRuntime
 import SwiftUI
 
 struct LocalModelSettingsView: View {
@@ -97,6 +102,12 @@ struct LocalModelSettingsView: View {
         ModelLibraryPickerView(
             library: library,
             selectedModelID: $selectedModelID,
+            systemModels: AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? [],
+            onConfirmSystemModel: { systemModel in
+                if systemModel.id == AppleIntelligenceEngine.systemModelID {
+                    // Route generation to AppleIntelligenceEngine.shared.
+                }
+            },
             onModelDeleted: { deleted in
                 Task {
                     if await LlamaEngine.shared.currentModelID() == deleted.id {
@@ -137,12 +148,58 @@ let response = try await engine.generate(
 }
 ```
 
+### Apple Intelligence Runtime
+
+Apple's system model should be treated as a separate provider from installed GGUF models. Check availability before showing it in the host app:
+
+```swift
+import CarbocationAppleIntelligenceRuntime
+
+let availability = AppleIntelligenceEngine.availability()
+if availability.shouldOfferModelOption {
+    // Show an "Apple Intelligence" model option.
+}
+```
+
+`ModelLibraryPickerView` can render that option above installed GGUF models:
+
+```swift
+ModelLibraryPickerView(
+    library: library,
+    selectedModelID: $selectedModelID,
+    systemModels: AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? [],
+    onConfirmSystemModel: { systemModel in
+        guard systemModel.id == AppleIntelligenceEngine.systemModelID else { return }
+        // Route generation to AppleIntelligenceEngine.shared.
+    },
+    onConfirm: { installedModel in
+        // Route generation to LlamaEngine.shared.
+    }
+)
+```
+
+When selected, use the engine through the same `LLMEngine` surface:
+
+```swift
+let engine = AppleIntelligenceEngine.shared
+let response = try await engine.generate(
+    system: "You are a concise assistant.",
+    prompt: userPrompt,
+    options: .extractionSafe
+) { event in
+    // Update host-app progress UI if desired.
+}
+```
+
+The Apple Intelligence runtime maps temperature, top-k/top-p style sampling, seeds, and maximum response tokens where Foundation Models exposes an equivalent. llama.cpp GBNF grammars are not supported by Apple's text response API; by default this runtime still tries to generate and applies stop-sequence and balanced-JSON post-processing. Set `AppleIntelligenceEngineConfiguration(unsupportedFeatureBehavior: .fail)` if the host app would rather reject unsupported options before generation.
+
 ### Xcode Target Settings
 
 - Minimum deployment target: macOS 14.
 - App Sandbox network client entitlement: required if the app downloads models from Hugging Face or another remote URL.
 - App Group entitlement: required only if the app wants shared model storage through `ModelStorage.defaultSharedGroupID` or another shared group. Without a usable App Group container, `ModelStorage.modelsDirectory` falls back to the app's Application Support folder.
 - Model files: `.gguf` weights are user data, not part of the Swift package. Let the app download/import them into the model library instead of bundling large model files into the app binary.
+- Apple Intelligence: requires a supported device, Apple Intelligence enabled in System Settings, macOS 26 or newer, and an app build made with an SDK that includes Foundation Models.
 
 ### Host-App Responsibilities
 
@@ -153,6 +210,7 @@ This library deliberately avoids owning app policy. Host apps should still own:
 - app-specific onboarding/settings copy
 - context cap defaults
 - generation settings UI
+- provider-selection UI, including whether to offer Apple Intelligence when `AppleIntelligenceEngine.availability().shouldOfferModelOption` is true
 - app-specific prompts, grammars, and operations
 - active-engine unload policy after deletion
 - migrations and invalid-selection warnings
@@ -234,10 +292,18 @@ swift test
 Expected current baseline:
 
 ```text
-24 tests, 0 failures
+0 failures
+```
+
+The Apple Intelligence live generation smoke test is skipped by default so normal CI does not depend on a supported Apple Intelligence device. To run it locally on an eligible macOS 26+ system:
+
+```sh
+CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 swift test --filter CarbocationAppleIntelligenceRuntimeTests/testLiveGenerationWhenExplicitlyEnabled
 ```
 
 ### Smoke App
+
+`CLLMSmoke` shows Apple Intelligence in the picker when `AppleIntelligenceEngine.systemModelOption()` reports available. Its Apple Intelligence smoke path checks that the system model can generate a non-empty response; the GGUF path keeps the stricter grammar-constrained JSON smoke test.
 
 Open `Package.swift` in Xcode.
 

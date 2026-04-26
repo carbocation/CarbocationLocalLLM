@@ -130,6 +130,28 @@ public enum LLMGenerationBudget {
     public static let promptSafetyTokens = 256
 }
 
+public struct LLMSystemModelOption: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var displayName: String
+    public var subtitle: String
+    public var contextLength: Int
+    public var systemImageName: String
+
+    public init(
+        id: String,
+        displayName: String,
+        subtitle: String,
+        contextLength: Int,
+        systemImageName: String
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.subtitle = subtitle
+        self.contextLength = contextLength
+        self.systemImageName = systemImageName
+    }
+}
+
 public enum LlamaContextMode: String, CaseIterable, Codable, Sendable {
     case auto
     case manual

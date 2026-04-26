@@ -55,6 +55,10 @@ let package = Package(
             targets: ["CarbocationLlamaRuntime"]
         ),
         .library(
+            name: "CarbocationAppleIntelligenceRuntime",
+            targets: ["CarbocationAppleIntelligenceRuntime"]
+        ),
+        .library(
             name: "CarbocationLocalLLMUI",
             targets: ["CarbocationLocalLLMUI"]
         ),
@@ -82,12 +86,17 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CarbocationAppleIntelligenceRuntime",
+            dependencies: ["CarbocationLocalLLM"]
+        ),
+        .target(
             name: "CarbocationLocalLLMUI",
             dependencies: ["CarbocationLocalLLM"]
         ),
         .executableTarget(
             name: "CLLMSmoke",
             dependencies: [
+                "CarbocationAppleIntelligenceRuntime",
                 "CarbocationLocalLLMUI",
                 "CarbocationLlamaRuntime"
             ]
@@ -99,6 +108,10 @@ let package = Package(
         .testTarget(
             name: "CarbocationLlamaRuntimeTests",
             dependencies: ["CarbocationLlamaRuntime"]
+        ),
+        .testTarget(
+            name: "CarbocationAppleIntelligenceRuntimeTests",
+            dependencies: ["CarbocationAppleIntelligenceRuntime"]
         )
     ]
 )

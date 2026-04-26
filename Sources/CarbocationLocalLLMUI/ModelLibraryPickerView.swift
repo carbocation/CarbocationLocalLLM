@@ -11,7 +11,9 @@ public struct ModelLibraryPickerView: View {
     private let title: String
     private let confirmTitle: String
     private let confirmDisabled: Bool
+    private let systemModels: [LLMSystemModelOption]
     private let curatedModels: [CuratedModel]
+    private let onConfirmSystemModel: @MainActor (LLMSystemModelOption) -> Void
     private let onModelDeleted: @MainActor (InstalledModel) -> Void
     private let onConfirm: @MainActor (InstalledModel) -> Void
 
@@ -28,7 +30,9 @@ public struct ModelLibraryPickerView: View {
         title: String = "Choose a Local Model",
         confirmTitle: String = "Use Selected Model",
         confirmDisabled: Bool = false,
+        systemModels: [LLMSystemModelOption] = [],
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        onConfirmSystemModel: @escaping @MainActor (LLMSystemModelOption) -> Void = { _ in },
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
@@ -37,13 +41,23 @@ public struct ModelLibraryPickerView: View {
         self.title = title
         self.confirmTitle = confirmTitle
         self.confirmDisabled = confirmDisabled
+        self.systemModels = systemModels
         self.curatedModels = curatedModels
+        self.onConfirmSystemModel = onConfirmSystemModel
         self.onModelDeleted = onModelDeleted
         self.onConfirm = onConfirm
     }
 
+    private var selectedSystemModel: LLMSystemModelOption? {
+        systemModels.first { $0.id == selectedModelID }
+    }
+
     private var selectedModel: InstalledModel? {
         library.model(id: selectedModelID)
+    }
+
+    private var hasSelection: Bool {
+        selectedSystemModel != nil || selectedModel != nil
     }
 
     private var recommendedCuratedModel: CuratedModel? {
@@ -59,6 +73,10 @@ public struct ModelLibraryPickerView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if !systemModels.isEmpty {
+                        systemModelSection
+                        Divider()
+                    }
                     installedSection
                     if !library.partials.isEmpty {
                         Divider()
@@ -80,6 +98,7 @@ public struct ModelLibraryPickerView: View {
         }
         .task {
             library.refresh()
+            normalizeSelection()
             refreshToken = UUID()
         }
         .sheet(isPresented: $showCustomSheet) {
@@ -133,7 +152,7 @@ public struct ModelLibraryPickerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.title3.bold())
-                Text("Installed models, curated downloads, Hugging Face URLs, and local .gguf imports.")
+                Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -141,6 +160,59 @@ public struct ModelLibraryPickerView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
+    }
+
+    private var headerSubtitle: String {
+        if systemModels.isEmpty {
+            return "Installed models, curated downloads, Hugging Face URLs, and local .gguf imports."
+        }
+        return "System models, installed models, curated downloads, Hugging Face URLs, and local .gguf imports."
+    }
+
+    @ViewBuilder
+    private var systemModelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("System Models")
+                .font(.headline)
+
+            ForEach(systemModels) { model in
+                systemModelRow(model)
+            }
+        }
+    }
+
+    private func systemModelRow(_ model: LLMSystemModelOption) -> some View {
+        let isSelected = model.id == selectedModelID
+        return Button {
+            selectedModelID = model.id
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+
+                Image(systemName: model.systemImageName)
+                    .foregroundStyle(.tint)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.displayName)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        Text(model.subtitle)
+                        if model.contextLength > 0 {
+                            Text("context \(model.contextLength.formatted())")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -156,7 +228,7 @@ public struct ModelLibraryPickerView: View {
             }
 
             if library.models.isEmpty {
-                Text("No models installed. Download one below, or import an existing .gguf file.")
+                Text("No GGUF models installed. Download one below, or import an existing .gguf file.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 6)
@@ -384,24 +456,30 @@ public struct ModelLibraryPickerView: View {
 
     private var footer: some View {
         HStack {
-            if let selectedModel {
+            if let selectedSystemModel {
+                Label(selectedSystemModel.displayName, systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if let selectedModel {
                 Label(selectedModel.displayName, systemImage: "checkmark.circle")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             } else {
-                Label("Select an installed model", systemImage: "circle")
+                Label("Select a model", systemImage: "circle")
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
             Button(confirmTitle) {
-                if let selectedModel {
+                if let selectedSystemModel {
+                    onConfirmSystemModel(selectedSystemModel)
+                } else if let selectedModel {
                     onConfirm(selectedModel)
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(selectedModel == nil || confirmDisabled)
+            .disabled(!hasSelection || confirmDisabled)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -478,7 +556,7 @@ public struct ModelLibraryPickerView: View {
         do {
             try library.delete(id: model.id)
             if selectedModelID == model.id.uuidString {
-                selectedModelID = library.models.first?.id.uuidString ?? ""
+                selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
             }
             refresh()
             onModelDeleted(model)
@@ -493,7 +571,16 @@ public struct ModelLibraryPickerView: View {
 
     private func refresh() {
         library.refresh()
+        normalizeSelection()
         refreshToken = UUID()
+    }
+
+    private func normalizeSelection() {
+        if selectedModelID.isEmpty {
+            selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
+        } else if selectedSystemModel == nil && selectedModel == nil {
+            selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
+        }
     }
 
     private func recommendationSummary() -> String {

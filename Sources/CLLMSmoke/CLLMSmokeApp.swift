@@ -1,4 +1,5 @@
 import AppKit
+import CarbocationAppleIntelligenceRuntime
 import CarbocationLlamaRuntime
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
@@ -88,7 +89,11 @@ private struct SmokeRootView: View {
                 selectedModelID: $selectedModelID,
                 title: "CLLMSmoke",
                 confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
-                confirmDisabled: smoke.isRunning
+                confirmDisabled: smoke.isRunning,
+                systemModels: Self.systemModels,
+                onConfirmSystemModel: { model in
+                    smoke.run(systemModel: model)
+                }
             ) { model in
                 smoke.run(model: model, root: library.root)
             }
@@ -111,7 +116,7 @@ private struct SmokeRootView: View {
                 }
 
                 ScrollView {
-                    Text(smoke.output.isEmpty ? "Select an installed model and run the smoke test." : smoke.output)
+                    Text(smoke.output.isEmpty ? "Select a model and run the smoke test." : smoke.output)
                         .font(.system(.caption, design: .monospaced))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -126,6 +131,10 @@ private struct SmokeRootView: View {
         .onChange(of: selectedModelID) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: "CLLMSmoke.selectedModelID")
         }
+    }
+
+    private static var systemModels: [LLMSystemModelOption] {
+        AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? []
     }
 }
 
@@ -160,6 +169,22 @@ private final class SmokeState {
         }
     }
 
+    func run(systemModel: LLMSystemModelOption) {
+        guard !isRunning else { return }
+        isRunning = true
+        output = ""
+
+        Task { @MainActor in
+            switch systemModel.id {
+            case AppleIntelligenceEngine.systemModelID:
+                await runAppleIntelligenceSmoke(systemModel: systemModel)
+            default:
+                append("smoke: failed: unsupported system model \(systemModel.displayName)")
+            }
+            isRunning = false
+        }
+    }
+
     private func runSmoke(model: InstalledModel, root: URL) async {
         do {
             append("model: \(model.displayName)")
@@ -189,21 +214,51 @@ private final class SmokeState {
                 }
             }
 
-            let normalized = JSONSalvage.unwrapResponse(response)
+            let normalized = try Self.validatedNormalizedJSON(from: response)
             append("rawResponse:")
             append(response)
             append("normalizedResponse:")
             append(normalized)
 
-            guard let data = normalized.data(using: .utf8),
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["ok"] != nil,
-                  object["message"] != nil
-            else {
-                throw SmokeError.invalidJSON(normalized)
+            await engine.unload()
+            append("smoke: ok")
+        } catch {
+            append("smoke: failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func runAppleIntelligenceSmoke(systemModel: LLMSystemModelOption) async {
+        do {
+            append("model: \(systemModel.displayName)")
+            append("provider: Apple Intelligence")
+            append("context: \(systemModel.contextLength)")
+
+            let availability = AppleIntelligenceEngine.availability()
+            guard availability.isAvailable else {
+                throw AppleIntelligenceEngineError.unavailable(availability)
             }
 
-            await engine.unload()
+            let engine = AppleIntelligenceEngine(configuration: AppleIntelligenceEngineConfiguration())
+            let options = GenerationOptions(
+                maxOutputTokens: 96,
+                stopAtBalancedJSON: true
+            )
+            let response = try await engine.generate(
+                system: "Return only JSON matching the requested schema. Do not include prose.",
+                prompt: #"Return {"ok": true, "message": "hello"}."#,
+                options: options
+            ) { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.append(Self.format(event: event))
+                }
+            }
+
+            let normalized = try Self.validatedNormalizedJSON(from: response)
+            append("rawResponse:")
+            append(response)
+            append("normalizedResponse:")
+            append(normalized)
+
             append("smoke: ok")
         } catch {
             append("smoke: failed: \(error.localizedDescription)")
@@ -232,6 +287,31 @@ private final class SmokeState {
             return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
         }
     }
+
+    private static func validatedNormalizedJSON(from response: String) throws -> String {
+        let normalized = JSONSalvage.unwrapResponse(response)
+        if isValidSmokePayload(normalized) {
+            return normalized
+        }
+
+        let payload = try JSONSalvage.decode(SmokeJSONPayload.self, from: response)
+        guard payload.ok != nil, payload.message != nil else {
+            throw SmokeError.invalidJSON(normalized)
+        }
+        return try LocalLLMJSON.prettyPrintedString(from: payload)
+    }
+
+    private static func isValidSmokePayload(_ text: String) -> Bool {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["ok"] != nil && object["message"] != nil
+    }
+}
+
+private struct SmokeJSONPayload: Codable {
+    var ok: Bool?
+    var message: String?
 }
 
 private enum SmokeError: LocalizedError {
