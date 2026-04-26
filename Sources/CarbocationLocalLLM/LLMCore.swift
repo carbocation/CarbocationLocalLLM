@@ -130,21 +130,71 @@ public enum LLMGenerationBudget {
     public static let promptSafetyTokens = 256
 }
 
+public enum LLMSystemModelID: String, Codable, Hashable, Sendable {
+    case appleIntelligence = "system.apple-intelligence"
+}
+
+public enum LLMModelSelection: Codable, Hashable, Sendable {
+    case installed(UUID)
+    case system(LLMSystemModelID)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        guard let selection = LLMModelSelection(storageValue: value) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid model selection: \(value)"
+            )
+        }
+        self = selection
+    }
+
+    public init?(storageValue: String) {
+        if let systemModel = LLMSystemModelID(rawValue: storageValue) {
+            self = .system(systemModel)
+            return
+        }
+        guard let uuid = UUID(uuidString: storageValue) else {
+            return nil
+        }
+        self = .installed(uuid)
+    }
+
+    public var storageValue: String {
+        switch self {
+        case .installed(let id):
+            return id.uuidString
+        case .system(let id):
+            return id.rawValue
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(storageValue)
+    }
+}
+
 public struct LLMSystemModelOption: Identifiable, Hashable, Sendable {
-    public var id: String
+    public var selection: LLMModelSelection
     public var displayName: String
     public var subtitle: String
     public var contextLength: Int
     public var systemImageName: String
 
+    public var id: String {
+        selection.storageValue
+    }
+
     public init(
-        id: String,
+        selection: LLMModelSelection,
         displayName: String,
         subtitle: String,
         contextLength: Int,
         systemImageName: String
     ) {
-        self.id = id
+        self.selection = selection
         self.displayName = displayName
         self.subtitle = subtitle
         self.contextLength = contextLength

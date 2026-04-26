@@ -1,7 +1,6 @@
 import AppKit
-import CarbocationAppleIntelligenceRuntime
-import CarbocationLlamaRuntime
 import CarbocationLocalLLM
+import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMUI
 import Observation
 import SwiftUI
@@ -30,7 +29,7 @@ private final class SmokeAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let root = ModelStorage.modelsDirectory(appSupportFolderName: "CarbocationLocalLLM")
         let contextProbe: ModelContextLengthProbe = { url in
-            LlamaRuntimeModelProbe.probeTrainingContext(at: url)
+            LocalLLMEngine.probeTrainingContext(at: url)
         }
         let library = ModelLibrary(
             root: root,
@@ -91,12 +90,10 @@ private struct SmokeRootView: View {
                 confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
                 confirmDisabled: smoke.isRunning,
                 systemModels: Self.systemModels,
-                onConfirmSystemModel: { model in
-                    smoke.run(systemModel: model)
+                onConfirmSelection: { selection in
+                    smoke.run(selection: selection, library: library)
                 }
-            ) { model in
-                smoke.run(model: model, root: library.root)
-            }
+            )
             .frame(width: 620)
             .frame(minHeight: 680)
 
@@ -134,7 +131,7 @@ private struct SmokeRootView: View {
     }
 
     private static var systemModels: [LLMSystemModelOption] {
-        AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? []
+        LocalLLMEngine.availableSystemModels()
     }
 }
 
@@ -158,54 +155,43 @@ private final class SmokeState {
         output = ""
     }
 
-    func run(model: InstalledModel, root: URL) {
+    func run(selection: LLMModelSelection, library: ModelLibrary) {
         guard !isRunning else { return }
         isRunning = true
         output = ""
 
         Task { @MainActor in
-            await runSmoke(model: model, root: root)
+            await runSmoke(selection: selection, library: library)
             isRunning = false
         }
     }
 
-    func run(systemModel: LLMSystemModelOption) {
-        guard !isRunning else { return }
-        isRunning = true
-        output = ""
-
-        Task { @MainActor in
-            switch systemModel.id {
-            case AppleIntelligenceEngine.systemModelID:
-                await runAppleIntelligenceSmoke(systemModel: systemModel)
-            default:
-                append("smoke: failed: unsupported system model \(systemModel.displayName)")
-            }
-            isRunning = false
-        }
-    }
-
-    private func runSmoke(model: InstalledModel, root: URL) async {
+    private func runSmoke(selection: LLMModelSelection, library: ModelLibrary) async {
         do {
-            append("model: \(model.displayName)")
-            append("path: \(model.weightsURL(in: root).path)")
-            append("requestedContext: 4096")
-
-            let engine = LlamaEngine(configuration: LlamaEngineConfiguration(heartbeatInterval: 0.5))
-            let loaded = try await engine.load(model: model, from: root, requestedContext: 4_096)
-            append("loadedContext: \(loaded.contextSize)")
-            append("trainingContext: \(loaded.trainingContextSize)")
-            append("embeddedTemplate: \(loaded.hasEmbeddedChatTemplate)")
-
-            let options = GenerationOptions(
-                temperature: 0,
-                maxOutputTokens: 96,
-                stopAtBalancedJSON: true,
-                grammar: Self.jsonObjectGrammar
+            let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
+                heartbeatInterval: 0.5
+            ))
+            let loaded = try await engine.load(
+                selection: selection,
+                from: library,
+                requestedContext: 4_096
             )
 
+            append("model: \(loaded.displayName)")
+            append("provider: \(providerLabel(for: selection))")
+            if case .installed(let id) = selection,
+               let model = library.model(id: id) {
+                append("path: \(model.weightsURL(in: library.root).path)")
+            }
+            append("requestedContext: 4096")
+            append("loadedContext: \(loaded.contextSize)")
+            append("trainingContext: \(loaded.trainingContextSize)")
+            append("supportsGrammar: \(loaded.supportsGrammar)")
+
+            let options = generationOptions(for: loaded)
+
             let response = try await engine.generate(
-                system: "Return only JSON matching the requested schema.",
+                system: systemPrompt(for: loaded),
                 prompt: #"Return {"ok": true, "message": "hello"}."#,
                 options: options
             ) { [weak self] event in
@@ -221,44 +207,6 @@ private final class SmokeState {
             append(normalized)
 
             await engine.unload()
-            append("smoke: ok")
-        } catch {
-            append("smoke: failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func runAppleIntelligenceSmoke(systemModel: LLMSystemModelOption) async {
-        do {
-            append("model: \(systemModel.displayName)")
-            append("provider: Apple Intelligence")
-            append("context: \(systemModel.contextLength)")
-
-            let availability = AppleIntelligenceEngine.availability()
-            guard availability.isAvailable else {
-                throw AppleIntelligenceEngineError.unavailable(availability)
-            }
-
-            let engine = AppleIntelligenceEngine(configuration: AppleIntelligenceEngineConfiguration())
-            let options = GenerationOptions(
-                maxOutputTokens: 96,
-                stopAtBalancedJSON: true
-            )
-            let response = try await engine.generate(
-                system: "Return only JSON matching the requested schema. Do not include prose.",
-                prompt: #"Return {"ok": true, "message": "hello"}."#,
-                options: options
-            ) { [weak self] event in
-                Task { @MainActor [weak self] in
-                    self?.append(Self.format(event: event))
-                }
-            }
-
-            let normalized = try Self.validatedNormalizedJSON(from: response)
-            append("rawResponse:")
-            append(response)
-            append("normalizedResponse:")
-            append(normalized)
-
             append("smoke: ok")
         } catch {
             append("smoke: failed: \(error.localizedDescription)")
@@ -306,6 +254,31 @@ private final class SmokeState {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
         return object["ok"] != nil && object["message"] != nil
+    }
+
+    private func generationOptions(for loaded: LocalLLMLoadedModelInfo) -> GenerationOptions {
+        GenerationOptions(
+            temperature: loaded.supportsGrammar ? 0 : nil,
+            maxOutputTokens: 96,
+            stopAtBalancedJSON: true,
+            grammar: loaded.supportsGrammar ? Self.jsonObjectGrammar : nil
+        )
+    }
+
+    private func systemPrompt(for loaded: LocalLLMLoadedModelInfo) -> String {
+        if loaded.supportsGrammar {
+            return "Return only JSON matching the requested schema."
+        }
+        return "Return only JSON matching the requested schema. Do not include prose."
+    }
+
+    private func providerLabel(for selection: LLMModelSelection) -> String {
+        switch selection {
+        case .installed:
+            return "GGUF"
+        case .system(.appleIntelligence):
+            return "Apple Intelligence"
+        }
     }
 }
 

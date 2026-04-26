@@ -18,7 +18,7 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         let option = AppleIntelligenceEngine.systemModelOption()
 
         if availability.isAvailable {
-            XCTAssertEqual(option?.id, AppleIntelligenceEngine.systemModelID)
+            XCTAssertEqual(option?.selection, .system(AppleIntelligenceEngine.systemModelID))
             XCTAssertEqual(option?.displayName, AppleIntelligenceEngine.displayName)
             XCTAssertEqual(option?.contextLength, availability.contextSize)
         } else {

@@ -13,9 +13,9 @@ public struct ModelLibraryPickerView: View {
     private let confirmDisabled: Bool
     private let systemModels: [LLMSystemModelOption]
     private let curatedModels: [CuratedModel]
-    private let onConfirmSystemModel: @MainActor (LLMSystemModelOption) -> Void
+    private let onConfirmSelection: (@MainActor (LLMModelSelection) -> Void)?
     private let onModelDeleted: @MainActor (InstalledModel) -> Void
-    private let onConfirm: @MainActor (InstalledModel) -> Void
+    private let onConfirmInstalledModel: (@MainActor (InstalledModel) -> Void)?
 
     @State private var activeDownload: ModelLibraryDownload?
     @State private var downloadError: String?
@@ -30,9 +30,7 @@ public struct ModelLibraryPickerView: View {
         title: String = "Choose a Local Model",
         confirmTitle: String = "Use Selected Model",
         confirmDisabled: Bool = false,
-        systemModels: [LLMSystemModelOption] = [],
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
-        onConfirmSystemModel: @escaping @MainActor (LLMSystemModelOption) -> Void = { _ in },
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
@@ -41,11 +39,34 @@ public struct ModelLibraryPickerView: View {
         self.title = title
         self.confirmTitle = confirmTitle
         self.confirmDisabled = confirmDisabled
+        self.systemModels = []
+        self.curatedModels = curatedModels
+        self.onConfirmSelection = nil
+        self.onModelDeleted = onModelDeleted
+        self.onConfirmInstalledModel = onConfirm
+    }
+
+    public init(
+        library: ModelLibrary,
+        selectedModelID: Binding<String>,
+        title: String = "Choose a Local Model",
+        confirmTitle: String = "Use Selected Model",
+        confirmDisabled: Bool = false,
+        systemModels: [LLMSystemModelOption],
+        curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
+        onConfirmSelection: @escaping @MainActor (LLMModelSelection) -> Void
+    ) {
+        self.library = library
+        self._selectedModelID = selectedModelID
+        self.title = title
+        self.confirmTitle = confirmTitle
+        self.confirmDisabled = confirmDisabled
         self.systemModels = systemModels
         self.curatedModels = curatedModels
-        self.onConfirmSystemModel = onConfirmSystemModel
+        self.onConfirmSelection = onConfirmSelection
         self.onModelDeleted = onModelDeleted
-        self.onConfirm = onConfirm
+        self.onConfirmInstalledModel = nil
     }
 
     private var selectedSystemModel: LLMSystemModelOption? {
@@ -58,6 +79,16 @@ public struct ModelLibraryPickerView: View {
 
     private var hasSelection: Bool {
         selectedSystemModel != nil || selectedModel != nil
+    }
+
+    private var canConfirmSelection: Bool {
+        if selectedSystemModel != nil {
+            return onConfirmSelection != nil
+        }
+        if selectedModel != nil {
+            return onConfirmSelection != nil || onConfirmInstalledModel != nil
+        }
+        return false
     }
 
     private var recommendedCuratedModel: CuratedModel? {
@@ -473,13 +504,17 @@ public struct ModelLibraryPickerView: View {
 
             Button(confirmTitle) {
                 if let selectedSystemModel {
-                    onConfirmSystemModel(selectedSystemModel)
+                    onConfirmSelection?(selectedSystemModel.selection)
                 } else if let selectedModel {
-                    onConfirm(selectedModel)
+                    if let onConfirmSelection {
+                        onConfirmSelection(.installed(selectedModel.id))
+                    } else {
+                        onConfirmInstalledModel?(selectedModel)
+                    }
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!hasSelection || confirmDisabled)
+            .disabled(!hasSelection || !canConfirmSelection || confirmDisabled)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)

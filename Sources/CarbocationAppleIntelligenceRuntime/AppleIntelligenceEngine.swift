@@ -280,7 +280,7 @@ public enum AppleIntelligenceResponsePostProcessor {
 
 public actor AppleIntelligenceEngine: LLMEngine {
     public static let shared = AppleIntelligenceEngine()
-    public static let systemModelID = "system.apple-intelligence"
+    public static let systemModelID = LLMSystemModelID.appleIntelligence
     public static let displayName = "Apple Intelligence"
 
     private let configuration: AppleIntelligenceEngineConfiguration
@@ -312,7 +312,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
         let availability = availability()
         guard availability.shouldOfferModelOption else { return nil }
         return LLMSystemModelOption(
-            id: systemModelID,
+            selection: .system(systemModelID),
             displayName: displayName,
             subtitle: "Built-in on-device Apple Intelligence model",
             contextLength: availability.contextSize,

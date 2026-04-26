@@ -10,7 +10,7 @@ Use a tagged release for normal app integration. A release tag points SwiftPM at
 
 A GitHub release does not replace the Swift package dependency. The host app still adds `CarbocationLocalLLM` by Git URL and selects a release version; Xcode/SwiftPM then reads that tag's `Package.swift` and downloads the binary artifact automatically.
 
-Current public release: [`v0.1.0`](https://github.com/carbocation/CarbocationLocalLLM/releases/tag/v0.1.0).
+Current public release: [`v0.2.0`](https://github.com/carbocation/CarbocationLocalLLM/releases/tag/v0.2.0).
 
 ### Add The Release In Xcode
 
@@ -22,7 +22,7 @@ Current public release: [`v0.1.0`](https://github.com/carbocation/CarbocationLoc
 https://github.com/carbocation/CarbocationLocalLLM.git
 ```
 
-4. Choose release `0.1.0` / tag `v0.1.0`.
+4. Choose release `0.2.0` / tag `v0.2.0`.
    Prefer `Exact Version` while integrating, or `Up to Next Major Version` once the app has a tested upgrade policy.
 5. Add the package products to the app target that will use them.
 
@@ -34,18 +34,17 @@ Do not download or drag `llama.xcframework` into the app project manually. The r
 
 - `CarbocationLocalLLM`: core model-library types, selected-model state, context policy, generation options, JSON helpers, download/import support, and fake-engine testing helpers.
 - `CarbocationLocalLLMUI`: shared SwiftUI model-library UI for installed models, curated downloads, Hugging Face URL downloads, local `.gguf` import, interrupted downloads, delete, refresh, and reveal folder.
-- `CarbocationLlamaRuntime`: llama.cpp-backed generation, model/context loading, model probing, chat-template fallback handling, grammar-aware generation, streaming events, and cancellation.
-- `CarbocationAppleIntelligenceRuntime`: optional Apple Intelligence / Foundation Models-backed generation for systems where Apple's on-device model is available. This product builds on older SDKs, but reports unavailable unless the app is built with the Foundation Models SDK and runs on a supported device with Apple Intelligence enabled.
+- `CarbocationLocalLLMRuntime`: unified generation facade for installed GGUF models and available system models such as Apple Intelligence. This is the preferred runtime product for host apps.
+- `CarbocationLlamaRuntime`: lower-level llama.cpp-backed generation, model/context loading, model probing, chat-template fallback handling, grammar-aware generation, streaming events, and cancellation.
 
-Most apps that provide GGUF-backed local generation should add `CarbocationLocalLLM`, `CarbocationLocalLLMUI`, and `CarbocationLlamaRuntime` to the app target. Apps that want to offer Apple's system model before a user downloads a larger GGUF can also add `CarbocationAppleIntelligenceRuntime`. Apps that only need shared model storage or metadata can use `CarbocationLocalLLM` alone.
+Most apps that provide local generation should add `CarbocationLocalLLM`, `CarbocationLocalLLMUI`, and `CarbocationLocalLLMRuntime` to the app target. Apps that only need shared model storage or metadata can use `CarbocationLocalLLM` alone. Use `CarbocationLlamaRuntime` directly only when the host app needs llama-specific control that is not exposed through the unified runtime.
 
 Host app source should import module names only:
 
 ```swift
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
-import CarbocationLlamaRuntime
-import CarbocationAppleIntelligenceRuntime
+import CarbocationLocalLLMRuntime
 ```
 
 Filesystem paths such as `../CarbocationLocalLLM` should not appear in app source or Xcode package dependencies for the binary-release path.
@@ -61,9 +60,9 @@ For a release tag, Xcode should:
 
 The host app should not add `Scripts/build-llama-from-xcode.sh`, initialize `Vendor/llama.cpp`, set `CARBOCATION_LOCAL_LLM_ROOT`, or prebuild `Vendor/llama-artifacts/current`. Those steps are only for local package development or temporary adjacent-checkout migration work.
 
-The binary artifact is a static XCFramework. SwiftPM handles the package link step, and `CarbocationLlamaRuntime` declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
+The binary artifact is a static XCFramework. SwiftPM handles the package link step, and the llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
 
-`CarbocationAppleIntelligenceRuntime` has no model artifact. It calls Apple's system model through Foundation Models when the runtime reports available.
+Apple Intelligence has no model artifact. When the app is built with the Foundation Models SDK and runs on a supported device with Apple Intelligence enabled, `CarbocationLocalLLMRuntime` exposes it as an available system model.
 
 ### Minimal Host-App Wiring
 
@@ -71,7 +70,7 @@ Create a single model library for the app and use the runtime probe when you wan
 
 ```swift
 import CarbocationLocalLLM
-import CarbocationLlamaRuntime
+import CarbocationLocalLLMRuntime
 
 @MainActor
 let modelLibrary = ModelLibrary(
@@ -80,7 +79,7 @@ let modelLibrary = ModelLibrary(
         appSupportFolderName: "YourAppName"
     ),
     contextLengthProbe: { url in
-        LlamaEngine.probeTrainingContext(at: url)
+        LocalLLMEngine.probeTrainingContext(at: url)
     }
 )
 ```
@@ -89,9 +88,8 @@ Add the shared picker wherever the app lets the user choose, download, import, o
 
 ```swift
 import CarbocationLocalLLM
+import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMUI
-import CarbocationLlamaRuntime
-import CarbocationAppleIntelligenceRuntime
 import SwiftUI
 
 struct LocalModelSettingsView: View {
@@ -102,96 +100,73 @@ struct LocalModelSettingsView: View {
         ModelLibraryPickerView(
             library: library,
             selectedModelID: $selectedModelID,
-            systemModels: AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? [],
-            onConfirmSystemModel: { systemModel in
-                if systemModel.id == AppleIntelligenceEngine.systemModelID {
-                    // Route generation to AppleIntelligenceEngine.shared.
-                }
-            },
+            systemModels: LocalLLMEngine.availableSystemModels(),
             onModelDeleted: { deleted in
                 Task {
-                    if await LlamaEngine.shared.currentModelID() == deleted.id {
-                        await LlamaEngine.shared.unload()
+                    if await LocalLLMEngine.shared.currentModelID() == deleted.id {
+                        await LocalLLMEngine.shared.unload()
                     }
                 }
             },
-            onConfirm: { model in
-                selectedModelID = model.id.uuidString
+            onConfirmSelection: { selection in
+                selectedModelID = selection.storageValue
             }
         )
     }
 }
 ```
 
-Before generation, load the selected model and resolve the requested context through the shared policy helpers:
+Before generation, parse the stored selection, load it through the unified engine, and choose prompts/options based on the loaded capabilities:
 
 ```swift
-guard let model = modelLibrary.model(id: selectedModelID) else {
-    return
+let selection = try LocalLLMEngine.selection(from: selectedModelID)
+
+let requestedContext: Int
+if case .installed(let id) = selection,
+   let model = modelLibrary.model(id: id) {
+    requestedContext = LlamaContextPolicy.resolvedRequestedContext(for: model)
+} else {
+    requestedContext = LocalLLMEngine.capabilities(for: selection, in: modelLibrary).contextSize
 }
 
-let requestedContext = LlamaContextPolicy.resolvedRequestedContext(for: model)
-let engine = LlamaEngine.shared
-
-try await engine.load(
-    model: model,
-    from: modelLibrary.root,
+let engine = LocalLLMEngine.shared
+let loaded = try await engine.load(
+    selection: selection,
+    from: modelLibrary,
     requestedContext: requestedContext
 )
 
+let options: GenerationOptions
+let systemPrompt: String
+if loaded.supportsGrammar {
+    options = GenerationOptions.extractionSafe.with(grammar: jsonGrammar)
+    systemPrompt = "Return only JSON matching the requested schema."
+} else {
+    options = GenerationOptions(maxOutputTokens: 512, stopAtBalancedJSON: true)
+    systemPrompt = "Return only JSON matching the requested schema. Do not include prose."
+}
+
 let response = try await engine.generate(
-    system: "You are a concise assistant.",
+    system: systemPrompt,
     prompt: userPrompt,
-    options: .extractionSafe
+    options: options
 ) { event in
     // Update host-app progress UI if desired.
 }
 ```
 
-### Apple Intelligence Runtime
+### Unified Runtime And Capabilities
 
-Apple's system model should be treated as a separate provider from installed GGUF models. Check availability before showing it in the host app:
+`LLMModelSelection` is the public selection type for both installed models and system models. Persist `selection.storageValue` in the host app, and restore it with `LocalLLMEngine.selection(from:)`.
 
-```swift
-import CarbocationAppleIntelligenceRuntime
+`LocalLLMEngine.availableSystemModels()` returns only system models that should be visible on this machine. On unsupported devices or builds without Foundation Models, Apple Intelligence is omitted from the picker entirely.
 
-let availability = AppleIntelligenceEngine.availability()
-if availability.shouldOfferModelOption {
-    // Show an "Apple Intelligence" model option.
-}
-```
+Use `LocalLLMEngine.capabilities(for:in:)` or `LocalLLMLoadedModelInfo` after loading to decide how much provider-specific prompting is needed:
 
-`ModelLibraryPickerView` can render that option above installed GGUF models:
+- installed GGUF models report exact token counts and grammar support
+- Apple Intelligence reports estimated token counts and no GBNF grammar support
 
-```swift
-ModelLibraryPickerView(
-    library: library,
-    selectedModelID: $selectedModelID,
-    systemModels: AppleIntelligenceEngine.systemModelOption().map { [$0] } ?? [],
-    onConfirmSystemModel: { systemModel in
-        guard systemModel.id == AppleIntelligenceEngine.systemModelID else { return }
-        // Route generation to AppleIntelligenceEngine.shared.
-    },
-    onConfirm: { installedModel in
-        // Route generation to LlamaEngine.shared.
-    }
-)
-```
-
-When selected, use the engine through the same `LLMEngine` surface:
-
-```swift
-let engine = AppleIntelligenceEngine.shared
-let response = try await engine.generate(
-    system: "You are a concise assistant.",
-    prompt: userPrompt,
-    options: .extractionSafe
-) { event in
-    // Update host-app progress UI if desired.
-}
-```
-
-The Apple Intelligence runtime maps temperature, top-k/top-p style sampling, seeds, and maximum response tokens where Foundation Models exposes an equivalent. llama.cpp GBNF grammars are not supported by Apple's text response API; by default this runtime still tries to generate and applies stop-sequence and balanced-JSON post-processing. Set `AppleIntelligenceEngineConfiguration(unsupportedFeatureBehavior: .fail)` if the host app would rather reject unsupported options before generation.
+For JSON extraction, keep grammar-constrained options for GGUF models. For Apple Intelligence, omit the grammar, strengthen the prompt, and use `stopAtBalancedJSON` so the shared post-processing can trim at a complete JSON object.
 
 ### Xcode Target Settings
 
@@ -199,7 +174,7 @@ The Apple Intelligence runtime maps temperature, top-k/top-p style sampling, see
 - App Sandbox network client entitlement: required if the app downloads models from Hugging Face or another remote URL.
 - App Group entitlement: required only if the app wants shared model storage through `ModelStorage.defaultSharedGroupID` or another shared group. Without a usable App Group container, `ModelStorage.modelsDirectory` falls back to the app's Application Support folder.
 - Model files: `.gguf` weights are user data, not part of the Swift package. Let the app download/import them into the model library instead of bundling large model files into the app binary.
-- Apple Intelligence: requires a supported device, Apple Intelligence enabled in System Settings, macOS 26 or newer, and an app build made with an SDK that includes Foundation Models.
+- Apple Intelligence through the unified runtime: requires a supported device, Apple Intelligence enabled in System Settings, macOS 26 or newer, and an app build made with an SDK that includes Foundation Models.
 
 ### Host-App Responsibilities
 
@@ -210,7 +185,7 @@ This library deliberately avoids owning app policy. Host apps should still own:
 - app-specific onboarding/settings copy
 - context cap defaults
 - generation settings UI
-- provider-selection UI, including whether to offer Apple Intelligence when `AppleIntelligenceEngine.availability().shouldOfferModelOption` is true
+- provider-selection UI policy around the system models returned by `LocalLLMEngine.availableSystemModels()`
 - app-specific prompts, grammars, and operations
 - active-engine unload policy after deletion
 - migrations and invalid-selection warnings
@@ -249,7 +224,9 @@ Use this section when you are modifying `CarbocationLocalLLM` itself.
 
 - `Sources/CarbocationLocalLLM`: core Swift services and shared types.
 - `Sources/CarbocationLocalLLMUI`: shared SwiftUI model-library UI.
+- `Sources/CarbocationLocalLLMRuntime`: unified runtime facade for installed GGUF and available system models.
 - `Sources/CarbocationLlamaRuntime`: llama.cpp-backed runtime.
+- `Sources/CarbocationAppleIntelligenceRuntime`: implementation target used by the unified runtime for Foundation Models-backed generation.
 - `Sources/CLLMSmoke`: Xcode-friendly smoke app.
 - `Sources/llama`: source-build module map for generated llama headers.
 - `Scripts/build-llama-macos.sh`: local llama.cpp source build.
@@ -303,14 +280,14 @@ CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 swift test --filter CarbocationAp
 
 ### Smoke App
 
-`CLLMSmoke` shows Apple Intelligence in the picker when `AppleIntelligenceEngine.systemModelOption()` reports available. Its Apple Intelligence smoke path checks that the system model can generate a non-empty response; the GGUF path keeps the stricter grammar-constrained JSON smoke test.
+`CLLMSmoke` shows Apple Intelligence in the picker when `LocalLLMEngine.availableSystemModels()` reports it available. The smoke test asks every provider for JSON; installed GGUF models use grammar-constrained generation, while Apple Intelligence uses prompt guidance plus balanced-JSON post-processing.
 
 Open `Package.swift` in Xcode.
 
 1. Select the `CLLMSmoke` scheme.
 2. Set the destination to `My Mac`.
 3. Run.
-4. Select an installed model in the left pane.
+4. Select an installed model or available system model in the left pane.
 5. Click `Run Smoke Test`.
 
 The smoke app uses the shared model cache by default:
@@ -391,3 +368,41 @@ Scripts/test-binary-release.sh vX.Y.Z
 ```
 
 The release workflow runs the same smoke test after uploading the GitHub release asset. This catches problems that local binary validation cannot see, including tag resolution, checksum mismatch, release asset availability, downstream product imports, and llama symbol linkage from the published binary target.
+
+### Quick Release Checklist
+
+For a normal release, use the GitHub workflow rather than creating the tag by hand. For example, to cut `v0.2.0`:
+
+1. Finish and push the source changes that should be released.
+2. Confirm the package is clean locally:
+
+```sh
+swift test
+swift build --target CLLMSmoke
+```
+
+3. In GitHub Actions, run `Publish Llama Binary Artifact` with:
+
+```text
+tag: v0.2.0
+prerelease: false
+dry_run: true
+```
+
+4. If the dry run passes, run the same workflow again with:
+
+```text
+tag: v0.2.0
+prerelease: false
+dry_run: false
+```
+
+5. After the workflow publishes the release, optionally verify it from a clean consumer package:
+
+```sh
+Scripts/test-binary-release.sh v0.2.0
+```
+
+6. In host apps, update the Swift package version to `0.2.0`, add the `CarbocationLocalLLMRuntime` product, and route model selection/generation through `LLMModelSelection` and `LocalLLMEngine`.
+
+7. For Apple Intelligence support in host apps, build with an SDK that includes Foundation Models and pass `LocalLLMEngine.availableSystemModels()` into `ModelLibraryPickerView`. The Apple Intelligence option is omitted automatically when unavailable.

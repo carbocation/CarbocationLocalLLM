@@ -54,7 +54,7 @@ let package = Package(
             dependencies: [
                 .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLlamaRuntime", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM")
             ]
         )
     ]
@@ -64,12 +64,13 @@ EOF
 cat > "$WORK_DIR/Sources/ReleaseSmoke/main.swift" <<'EOF'
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
-import CarbocationLlamaRuntime
+import CarbocationLocalLLMRuntime
 import Foundation
 
 let curatedCount = CuratedModelCatalog.all.count
-let summary = LlamaRuntimeSmoke.defaultModelParameterSummary()
-let batchSize = LlamaRuntimeSmoke.defaultContextBatchSize()
+let summary = LocalLLMRuntimeSmoke.defaultModelParameterSummary()
+let batchSize = LocalLLMRuntimeSmoke.defaultContextBatchSize()
+let systemModels = LocalLLMEngine.availableSystemModels()
 
 guard curatedCount > 0 else {
     fputs("release smoke failed: curated catalog is empty\n", stderr)
@@ -85,6 +86,7 @@ print("release smoke: ok")
 print("curatedModels=\(curatedCount)")
 print("llamaDefaults=\(summary)")
 print("contextBatchSize=\(batchSize)")
+print("systemModels=\(systemModels.map(\.id).joined(separator: ","))")
 EOF
 
 echo "Testing $REPO_URL at $TAG from $WORK_DIR"
