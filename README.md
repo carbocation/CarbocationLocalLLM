@@ -10,7 +10,7 @@ Use a tagged release for normal app integration. A release tag points SwiftPM at
 
 A GitHub release does not replace the Swift package dependency. The host app still adds `CarbocationLocalLLM` by Git URL and selects a release version; Xcode/SwiftPM then reads that tag's `Package.swift` and downloads the binary artifact automatically.
 
-Current public release: [`v0.2.0`](https://github.com/carbocation/CarbocationLocalLLM/releases/tag/v0.2.0).
+Current public release: [`v0.3.0`](https://github.com/carbocation/CarbocationLocalLLM/releases/tag/v0.3.0).
 
 ### Add The Release In Xcode
 
@@ -22,7 +22,7 @@ Current public release: [`v0.2.0`](https://github.com/carbocation/CarbocationLoc
 https://github.com/carbocation/CarbocationLocalLLM.git
 ```
 
-4. Choose release `0.2.0` / tag `v0.2.0`.
+4. Choose release `0.3.0` / tag `v0.3.0`.
    Prefer `Exact Version` while integrating, or `Up to Next Major Version` once the app has a tested upgrade policy.
 5. Add the package products to the app target that will use them.
 
@@ -371,7 +371,7 @@ The release workflow runs the same smoke test after uploading the GitHub release
 
 ### Quick Release Checklist
 
-For a normal release, use the GitHub workflow rather than creating the tag by hand. For example, to cut `v0.2.0`:
+For a normal release, use the GitHub workflow rather than creating the tag by hand. For example, to cut `v0.3.0`:
 
 1. Finish and push the source changes that should be released.
 2. Confirm the package is clean locally:
@@ -384,7 +384,7 @@ swift build --target CLLMSmoke
 3. In GitHub Actions, run `Publish Llama Binary Artifact` with:
 
 ```text
-tag: v0.2.0
+tag: v0.3.0
 prerelease: false
 dry_run: true
 ```
@@ -392,7 +392,7 @@ dry_run: true
 4. If the dry run passes, run the same workflow again with:
 
 ```text
-tag: v0.2.0
+tag: v0.3.0
 prerelease: false
 dry_run: false
 ```
@@ -400,9 +400,9 @@ dry_run: false
 5. After the workflow publishes the release, optionally verify it from a clean consumer package:
 
 ```sh
-Scripts/test-binary-release.sh v0.2.0
+Scripts/test-binary-release.sh v0.3.0
 ```
 
-6. In host apps, update the Swift package version to `0.2.0`, add the `CarbocationLocalLLMRuntime` product, and route model selection/generation through `LLMModelSelection` and `LocalLLMEngine`.
+6. In host apps, update the Swift package version to `0.3.0`, add the `CarbocationLocalLLMRuntime` product, and route model selection/generation through `LLMModelSelection` and `LocalLLMEngine`.
 
 7. For Apple Intelligence support in host apps, build with an SDK that includes Foundation Models and pass `LocalLLMEngine.availableSystemModels()` into `ModelLibraryPickerView`. The Apple Intelligence option is omitted automatically when unavailable.
