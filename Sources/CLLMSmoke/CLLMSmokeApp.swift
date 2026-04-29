@@ -1,9 +1,11 @@
-import AppKit
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMUI
 import Observation
 import SwiftUI
+
+#if os(macOS)
+import AppKit
 
 @main
 struct CLLMSmokeApp {
@@ -297,3 +299,11 @@ private enum SmokeError: LocalizedError {
         }
     }
 }
+#else
+@main
+struct CLLMSmokeApp {
+    static func main() {
+        fatalError("CLLMSmoke is only available on macOS.")
+    }
+}
+#endif

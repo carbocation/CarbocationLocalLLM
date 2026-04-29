@@ -5,6 +5,10 @@ import Foundation
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let llamaCombinedLibrary = "\(packageRoot)/Vendor/llama-artifacts/current/lib/libllama-combined.a"
+let localLlamaBinaryArtifactPath = "Vendor/llama-artifacts/release/llama.xcframework"
+let localLlamaBinaryArtifactExists = FileManager.default.fileExists(
+    atPath: "\(packageRoot)/\(localLlamaBinaryArtifactPath)"
+)
 let llamaBinaryArtifactURL = ""
 let llamaBinaryArtifactChecksum = ""
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
@@ -32,6 +36,12 @@ if forceSourceLlama {
         checksum: llamaBinaryArtifactChecksum
     )
     llamaUnsafeLinkerSettings = []
+} else if localLlamaBinaryArtifactExists {
+    llamaTarget = .binaryTarget(
+        name: "llama",
+        path: localLlamaBinaryArtifactPath
+    )
+    llamaUnsafeLinkerSettings = []
 } else {
     llamaTarget = .systemLibrary(
         name: "llama",
@@ -43,7 +53,8 @@ if forceSourceLlama {
 let package = Package(
     name: "CarbocationLocalLLM",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
         .library(

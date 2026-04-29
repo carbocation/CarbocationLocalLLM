@@ -2,7 +2,18 @@ import CarbocationLocalLLM
 import Foundation
 import llama
 
+#if os(iOS)
+private let platformDefaultGPULayerCount: Int32 = 0
+private let platformDefaultBatchSizeLimit = 512
+#else
+private let platformDefaultGPULayerCount: Int32 = 999
+private let platformDefaultBatchSizeLimit = 2_048
+#endif
+
 public struct LlamaEngineConfiguration: Hashable, Sendable {
+    public static var defaultGPULayerCount: Int32 { platformDefaultGPULayerCount }
+    public static var defaultBatchSizeLimit: Int { platformDefaultBatchSizeLimit }
+
     public var gpuLayerCount: Int32
     public var useMemoryMap: Bool
     public var batchSizeLimit: Int
@@ -11,9 +22,9 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
     public var heartbeatInterval: TimeInterval
 
     public init(
-        gpuLayerCount: Int32 = 999,
+        gpuLayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
         useMemoryMap: Bool = true,
-        batchSizeLimit: Int = 2_048,
+        batchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
         threadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2
@@ -137,7 +148,7 @@ public actor LlamaEngine: LLMEngine {
         LlamaBackend.ensureInitialized()
 
         var params = llama_model_default_params()
-        params.n_gpu_layers = 0
+        params.configureForCPUOnly()
         params.use_mmap = true
 
         guard let model = path.withCString({ cPath in
@@ -207,6 +218,9 @@ public actor LlamaEngine: LLMEngine {
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = configuration.gpuLayerCount
         modelParams.use_mmap = configuration.useMemoryMap
+        if configuration.gpuLayerCount <= 0 {
+            modelParams.configureForCPUOnly()
+        }
 
         guard let loadedModel = path.withCString({ cPath in
             llama_model_load_from_file(cPath, modelParams)
@@ -791,5 +805,13 @@ public actor LlamaEngine: LLMEngine {
             : (normalizedTrainingContext > 0 ? normalizedTrainingContext : LlamaContextPolicy.unknownTrainingFallback)
         let upperBound = normalizedTrainingContext > 0 ? normalizedTrainingContext : requested
         return max(LlamaContextPolicy.minimumContext, min(requested, upperBound))
+    }
+}
+
+extension llama_model_params {
+    mutating func configureForCPUOnly() {
+        n_gpu_layers = 0
+        split_mode = LLAMA_SPLIT_MODE_NONE
+        main_gpu = -1
     }
 }

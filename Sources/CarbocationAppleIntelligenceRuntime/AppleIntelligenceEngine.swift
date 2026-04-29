@@ -18,7 +18,13 @@ public enum AppleIntelligenceUnavailableReason: String, Codable, Hashable, Senda
         case .sdkUnavailable:
             return "This app was built without the Foundation Models SDK."
         case .operatingSystemUnavailable:
+            #if os(iOS)
+            return "Apple Intelligence model access requires iOS 26 or newer."
+            #elseif os(macOS)
             return "Apple Intelligence model access requires macOS 26 or newer."
+            #else
+            return "Apple Intelligence model access requires a supported OS version."
+            #endif
         case .deviceNotEligible:
             return "This device does not support Apple Intelligence."
         case .appleIntelligenceNotEnabled:
@@ -299,7 +305,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
 
     public nonisolated static func availability() -> AppleIntelligenceAvailability {
         #if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
             return .unavailable(.operatingSystemUnavailable)
         }
         return foundationModelsAvailability()
@@ -346,7 +352,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
         }
 
         #if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
             throw AppleIntelligenceEngineError.unavailable(.unavailable(.operatingSystemUnavailable))
         }
         return try await generateWithFoundationModels(
@@ -364,7 +370,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
 
 #if canImport(FoundationModels)
 extension AppleIntelligenceEngine {
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     private nonisolated static func foundationModelsAvailability() -> AppleIntelligenceAvailability {
         let model = SystemLanguageModel.default
         switch model.availability {
@@ -381,7 +387,7 @@ extension AppleIntelligenceEngine {
         }
     }
 
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     private func generateWithFoundationModels(
         system: String,
         prompt: String,
@@ -430,7 +436,7 @@ extension AppleIntelligenceEngine {
         return result
     }
 
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     private nonisolated static func foundationModelsOptions(
         from options: AppleIntelligenceResolvedOptions
     ) -> FoundationModels.GenerationOptions {
@@ -441,7 +447,7 @@ extension AppleIntelligenceEngine {
         )
     }
 
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     private nonisolated static func foundationModelsSampling(
         from policy: AppleIntelligenceSamplingPolicy
     ) -> FoundationModels.GenerationOptions.SamplingMode? {

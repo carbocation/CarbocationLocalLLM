@@ -1,11 +1,16 @@
-import AppKit
 import CarbocationLocalLLM
 import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(macOS)
+import AppKit
+#endif
+
 @MainActor
 public struct ModelLibraryPickerView: View {
+    private static let ggufContentType = UTType(filenameExtension: "gguf") ?? .data
+
     private let library: ModelLibrary
     @Binding private var selectedModelID: String
     private let title: String
@@ -21,6 +26,7 @@ public struct ModelLibraryPickerView: View {
     @State private var activeDownload: ModelLibraryDownload?
     @State private var downloadError: String?
     @State private var showCustomSheet = false
+    @State private var showImporter = false
     @State private var showDeleteConfirm: InstalledModel?
     @State private var showDeletePartialConfirm: PartialDownload?
     @State private var refreshToken = UUID()
@@ -157,6 +163,13 @@ public struct ModelLibraryPickerView: View {
                 )
             }
         }
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [Self.ggufContentType],
+            allowsMultipleSelection: false
+        ) { result in
+            importLocalGGUF(result)
+        }
         .alert(
             "Delete \(showDeleteConfirm?.displayName ?? "model")?",
             isPresented: Binding(
@@ -290,16 +303,18 @@ public struct ModelLibraryPickerView: View {
 
             HStack {
                 Button {
-                    importLocalGGUF()
+                    showImporter = true
                 } label: {
                     Label("Import .gguf", systemImage: "square.and.arrow.down")
                 }
 
+                #if os(macOS)
                 Button {
                     revealModelsFolder()
                 } label: {
                     Label("Reveal Folder", systemImage: "folder")
                 }
+                #endif
 
                 Spacer()
 
@@ -616,14 +631,16 @@ public struct ModelLibraryPickerView: View {
         )
     }
 
-    private func importLocalGGUF() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "gguf") ?? .data]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.directoryURL = library.root
+    private func importLocalGGUF(_ result: Result<[URL], Error>) {
+        let url: URL
+        do {
+            guard let firstURL = try result.get().first else { return }
+            url = firstURL
+        } catch {
+            downloadError = error.localizedDescription
+            return
+        }
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
         let didStart = url.startAccessingSecurityScopedResource()
         defer { if didStart { url.stopAccessingSecurityScopedResource() } }
 
@@ -651,9 +668,11 @@ public struct ModelLibraryPickerView: View {
         }
     }
 
+    #if os(macOS)
     private func revealModelsFolder() {
         NSWorkspace.shared.activateFileViewerSelecting([library.root])
     }
+    #endif
 
     private func refresh() {
         library.refresh()
@@ -672,7 +691,7 @@ public struct ModelLibraryPickerView: View {
     private func recommendationSummary() -> String {
         let memory = formatBytes(Int64(min(ProcessInfo.processInfo.physicalMemory, UInt64(Int64.max))))
         if let recommendedCuratedModel {
-            return "\(memory) RAM detected. Recommended for this Mac: \(recommendedCuratedModel.displayName)."
+            return "\(memory) RAM detected. Recommended for this device: \(recommendedCuratedModel.displayName)."
         }
         return "\(memory) RAM detected."
     }

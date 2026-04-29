@@ -12,9 +12,9 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     public var heartbeatInterval: TimeInterval
 
     public init(
-        llamaGPULayerCount: Int32 = 999,
+        llamaGPULayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
         llamaUseMemoryMap: Bool = true,
-        llamaBatchSizeLimit: Int = 2_048,
+        llamaBatchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
         llamaThreadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2

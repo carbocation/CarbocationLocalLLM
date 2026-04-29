@@ -22,7 +22,7 @@ public enum LlamaRuntimeModelProbe {
         LlamaBackend.ensureInitialized()
 
         var params = llama_model_default_params()
-        params.n_gpu_layers = 0
+        params.configureForCPUOnly()
         params.use_mmap = true
 
         guard let model = path.withCString({ cPath in

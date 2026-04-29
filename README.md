@@ -1,6 +1,6 @@
 # CarbocationLocalLLM
 
-CarbocationLocalLLM gives macOS apps local, on-device text generation — llama.cpp or Apple Intelligence, behind one Swift API. It handles model storage, downloads, model probing, provider selection, and ships a SwiftUI model-management pane. You bring the prompts, generation policy, and product UX.
+CarbocationLocalLLM gives macOS and iOS apps local, on-device text generation — llama.cpp or Apple Intelligence, behind one Swift API. It handles model storage, downloads, model probing, provider selection, and ships a SwiftUI model-management pane. You bring the prompts, generation policy, and product UX.
 
 The package owns shared LLM infrastructure: neutral model storage, GGUF model management, llama.cpp runtime access, Apple Intelligence integration, a unified runtime facade, generation options, JSON helpers, and SwiftUI surfaces. Host apps own product behavior: app-specific prompts, grammars, settings policy, onboarding, command parsing, and post-generation cleanup.
 
@@ -16,7 +16,16 @@ The package owns shared LLM infrastructure: neutral model storage, GGUF model ma
 
 ## Quick Start
 
-Add the package, pick the products you need, and call the runtime. The binary release at tag `v0.3.0` ships a prebuilt `llama.xcframework` — no submodules, no build scripts.
+For app integration, use a release tag. Release tags ship a prebuilt `llama.xcframework` with macOS, iOS device, and iOS simulator slices, so your app does not need this repo's submodules, build scripts, or local artifact environment variables.
+
+Do not point a shipping app at `main`. `main` is source-development friendly and may require a locally built llama artifact for GGUF inference.
+
+### Supported platforms
+
+| Provider | Supported OS | Notes |
+| --- | --- | --- |
+| GGUF / llama.cpp | macOS 14+, iOS/iPadOS 17+ | Uses the release `llama.xcframework` when you pin a published tag. |
+| Apple Intelligence | macOS 26+, iOS/iPadOS 26+ | Optional. Runtime-gated by SDK, OS, device support, and the user's Settings state. |
 
 ### Add the package
 
@@ -26,7 +35,7 @@ In Xcode, use `File > Add Package Dependencies…` with this URL:
 https://github.com/carbocation/CarbocationLocalLLM.git
 ```
 
-Choose `Exact Version` `0.3.0`. Pin shipping apps to a tag — do not point them at `main`.
+Choose `Exact Version` `0.3.0` or the current release tag you want to ship.
 
 For a SwiftPM host package:
 
@@ -51,7 +60,7 @@ targets: [
 
 ### Pick your products
 
-Most apps only need these three:
+Most apps add these three package products to the app target:
 
 ```swift
 import CarbocationLocalLLM         // core types
@@ -272,9 +281,12 @@ Host app
 
 **Build**
 
-- macOS 14 or newer
-- Swift 5.9 or newer
-- Xcode command line tools
+- Xcode with Swift 5.9 or newer
+
+| Runtime | Minimum OS | Additional requirements |
+| --- | --- | --- |
+| GGUF / llama.cpp | macOS 14, iOS/iPadOS 17 | Released tags include the binary XCFramework. |
+| Apple Intelligence | macOS 26, iOS/iPadOS 26 | Apple Intelligence-compatible device, enabled in Settings, and an SDK that includes Foundation Models. |
 
 **Permissions and entitlements**
 
@@ -284,11 +296,12 @@ Add the keys you actually use to your app:
 | --- | --- |
 | Outgoing Network (`com.apple.security.network.client`) | A sandboxed app downloads GGUFs from Hugging Face or another remote URL |
 | App Group | Multiple of your apps share installed GGUF models |
-| Foundation Models SDK | Offering Apple Intelligence as a system provider |
 
-Apple Intelligence is exposed only when the SDK, OS, device, and user setting all support it. The package reports availability through `LocalLLMEngine.availableSystemModels()` and omits Apple Intelligence everywhere else. It additionally requires macOS 26 or newer, Apple Intelligence enabled in System Settings, a supported device, and an app build made with an SDK that includes Foundation Models.
+Apple Intelligence is exposed only when the SDK, OS, device, and user setting all support it. The package reports availability through `LocalLLMEngine.availableSystemModels()` and omits Apple Intelligence everywhere else. It additionally requires macOS 26 or iOS/iPadOS 26 or newer, Apple Intelligence enabled in Settings, a supported device, and an app build made with an SDK that includes Foundation Models.
 
 GGUF weights are user data, not part of the Swift package. Let the app download or import them into the model library rather than bundling large model files into the app binary.
+
+On iOS, model downloads use foreground `URLSession` work with resumable partial files. This package does not manage background transfer sessions in this release.
 
 ## Reference
 
@@ -306,15 +319,23 @@ GGUF weights are user data, not part of the Swift package. Let the app download 
 
 ### How the binary release works
 
-For the `v0.3.0` release tag, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in the tag's `Package.swift`, links the products you chose, and builds your app.
+For a published release tag such as `v0.3.0`, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`, links the products you chose, and builds your app.
 
-The binary artifact is a static XCFramework. SwiftPM handles the link step; the llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`. Apple Intelligence has no package artifact — when the SDK, OS, device, and user setting line up, the runtime exposes it as an available system model.
+The binary artifact is a static XCFramework containing:
+
+- macOS `arm64` and `x86_64`
+- iOS device `arm64`
+- iOS simulator `arm64` and `x86_64`
+
+SwiftPM handles the link step. The llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
+
+Apple Intelligence has no package artifact. When the SDK, OS, device, and user setting line up, the runtime exposes it as an available system model.
 
 > **Heads up.** As a binary-target consumer your app does not need a sibling checkout, a `Vendor/llama.cpp` submodule, the `Scripts/build-llama-from-xcode.sh` build phase, the `CARBOCATION_LOCAL_LLM_ROOT` env var, a prebuilt `Vendor/llama-artifacts/current` directory, or `../CarbocationLocalLLM` in any path. Those exist only for local package development.
 
-For unreleased work you can point at `branch: "main"`, but llama inference then needs a local source-built artifact. Apple Intelligence and core APIs still work without a llama artifact — the runtime simply reports llama-backed generation as unavailable.
+For unreleased work you can point at `branch: "main"`, but llama inference then needs a local source-built artifact on macOS or a local multi-platform XCFramework for iOS builds. Apple Intelligence and core APIs still work without a llama artifact — the runtime simply reports llama-backed generation as unavailable.
 
-### Temporary adjacent-checkout path
+### Local development only: adjacent checkout
 
 For active library development or migration work, a host app can temporarily use a local package reference to a sibling checkout:
 
@@ -322,7 +343,7 @@ For active library development or migration work, a host app can temporarily use
 ../CarbocationLocalLLM
 ```
 
-Treat this as development wiring only. It is not the release-consumer path. The host app build must generate this package's ignored llama artifacts before Xcode compiles `CarbocationLlamaRuntime`. To make that safe:
+Treat this as development wiring only. It is not the release-consumer path. For macOS source-artifact development, the host app build must generate this package's ignored llama artifacts before Xcode compiles `CarbocationLlamaRuntime`. To make that safe:
 
 1. Copy this package's `Scripts/build-llama-from-xcode.sh` into the host app, for example as `Scripts/build-carbocation-llama.sh`.
 2. Add a scheme Build Pre-action or CI prebuild step that runs:
@@ -390,7 +411,7 @@ For CI or a universal local build, omit `ARCHS=arm64`; the script defaults to `a
 
 ### Use a local binary artifact
 
-To test the package as a binary-target consumer before publishing:
+This is a package-development workflow, not the normal app-consumer path. To test the package as a binary-target consumer before publishing:
 
 ```sh
 Scripts/build-llama-xcframework.sh
@@ -399,9 +420,11 @@ CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH=Vendor/llama-artifacts/release/llama.
 
 `Package.swift` switches to a local `.binaryTarget` whenever `CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH` is set.
 
+The generated XCFramework includes macOS, iOS device, and iOS simulator slices. Use this path for local iOS app validation.
+
 ### Prepare a release artifact
 
-Build, zip, and checksum the XCFramework:
+Build, zip, and checksum the multi-platform XCFramework:
 
 ```sh
 Scripts/build-llama-xcframework.sh
@@ -433,7 +456,7 @@ First run with:
 - `prerelease`: `true` for shakedown releases
 - `dry_run`: `true`
 
-The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing.
+The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing. Validation includes macOS tests, iOS package imports, and iOS app-style links for device and simulator.
 
 Then run the workflow again with the same tag and `dry_run=false`. The release run creates a tag-only release commit with the binary URL/checksum, creates the tag, uploads the release asset, and validates the published release from a clean temporary consumer package.
 
@@ -445,7 +468,7 @@ Keeping the manifest change on the release tag lets `main` stay source-build fri
 Scripts/test-binary-release.sh v0.3.0
 ```
 
-The release workflow runs the same smoke test after uploading the GitHub release asset. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, and llama symbol linkage from the published binary target.
+The release workflow runs the same smoke test after uploading the GitHub release asset, then builds the iOS smoke app against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, iOS package compilation, app-style iOS links, and llama symbol linkage from the published binary target.
 
 ### Quick release checklist
 
@@ -509,11 +532,33 @@ A successful run prints model load details, streaming events, a normalized JSON 
 smoke: ok
 ```
 
+### iOS demo app
+
+`Examples/CLLMSmokeIOS` is a minimal iOS app for validating the same model picker and generation flow on device or simulator. It lets you manage/select models, enter a prompt, run generation, and inspect streaming events.
+
+On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
+
+Build the local multi-platform llama artifact first:
+
+```sh
+Scripts/build-llama-xcframework.sh
+```
+
+Then open the top-level workspace from the repository root:
+
+```text
+CarbocationLocalLLM.xcworkspace
+```
+
+Select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it.
+
 For Gemma GGUFs, seeing `embeddedTemplate: true` together with `templateMode=gemma-fallback` is acceptable. It means the model exposes a template, but llama.cpp did not apply it successfully through the native template path, so the shared runtime used its known Gemma fallback prompt format.
 
 ### Package layout
 
 ```text
+CarbocationLocalLLM.xcworkspace            Xcode workspace for package development and the iOS smoke demo
+CarbocationLocalLLM.xcodeproj              Xcode app wrapper for the iOS smoke demo
 Sources/
   CarbocationLocalLLM/                    Core models, selection, context policy, generation options, JSON helpers
   CarbocationLocalLLMRuntime/             Unified facade over llama.cpp and Apple Intelligence
@@ -523,7 +568,10 @@ Sources/
   CLLMSmoke/                              Xcode-friendly smoke app
   llama/                                  module map for the llama.cpp build
 Tests/
+Examples/
+  CLLMSmokeIOS/                          iOS demo app for model picking and prompt generation
 Scripts/
+  build-llama-apple-platform.sh           Shared Apple-platform llama.cpp static library builder
   build-llama-macos.sh                    Local llama.cpp source build
   build-llama-from-xcode.sh               Adjacent-checkout build helper for host apps
   build-llama-xcframework.sh              Binary artifact packager
