@@ -82,6 +82,16 @@ jobs:
             build_ios_target "$target" iphonesimulator x86_64-apple-ios17.0-simulator
           done
 
+          build_macos_smoke_app() {
+            echo "Building CLLMSmokeMac for macOS"
+            xcodebuild build \
+              -project CarbocationLocalLLM.xcodeproj \
+              -scheme CLLMSmokeMac \
+              -destination "generic/platform=macOS" \
+              -derivedDataPath ".build/XcodeDerivedData-macOS" \
+              CODE_SIGNING_ALLOWED=NO
+          }
+
           build_ios_smoke_app() {
             local label="$1"
             local destination="$2"
@@ -99,6 +109,7 @@ jobs:
               ARCHS="$arch"
           }
 
+          build_macos_smoke_app
           build_ios_smoke_app "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-iOS-arm64"
           build_ios_smoke_app "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-iOSSimulator-arm64"
           build_ios_smoke_app "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-iOSSimulator-x86_64"
@@ -165,21 +176,31 @@ jobs:
       - name: Validate published binary release
         if: ${{ !inputs.dry_run }}
         run: |
-          release_smoke_passed=0
+          release_import_check_passed=0
           for attempt in 1 2 3 4 5 6; do
             if Scripts/test-binary-release.sh "${{ steps.artifact.outputs.tag }}"; then
-              release_smoke_passed=1
+              release_import_check_passed=1
               break
             fi
 
-            echo "release smoke failed on attempt $attempt; retrying after release asset propagation delay"
+            echo "release import check failed on attempt $attempt; retrying after release asset propagation delay"
             sleep 10
           done
 
-          if [[ "$release_smoke_passed" != "1" ]]; then
-            echo "release smoke failed after retries" >&2
+          if [[ "$release_import_check_passed" != "1" ]]; then
+            echo "release import check failed after retries" >&2
             exit 1
           fi
+
+          build_macos_smoke_app() {
+            echo "Building CLLMSmokeMac for macOS against published artifact"
+            xcodebuild build \
+              -project CarbocationLocalLLM.xcodeproj \
+              -scheme CLLMSmokeMac \
+              -destination "generic/platform=macOS" \
+              -derivedDataPath ".build/XcodeDerivedData-Release-macOS" \
+              CODE_SIGNING_ALLOWED=NO
+          }
 
           build_ios_smoke_app() {
             local label="$1"
@@ -198,6 +219,7 @@ jobs:
               ARCHS="$arch"
           }
 
+          build_macos_smoke_app
           build_ios_smoke_app "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-Release-iOS-arm64"
           build_ios_smoke_app "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-Release-iOSSimulator-arm64"
           build_ios_smoke_app "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-Release-iOSSimulator-x86_64"

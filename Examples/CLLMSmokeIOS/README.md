@@ -19,13 +19,13 @@ From the repository root, build the local multi-platform llama artifact:
 Scripts/build-llama-xcframework.sh
 ```
 
-Then open the top-level Xcode project from Finder or Xcode:
+Then open the repository root in Xcode:
 
-```text
-CarbocationLocalLLM.xcodeproj
+```sh
+open . -a Xcode
 ```
 
-Select the `CLLMSmokeIOS` scheme and an iOS device or simulator.
+Select the `CLLMSmokeIOS` scheme and an iOS device or simulator. The root project also contains the `CLLMSmokeMac` macOS smoke app. Both schemes run real app bundles from the root Xcode project.
 
 For command-line validation:
 

@@ -1,5 +1,13 @@
 .build/
-.swiftpm/
+.swiftpm/*
+!.swiftpm/xcode/
+.swiftpm/xcode/*
+!.swiftpm/xcode/xcshareddata/
+!.swiftpm/xcode/xcshareddata/xcschemes/
+!.swiftpm/xcode/xcshareddata/xcschemes/*.xcscheme
+!.swiftpm/xcode/package.xcworkspace/
+.swiftpm/xcode/package.xcworkspace/*
+!.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 DerivedData/
 Vendor/llama-artifacts/
 *.xcodeproj/project.xcworkspace/xcuserdata/

@@ -313,8 +313,6 @@ On iOS, model downloads use foreground `URLSession` work with resumable partial 
 | `CarbocationLocalLLMRuntime` | Unified facade that routes selections to llama.cpp or Apple Intelligence. | Most apps. This is the entry point. |
 | `CarbocationLocalLLMUI` | SwiftUI model library picker, curated downloads, Hugging Face URL downloads, local import, delete, refresh. | You want the bundled UI surfaces. |
 | `CarbocationLlamaRuntime` | Lower-level llama.cpp runtime — model probing, chat-template fallback, grammar-aware generation, streaming, cancellation. | You need provider-specific control the unified runtime does not expose. |
-| `CLLMSmoke` | Local smoke-test app for package development. | Working on the package itself. |
-
 `CarbocationAppleIntelligenceRuntime` is an internal implementation target used by the unified runtime; consume Apple Intelligence through `CarbocationLocalLLMRuntime`.
 
 ### How the binary release works
@@ -468,7 +466,7 @@ Keeping the manifest change on the release tag lets `main` stay source-build fri
 Scripts/test-binary-release.sh v0.3.0
 ```
 
-The release workflow runs the same smoke test after uploading the GitHub release asset, then builds the iOS smoke app against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, iOS package compilation, app-style iOS links, and llama symbol linkage from the published binary target.
+The release workflow runs a consumer import check after uploading the GitHub release asset, then builds the macOS and iOS smoke apps from the root Xcode project against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, app-style macOS/iOS links, and llama symbol linkage from the published binary target.
 
 ### Quick release checklist
 
@@ -479,7 +477,18 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
 
    ```sh
    swift test
-   swift build --target CLLMSmoke
+   xcodebuild build \
+     -project CarbocationLocalLLM.xcodeproj \
+     -scheme CLLMSmokeMac \
+     -destination 'generic/platform=macOS' \
+     -derivedDataPath .build/CLLMSmokeMacDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project CarbocationLocalLLM.xcodeproj \
+     -scheme CLLMSmokeIOS \
+     -destination 'generic/platform=iOS' \
+     -derivedDataPath .build/CLLMSmokeIOSDerivedData \
+     CODE_SIGNING_ALLOWED=NO
    ```
 
 3. In GitHub Actions, run `Publish Llama Binary Artifact` with `tag: v0.3.0`, `prerelease: false`, `dry_run: true`.
@@ -504,13 +513,21 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
 
 `main` should normally keep `llamaBinaryArtifactURL` and `llamaBinaryArtifactChecksum` empty so library development uses the source-build path. Release tags can point those constants at the published binary artifact.
 
-### Smoke app
+### Smoke apps
 
-`CLLMSmoke` shows Apple Intelligence in the picker when `LocalLLMEngine.availableSystemModels()` reports it available. The smoke test asks every provider for JSON; installed GGUF models use grammar-constrained generation, while Apple Intelligence uses prompt guidance plus balanced-JSON post-processing.
+`CLLMSmokeMac` and `CLLMSmokeIOS` are root Xcode app schemes. They show Apple Intelligence in the picker when `LocalLLMEngine.availableSystemModels()` reports it available. The macOS smoke asks every provider for JSON; installed GGUF models use grammar-constrained generation, while Apple Intelligence uses prompt guidance plus balanced-JSON post-processing.
 
-Open `Package.swift` in Xcode.
+Open the repository root in Xcode:
 
-1. Select the `CLLMSmoke` scheme.
+```sh
+open . -a Xcode
+```
+
+Use the `CLLMSmokeMac` and `CLLMSmokeIOS` schemes. The package manifest does not expose smoke-test SwiftPM executable products because the iOS smoke must run as a real `.app` bundle.
+
+For macOS:
+
+1. Select the `CLLMSmokeMac` scheme.
 2. Set the destination to `My Mac`.
 3. Run.
 4. Select an installed model or available system model in the left pane.
@@ -524,7 +541,7 @@ The smoke app uses the shared model cache by default:
 
 For unsigned/dev builds where the App Group container is unavailable, the core storage helper falls back to per-app Application Support.
 
-If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmoke` again.
+If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmokeMac` again.
 
 A successful run prints model load details, streaming events, a normalized JSON response, and:
 
@@ -532,9 +549,7 @@ A successful run prints model load details, streaming events, a normalized JSON 
 smoke: ok
 ```
 
-### iOS demo app
-
-`Examples/CLLMSmokeIOS` is a minimal iOS app for validating the same model picker and generation flow on device or simulator. It lets you manage/select models, enter a prompt, run generation, and inspect streaming events.
+For iOS, select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it. `Examples/CLLMSmokeIOS` contains the app source used by the root project. It lets you manage/select models, enter a prompt, run generation, and inspect streaming events.
 
 On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
 
@@ -544,39 +559,31 @@ Build the local multi-platform llama artifact first:
 Scripts/build-llama-xcframework.sh
 ```
 
-Then open the top-level workspace from the repository root:
-
-```text
-CarbocationLocalLLM.xcworkspace
-```
-
-Select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it.
-
 For Gemma GGUFs, seeing `embeddedTemplate: true` together with `templateMode=gemma-fallback` is acceptable. It means the model exposes a template, but llama.cpp did not apply it successfully through the native template path, so the shared runtime used its known Gemma fallback prompt format.
 
 ### Package layout
 
 ```text
-CarbocationLocalLLM.xcworkspace            Xcode workspace for package development and the iOS smoke demo
-CarbocationLocalLLM.xcodeproj              Xcode app wrapper for the iOS smoke demo
+CarbocationLocalLLM.xcworkspace            Xcode workspace wrapper for the root app project
+CarbocationLocalLLM.xcodeproj              Root Xcode app wrapper for macOS and iOS smoke apps
 Sources/
   CarbocationLocalLLM/                    Core models, selection, context policy, generation options, JSON helpers
   CarbocationLocalLLMRuntime/             Unified facade over llama.cpp and Apple Intelligence
   CarbocationLlamaRuntime/                llama.cpp-backed runtime
   CarbocationAppleIntelligenceRuntime/    Foundation Models-backed runtime (consumed via the unified facade)
   CarbocationLocalLLMUI/                  SwiftUI model library picker
-  CLLMSmoke/                              Xcode-friendly smoke app
+  CLLMSmoke/                              macOS smoke app source used by the root app project
   llama/                                  module map for the llama.cpp build
 Tests/
 Examples/
-  CLLMSmokeIOS/                          iOS demo app for model picking and prompt generation
+  CLLMSmokeIOS/                          iOS smoke app for model picking and prompt generation
 Scripts/
   build-llama-apple-platform.sh           Shared Apple-platform llama.cpp static library builder
   build-llama-macos.sh                    Local llama.cpp source build
   build-llama-from-xcode.sh               Adjacent-checkout build helper for host apps
   build-llama-xcframework.sh              Binary artifact packager
   set-llama-binary-artifact.sh            Release manifest stamper
-  test-binary-release.sh                  Clean downstream release smoke test
+  test-binary-release.sh                  Clean downstream release import check
 Vendor/
   llama.cpp/                              git submodule
 ```
