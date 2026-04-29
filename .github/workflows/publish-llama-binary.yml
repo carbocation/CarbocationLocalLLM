@@ -85,7 +85,7 @@ jobs:
           build_macos_smoke_app() {
             echo "Building CLLMSmokeMac for macOS"
             xcodebuild build \
-              -project CarbocationLocalLLM.xcodeproj \
+              -project CLLMSmoke.xcodeproj \
               -scheme CLLMSmokeMac \
               -destination "generic/platform=macOS" \
               -derivedDataPath ".build/XcodeDerivedData-macOS" \
@@ -100,7 +100,7 @@ jobs:
 
             echo "Building CLLMSmokeIOS for $label"
             xcodebuild build \
-              -project CarbocationLocalLLM.xcodeproj \
+              -project CLLMSmoke.xcodeproj \
               -scheme CLLMSmokeIOS \
               -destination "$destination" \
               -derivedDataPath "$derived_data_path" \
@@ -195,7 +195,7 @@ jobs:
           build_macos_smoke_app() {
             echo "Building CLLMSmokeMac for macOS against published artifact"
             xcodebuild build \
-              -project CarbocationLocalLLM.xcodeproj \
+              -project CLLMSmoke.xcodeproj \
               -scheme CLLMSmokeMac \
               -destination "generic/platform=macOS" \
               -derivedDataPath ".build/XcodeDerivedData-Release-macOS" \
@@ -210,7 +210,7 @@ jobs:
 
             echo "Building CLLMSmokeIOS for $label against published artifact"
             xcodebuild build \
-              -project CarbocationLocalLLM.xcodeproj \
+              -project CLLMSmoke.xcodeproj \
               -scheme CLLMSmokeIOS \
               -destination "$destination" \
               -derivedDataPath "$derived_data_path" \

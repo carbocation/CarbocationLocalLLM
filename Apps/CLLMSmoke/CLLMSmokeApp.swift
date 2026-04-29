@@ -61,7 +61,11 @@ private struct CLLMSmokeApp: App {
 #endif
 
 private enum CLLMSmokeMetadata {
+#if os(macOS)
     static let displayName = "CLLMSmokeMac"
+#else
+    static let displayName = "CLLMSmokeIOS"
+#endif
     static let appSupportFolderName = "CarbocationLocalLLM"
     static let selectedModelDefaultsKey = "CLLMSmoke.selectedModelID"
 }

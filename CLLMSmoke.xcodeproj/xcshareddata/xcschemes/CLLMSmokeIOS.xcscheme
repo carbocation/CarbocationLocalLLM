@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "CLLM100000000000000000005002"
-               BuildableName = "CLLMSmokeMac.app"
-               BlueprintName = "CLLMSmokeMac"
-               ReferencedContainer = "container:/Users/james/projects/CarbocationLocalLLM/CarbocationLocalLLM.xcodeproj">
+               BlueprintIdentifier = "CLLM100000000000000000005001"
+               BuildableName = "CLLMSmokeIOS.app"
+               BlueprintName = "CLLMSmokeIOS"
+               ReferencedContainer = "container:CLLMSmoke.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,10 +45,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CLLM100000000000000000005002"
-            BuildableName = "CLLMSmokeMac.app"
-            BlueprintName = "CLLMSmokeMac"
-            ReferencedContainer = "container:/Users/james/projects/CarbocationLocalLLM/CarbocationLocalLLM.xcodeproj">
+            BlueprintIdentifier = "CLLM100000000000000000005001"
+            BuildableName = "CLLMSmokeIOS.app"
+            BlueprintName = "CLLMSmokeIOS"
+            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,10 +62,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CLLM100000000000000000005002"
-            BuildableName = "CLLMSmokeMac.app"
-            BlueprintName = "CLLMSmokeMac"
-            ReferencedContainer = "container:/Users/james/projects/CarbocationLocalLLM/CarbocationLocalLLM.xcodeproj">
+            BlueprintIdentifier = "CLLM100000000000000000005001"
+            BuildableName = "CLLMSmokeIOS.app"
+            BlueprintName = "CLLMSmokeIOS"
+            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

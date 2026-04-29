@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		CLLM100000000000000000001001 /* CLLMSmokeIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */; };
 		CLLM100000000000000000001002 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001003 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001004 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
@@ -15,10 +14,10 @@
 		CLLM100000000000000000001006 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001007 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001008 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources (iOS) */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002003 /* CLLMSmokeApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMSmokeIOSApp.swift; sourceTree = "<group>"; };
 		CLLM100000000000000000002002 /* CLLMSmokeIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMSmokeIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002003 /* CLLMSmokeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMSmokeApp.swift; sourceTree = "<group>"; };
 		CLLM100000000000000000002004 /* CLLMSmokeMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMSmokeMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -51,18 +50,9 @@
 		CLLM100000000000000000004001 = {
 			isa = PBXGroup;
 			children = (
-				CLLM100000000000000000004004 /* CLLMSmokeMac */,
-				CLLM100000000000000000004002 /* CLLMSmokeIOS */,
+				CLLM100000000000000000004004 /* CLLMSmoke */,
 				CLLM100000000000000000004003 /* Products */,
 			);
-			sourceTree = "<group>";
-		};
-		CLLM100000000000000000004002 /* CLLMSmokeIOS */ = {
-			isa = PBXGroup;
-			children = (
-				CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */,
-			);
-			path = Examples/CLLMSmokeIOS/CLLMSmokeIOS;
 			sourceTree = "<group>";
 		};
 		CLLM100000000000000000004003 /* Products */ = {
@@ -74,12 +64,12 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		CLLM100000000000000000004004 /* CLLMSmokeMac */ = {
+		CLLM100000000000000000004004 /* CLLMSmoke */ = {
 			isa = PBXGroup;
 			children = (
 				CLLM100000000000000000002003 /* CLLMSmokeApp.swift */,
 			);
-			path = Sources/CLLMSmoke;
+			path = Apps/CLLMSmoke;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -172,7 +162,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001001 /* CLLMSmokeIOSApp.swift in Sources */,
+				CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources (iOS) */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

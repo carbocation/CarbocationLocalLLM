@@ -13,8 +13,6 @@ let llamaBinaryArtifactURL = ""
 let llamaBinaryArtifactChecksum = ""
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
 let forceSourceLlama = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA"] == "1"
-let cllmSmokeMacOSInfoPlist = "\(packageRoot)/Sources/CLLMSmoke/Info.plist"
-let cllmSmokeIOSInfoPlist = "\(packageRoot)/Sources/CLLMSmoke/Info-iOS.plist"
 
 let llamaTarget: Target
 let llamaUnsafeLinkerSettings: [LinkerSetting]
@@ -74,10 +72,6 @@ let package = Package(
         .library(
             name: "CarbocationLocalLLMUI",
             targets: ["CarbocationLocalLLMUI"]
-        ),
-        .executable(
-            name: "CLLMSmoke",
-            targets: ["CLLMSmoke"]
         )
     ],
     targets: [
@@ -113,28 +107,6 @@ let package = Package(
         .target(
             name: "CarbocationLocalLLMUI",
             dependencies: ["CarbocationLocalLLM"]
-        ),
-        .executableTarget(
-            name: "CLLMSmoke",
-            dependencies: [
-                "CarbocationLocalLLMUI",
-                "CarbocationLocalLLMRuntime"
-            ],
-            exclude: ["Info.plist", "Info-iOS.plist"],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", cllmSmokeMacOSInfoPlist
-                ], .when(platforms: [.macOS])),
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", cllmSmokeIOSInfoPlist
-                ], .when(platforms: [.iOS]))
-            ]
         ),
         .testTarget(
             name: "CarbocationLocalLLMTests",

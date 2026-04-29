@@ -5,7 +5,7 @@ import Observation
 import SwiftUI
 
 @main
-struct CLLMSmokeIOSApp: App {
+struct CLLMDemoIOSApp: App {
     @State private var state = SmokeDemoState()
 
     var body: some Scene {
@@ -24,7 +24,7 @@ private struct SmokeRootView: View {
                 ModelLibraryPickerView(
                     library: state.library,
                     selectedModelID: $state.selectedModelID,
-                    title: "CLLMSmokeIOS",
+                    title: "CLLM Demo iOS",
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
                     systemModels: state.systemModels,
@@ -193,14 +193,14 @@ private final class SmokeDemoState {
     private var activeEngine: LocalLLMEngine?
 
     init() {
-        let root = ModelStorage.modelsDirectory(appSupportFolderName: "CLLMSmokeIOS")
+        let root = ModelStorage.modelsDirectory(appSupportFolderName: "CLLMDemoIOS")
         library = ModelLibrary(
             root: root,
             contextLengthProbe: { url in
                 LocalLLMEngine.probeTrainingContext(at: url)
             }
         )
-        selectedModelID = UserDefaults.standard.string(forKey: "CLLMSmokeIOS.selectedModelID") ?? ""
+        selectedModelID = UserDefaults.standard.string(forKey: "CLLMDemoIOS.selectedModelID") ?? ""
         normalizeSelection()
     }
 
@@ -228,7 +228,7 @@ private final class SmokeDemoState {
     }
 
     func persistSelection(_ value: String) {
-        UserDefaults.standard.set(value, forKey: "CLLMSmokeIOS.selectedModelID")
+        UserDefaults.standard.set(value, forKey: "CLLMDemoIOS.selectedModelID")
     }
 
     func run() {

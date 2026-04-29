@@ -7,15 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		CLLM100000000000000000001001 /* CLLMSmokeIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */; };
+		CLLM100000000000000000001001 /* CLLMDemoIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002001 /* CLLMDemoIOSApp.swift */; };
 		CLLM100000000000000000001002 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001003 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001004 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMSmokeIOSApp.swift; sourceTree = "<group>"; };
-		CLLM100000000000000000002002 /* CLLMSmokeIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMSmokeIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CLLM100000000000000000002001 /* CLLMDemoIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMDemoIOSApp.swift; sourceTree = "<group>"; };
+		CLLM100000000000000000002002 /* CLLMDemoIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMDemoIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -35,23 +35,23 @@
 		CLLM100000000000000000004001 = {
 			isa = PBXGroup;
 			children = (
-				CLLM100000000000000000004002 /* CLLMSmokeIOS */,
+				CLLM100000000000000000004002 /* CLLMDemoIOS */,
 				CLLM100000000000000000004003 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		CLLM100000000000000000004002 /* CLLMSmokeIOS */ = {
+		CLLM100000000000000000004002 /* CLLMDemoIOS */ = {
 			isa = PBXGroup;
 			children = (
-				CLLM100000000000000000002001 /* CLLMSmokeIOSApp.swift */,
+				CLLM100000000000000000002001 /* CLLMDemoIOSApp.swift */,
 			);
-			path = CLLMSmokeIOS;
+			path = CLLMDemoIOS;
 			sourceTree = "<group>";
 		};
 		CLLM100000000000000000004003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				CLLM100000000000000000002002 /* CLLMSmokeIOS.app */,
+				CLLM100000000000000000002002 /* CLLMDemoIOS.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -59,9 +59,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		CLLM100000000000000000005001 /* CLLMSmokeIOS */ = {
+		CLLM100000000000000000005001 /* CLLMDemoIOS */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = CLLM100000000000000000006003 /* Build configuration list for PBXNativeTarget "CLLMSmokeIOS" */;
+			buildConfigurationList = CLLM100000000000000000006003 /* Build configuration list for PBXNativeTarget "CLLMDemoIOS" */;
 			buildPhases = (
 				CLLM100000000000000000003002 /* Sources */,
 				CLLM100000000000000000003001 /* Frameworks */,
@@ -70,14 +70,14 @@
 			);
 			dependencies = (
 			);
-			name = CLLMSmokeIOS;
+			name = CLLMDemoIOS;
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
 				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
 			);
-			productName = CLLMSmokeIOS;
-			productReference = CLLM100000000000000000002002 /* CLLMSmokeIOS.app */;
+			productName = CLLMDemoIOS;
+			productReference = CLLM100000000000000000002002 /* CLLMDemoIOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -95,7 +95,7 @@
 					};
 				};
 			};
-			buildConfigurationList = CLLM100000000000000000006001 /* Build configuration list for PBXProject "CLLMSmokeIOS" */;
+			buildConfigurationList = CLLM100000000000000000006001 /* Build configuration list for PBXProject "CLLMDemoIOS" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -111,7 +111,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				CLLM100000000000000000005001 /* CLLMSmokeIOS */,
+				CLLM100000000000000000005001 /* CLLMDemoIOS */,
 			);
 		};
 /* End PBXProject section */
@@ -121,7 +121,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001001 /* CLLMSmokeIOSApp.swift in Sources */,
+				CLLM100000000000000000001001 /* CLLMDemoIOSApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -250,7 +250,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = CLLMSmokeIOS;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMDemoIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -263,7 +263,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMSmokeIOS;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMDemoIOS;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -280,7 +280,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = CLLMSmokeIOS;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMDemoIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -293,7 +293,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMSmokeIOS;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMDemoIOS;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -306,7 +306,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		CLLM100000000000000000006001 /* Build configuration list for PBXProject "CLLMSmokeIOS" */ = {
+		CLLM100000000000000000006001 /* Build configuration list for PBXProject "CLLMDemoIOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				CLLM100000000000000000006101 /* Debug */,
@@ -315,7 +315,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		CLLM100000000000000000006003 /* Build configuration list for PBXNativeTarget "CLLMSmokeIOS" */ = {
+		CLLM100000000000000000006003 /* Build configuration list for PBXNativeTarget "CLLMDemoIOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				CLLM100000000000000000006201 /* Debug */,
