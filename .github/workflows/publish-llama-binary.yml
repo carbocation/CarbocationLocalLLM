@@ -82,26 +82,30 @@ jobs:
             build_ios_target "$target" iphonesimulator x86_64-apple-ios17.0-simulator
           done
 
-          build_macos_smoke_app() {
-            echo "Building CLLMSmokeMac for macOS"
+          build_macos_app() {
+            local scheme="$1"
+            local derived_data_path="$2"
+
+            echo "Building $scheme for macOS"
             xcodebuild build \
-              -project CLLMSmoke.xcodeproj \
-              -scheme CLLMSmokeMac \
+              -project Apps.xcodeproj \
+              -scheme "$scheme" \
               -destination "generic/platform=macOS" \
-              -derivedDataPath ".build/XcodeDerivedData-macOS" \
+              -derivedDataPath "$derived_data_path" \
               CODE_SIGNING_ALLOWED=NO
           }
 
-          build_ios_smoke_app() {
-            local label="$1"
-            local destination="$2"
-            local arch="$3"
-            local derived_data_path="$4"
+          build_ios_app() {
+            local scheme="$1"
+            local label="$2"
+            local destination="$3"
+            local arch="$4"
+            local derived_data_path="$5"
 
-            echo "Building CLLMSmokeIOS for $label"
+            echo "Building $scheme for $label"
             xcodebuild build \
-              -project CLLMSmoke.xcodeproj \
-              -scheme CLLMSmokeIOS \
+              -project Apps.xcodeproj \
+              -scheme "$scheme" \
               -destination "$destination" \
               -derivedDataPath "$derived_data_path" \
               CODE_SIGNING_ALLOWED=NO \
@@ -109,10 +113,12 @@ jobs:
               ARCHS="$arch"
           }
 
-          build_macos_smoke_app
-          build_ios_smoke_app "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-iOS-arm64"
-          build_ios_smoke_app "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-iOSSimulator-arm64"
-          build_ios_smoke_app "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-iOSSimulator-x86_64"
+          build_macos_app CLLMSmokeMac ".build/XcodeDerivedData-CLLMSmokeMac-macOS"
+          build_ios_app CLLMSmokeIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOS-arm64"
+          build_ios_app CLLMSmokeIOS "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOSSimulator-arm64"
+          build_ios_app CLLMSmokeIOS "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOSSimulator-x86_64"
+          build_macos_app CLLMDemoMac ".build/XcodeDerivedData-CLLMDemoMac-macOS"
+          build_ios_app CLLMDemoIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-CLLMDemoIOS-iOS-arm64"
 
       - name: Summarize dry run
         if: ${{ inputs.dry_run }}
@@ -192,26 +198,30 @@ jobs:
             exit 1
           fi
 
-          build_macos_smoke_app() {
-            echo "Building CLLMSmokeMac for macOS against published artifact"
+          build_macos_app() {
+            local scheme="$1"
+            local derived_data_path="$2"
+
+            echo "Building $scheme for macOS against published artifact"
             xcodebuild build \
-              -project CLLMSmoke.xcodeproj \
-              -scheme CLLMSmokeMac \
+              -project Apps.xcodeproj \
+              -scheme "$scheme" \
               -destination "generic/platform=macOS" \
-              -derivedDataPath ".build/XcodeDerivedData-Release-macOS" \
+              -derivedDataPath "$derived_data_path" \
               CODE_SIGNING_ALLOWED=NO
           }
 
-          build_ios_smoke_app() {
-            local label="$1"
-            local destination="$2"
-            local arch="$3"
-            local derived_data_path="$4"
+          build_ios_app() {
+            local scheme="$1"
+            local label="$2"
+            local destination="$3"
+            local arch="$4"
+            local derived_data_path="$5"
 
-            echo "Building CLLMSmokeIOS for $label against published artifact"
+            echo "Building $scheme for $label against published artifact"
             xcodebuild build \
-              -project CLLMSmoke.xcodeproj \
-              -scheme CLLMSmokeIOS \
+              -project Apps.xcodeproj \
+              -scheme "$scheme" \
               -destination "$destination" \
               -derivedDataPath "$derived_data_path" \
               CODE_SIGNING_ALLOWED=NO \
@@ -219,7 +229,9 @@ jobs:
               ARCHS="$arch"
           }
 
-          build_macos_smoke_app
-          build_ios_smoke_app "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-Release-iOS-arm64"
-          build_ios_smoke_app "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-Release-iOSSimulator-arm64"
-          build_ios_smoke_app "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-Release-iOSSimulator-x86_64"
+          build_macos_app CLLMSmokeMac ".build/XcodeDerivedData-Release-CLLMSmokeMac-macOS"
+          build_ios_app CLLMSmokeIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-Release-CLLMSmokeIOS-iOS-arm64"
+          build_ios_app CLLMSmokeIOS "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-Release-CLLMSmokeIOS-iOSSimulator-arm64"
+          build_ios_app CLLMSmokeIOS "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-Release-CLLMSmokeIOS-iOSSimulator-x86_64"
+          build_macos_app CLLMDemoMac ".build/XcodeDerivedData-Release-CLLMDemoMac-macOS"
+          build_ios_app CLLMDemoIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-Release-CLLMDemoIOS-iOS-arm64"

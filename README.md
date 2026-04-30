@@ -485,7 +485,7 @@ Keeping the manifest change on the release tag lets `main` stay source-build fri
 Scripts/test-binary-release.sh v0.3.0
 ```
 
-The release workflow runs a consumer import check after uploading the GitHub release asset, then builds the macOS and iOS smoke apps from the root Xcode project against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, app-style macOS/iOS links, and llama symbol linkage from the published binary target.
+The release workflow runs a consumer import check after uploading the GitHub release asset, then builds the smoke and demo apps from the root Xcode project against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, app-style macOS/iOS links, and llama symbol linkage from the published binary target.
 
 ### Quick release checklist
 
@@ -507,6 +507,18 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
      -scheme CLLMSmokeIOS \
      -destination 'generic/platform=iOS' \
      -derivedDataPath .build/CLLMSmokeIOSDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMDemoMac \
+     -destination 'generic/platform=macOS' \
+     -derivedDataPath .build/CLLMDemoMacDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMDemoIOS \
+     -destination 'generic/platform=iOS' \
+     -derivedDataPath .build/CLLMDemoIOSDerivedData \
      CODE_SIGNING_ALLOWED=NO
    ```
 
