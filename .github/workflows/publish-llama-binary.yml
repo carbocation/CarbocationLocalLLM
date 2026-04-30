@@ -42,38 +42,58 @@ jobs:
         run: |
           set -euo pipefail
 
-          selected=$(
-            ls -d /Applications/Xcode_*.app 2>/dev/null \
-              | awk -F'/' '
-                  {
-                    file = $NF
-                    sub(/^Xcode_/, "", file)
-                    sub(/\.app$/, "", file)
-                    # Skip betas and other non-stable releases (e.g. Xcode_26.5_beta_2.app),
-                    # which often lack the matching iOS platform/runtime on hosted runners.
-                    if (file !~ /^[0-9]+(\.[0-9]+)*$/) next
-                    split(file, parts, ".")
-                    major = parts[1] + 0
-                    minor = parts[2] + 0
-                    if (major > 26 || (major == 26 && minor >= 4)) {
-                      print file "\t" $0
-                    }
-                  }
-                ' \
-              | sort -V \
-              | tail -1 \
-              | cut -f2
-          )
+          echo "Available Xcode installs:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+
+          selected=""
+          selected_ver=""
+          for app in /Applications/Xcode_*.app; do
+            [ -d "$app" ] || continue
+            ver="${app##*/Xcode_}"
+            ver="${ver%.app}"
+
+            # Reject obvious beta naming (e.g. Xcode_26.5_beta_2.app).
+            case "$ver" in *[!0-9.]*) continue ;; esac
+
+            # Require version >= 26.4
+            major="${ver%%.*}"
+            rest="${ver#*.}"
+            minor="${rest%%.*}"
+            if [ "$major" -lt 26 ] || { [ "$major" -eq 26 ] && [ "$minor" -lt 4 ]; }; then
+              continue
+            fi
+
+            # Reject seed builds whose dir name *looks* stable (e.g. Xcode_26.5.0.app
+            # shipping build 17F5022i). Apple's seed/beta build numbers always end in
+            # a letter; final builds end in a digit.
+            build=$(plutil -extract ProductBuildVersion raw "$app/Contents/version.plist" 2>/dev/null || echo "")
+            case "$build" in *[A-Za-z]) continue ;; esac
+
+            # Pick the highest qualifying version.
+            if [ -z "$selected_ver" ] \
+              || [ "$(printf '%s\n%s\n' "$selected_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
+              selected="$app"
+              selected_ver="$ver"
+            fi
+          done
 
           if [ -z "$selected" ]; then
             echo "::error::No stable Xcode 26.4 or newer is pre-installed on this runner" >&2
-            ls -d /Applications/Xcode_*.app 2>/dev/null || true
             exit 1
           fi
 
-          echo "Selecting $selected"
+          echo "Selected $selected (version $selected_ver)"
+          # DEVELOPER_DIR takes precedence over xcode-select and persists across steps.
+          echo "DEVELOPER_DIR=$selected/Contents/Developer" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$selected/Contents/Developer"
           sudo xcode-select -s "$selected"
+
+          echo "--- xcodebuild -version ---"
           xcodebuild -version
+          echo "--- installed iOS SDKs ---"
+          xcodebuild -showsdks | grep -E 'iphoneos|iphonesimulator' || true
+          echo "--- installed platforms ---"
+          ls "$selected/Contents/Developer/Platforms/" || true
 
       - name: Build XCFramework archive
         run: Scripts/build-llama-xcframework.sh
