@@ -1,6 +1,7 @@
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMUI
+import Foundation
 import Observation
 import SwiftUI
 
@@ -8,7 +9,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct CLLMSmokeApp {
+private enum CLLMSmokeApp {
     @MainActor private static var delegate: SmokeAppDelegate?
 
     @MainActor
@@ -25,28 +26,9 @@ struct CLLMSmokeApp {
 @MainActor
 private final class SmokeAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
-    private var library: ModelLibrary?
-    private let smoke = SmokeState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let root = ModelStorage.modelsDirectory(appSupportFolderName: "CarbocationLocalLLM")
-        let contextProbe: ModelContextLengthProbe = { url in
-            LocalLLMEngine.probeTrainingContext(at: url)
-        }
-        let library = ModelLibrary(
-            root: root,
-            contextLengthProbe: contextProbe
-        )
-        self.library = library
-
-        let hostingView = NSHostingView(
-            rootView:
-            SmokeRootView(
-                library: library,
-                initialSelectedModelID: UserDefaults.standard.string(forKey: "CLLMSmoke.selectedModelID") ?? "",
-                smoke: smoke
-            )
-        )
+        let hostingView = NSHostingView(rootView: SmokeRootView())
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_080, height: 680),
@@ -54,7 +36,7 @@ private final class SmokeAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "CLLMSmoke"
+        window.title = CLLMSmokeMetadata.displayName
         window.contentView = hostingView
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -67,73 +49,139 @@ private final class SmokeAppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 }
+#else
+@main
+private struct CLLMSmokeApp: App {
+    var body: some Scene {
+        WindowGroup {
+            SmokeRootView()
+        }
+    }
+}
+#endif
 
+private enum CLLMSmokeMetadata {
+#if os(macOS)
+    static let displayName = "CLLMSmokeMac"
+#else
+    static let displayName = "CLLMSmokeIOS"
+#endif
+    static let appSupportFolderName = "CarbocationLocalLLM"
+    static let selectedModelDefaultsKey = "CLLMSmoke.selectedModelID"
+}
+
+@MainActor
 private struct SmokeRootView: View {
-    let library: ModelLibrary
-    let smoke: SmokeState
+    private let library: ModelLibrary
     @State private var selectedModelID: String
+    @State private var smoke = SmokeState()
 
-    init(
-        library: ModelLibrary,
-        initialSelectedModelID: String,
-        smoke: SmokeState
-    ) {
-        self.library = library
-        self.smoke = smoke
-        _selectedModelID = State(initialValue: initialSelectedModelID)
+    init() {
+        library = Self.makeLibrary()
+        _selectedModelID = State(
+            initialValue: UserDefaults.standard.string(forKey: CLLMSmokeMetadata.selectedModelDefaultsKey) ?? ""
+        )
     }
 
     var body: some View {
+        rootContent
+            .onChange(of: selectedModelID) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: CLLMSmokeMetadata.selectedModelDefaultsKey)
+            }
+    }
+
+    @ViewBuilder
+    private var rootContent: some View {
+#if os(macOS)
         HStack(spacing: 0) {
-            ModelLibraryPickerView(
-                library: library,
-                selectedModelID: $selectedModelID,
-                title: "CLLMSmoke",
-                confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
-                confirmDisabled: smoke.isRunning,
-                systemModels: Self.systemModels,
-                onConfirmSelection: { selection in
-                    smoke.run(selection: selection, library: library)
-                }
-            )
-            .frame(width: 620)
-            .frame(minHeight: 680)
+            modelPicker
+                .frame(width: 620)
+                .frame(minHeight: 680)
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Smoke Output")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        smoke.clear()
-                    } label: {
-                        Label("Clear", systemImage: "xmark.circle")
-                    }
-                    .disabled(smoke.output.isEmpty || smoke.isRunning)
-                }
-
-                ScrollView {
-                    Text(smoke.output.isEmpty ? "Select a model and run the smoke test." : smoke.output)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 6))
-            }
-            .padding(20)
-            .frame(width: 460)
-            .frame(minHeight: 680)
+            outputPane
+                .padding(20)
+                .frame(width: 460)
+                .frame(minHeight: 680)
         }
         .frame(minWidth: 1_080, minHeight: 680)
-        .onChange(of: selectedModelID) { _, newValue in
-            UserDefaults.standard.set(newValue, forKey: "CLLMSmoke.selectedModelID")
+#else
+        TabView {
+            NavigationStack {
+                modelPicker
+                    .navigationTitle("Models")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+            .tabItem {
+                Label("Models", systemImage: "cpu")
+            }
+
+            NavigationStack {
+                ScrollView {
+                    outputPane
+                        .padding()
+                }
+                .navigationTitle("Smoke Output")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+            .tabItem {
+                Label("Output", systemImage: "text.bubble")
+            }
         }
+#endif
+    }
+
+    private var modelPicker: some View {
+        ModelLibraryPickerView(
+            library: library,
+            selectedModelID: $selectedModelID,
+            title: CLLMSmokeMetadata.displayName,
+            confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
+            confirmDisabled: smoke.isRunning,
+            systemModels: Self.systemModels,
+            onConfirmSelection: { selection in
+                smoke.run(selection: selection, library: library)
+            }
+        )
+    }
+
+    private var outputPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Smoke Output")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    smoke.clear()
+                } label: {
+                    Label("Clear", systemImage: "xmark.circle")
+                }
+                .disabled(smoke.output.isEmpty || smoke.isRunning)
+            }
+
+            ScrollView {
+                Text(smoke.output.isEmpty ? "Select a model and run the smoke test." : smoke.output)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+                    .textSelection(.enabled)
+            }
+            .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private static var systemModels: [LLMSystemModelOption] {
         LocalLLMEngine.availableSystemModels()
+    }
+
+    private static func makeLibrary() -> ModelLibrary {
+        ModelLibrary(
+            root: ModelStorage.modelsDirectory(appSupportFolderName: CLLMSmokeMetadata.appSupportFolderName),
+            contextLengthProbe: { url in
+                LocalLLMEngine.probeTrainingContext(at: url)
+            }
+        )
     }
 }
 
@@ -299,11 +347,3 @@ private enum SmokeError: LocalizedError {
         }
     }
 }
-#else
-@main
-struct CLLMSmokeApp {
-    static func main() {
-        fatalError("CLLMSmoke is only available on macOS.")
-    }
-}
-#endif

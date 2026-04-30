@@ -72,10 +72,6 @@ let package = Package(
         .library(
             name: "CarbocationLocalLLMUI",
             targets: ["CarbocationLocalLLMUI"]
-        ),
-        .executable(
-            name: "CLLMSmoke",
-            targets: ["CLLMSmoke"]
         )
     ],
     targets: [
@@ -112,16 +108,11 @@ let package = Package(
             name: "CarbocationLocalLLMUI",
             dependencies: ["CarbocationLocalLLM"]
         ),
-        .executableTarget(
-            name: "CLLMSmoke",
-            dependencies: [
-                "CarbocationLocalLLMUI",
-                "CarbocationLocalLLMRuntime"
-            ]
-        ),
         .testTarget(
             name: "CarbocationLocalLLMTests",
-            dependencies: ["CarbocationLocalLLM"]
+            dependencies: [
+                "CarbocationLocalLLM"
+            ]
         ),
         .testTarget(
             name: "CarbocationLlamaRuntimeTests",

@@ -313,7 +313,6 @@ On iOS, model downloads use foreground `URLSession` work with resumable partial 
 | `CarbocationLocalLLMRuntime` | Unified facade that routes selections to llama.cpp or Apple Intelligence. | Most apps. This is the entry point. |
 | `CarbocationLocalLLMUI` | SwiftUI model library picker, curated downloads, Hugging Face URL downloads, local import, delete, refresh. | You want the bundled UI surfaces. |
 | `CarbocationLlamaRuntime` | Lower-level llama.cpp runtime — model probing, chat-template fallback, grammar-aware generation, streaming, cancellation. | You need provider-specific control the unified runtime does not expose. |
-| `CLLMSmoke` | Local smoke-test app for package development. | Working on the package itself. |
 
 `CarbocationAppleIntelligenceRuntime` is an internal implementation target used by the unified runtime; consume Apple Intelligence through `CarbocationLocalLLMRuntime`.
 
@@ -381,6 +380,24 @@ Run the tests:
 ```sh
 swift test
 ```
+
+### Open in Xcode
+
+There are two entry points and they show different schemes — pick the one that matches what you're working on:
+
+- **Working on the library** (any `Carbocation*` target, runtime, UI, tests): open the package.
+  ```sh
+  xed Package.swift
+  ```
+  You get the SwiftPM library schemes (`CarbocationLocalLLM`, `CarbocationLocalLLMRuntime`, `CarbocationLocalLLMUI`, `CarbocationLlamaRuntime`, and the `CarbocationLocalLLM-Package` umbrella). Use these for editing library code and running the test targets.
+
+- **Running the smoke and demo apps** (`CLLMSmokeMac`, `CLLMSmokeIOS`, `CLLMDemoMac`, `CLLMDemoIOS`): open the apps project.
+  ```sh
+  open Apps.xcodeproj
+  ```
+  You get the app schemes, runnable on their respective destinations.
+
+Avoid `open . -a Xcode` — with both `Package.swift` and `Apps.xcodeproj` at the root, Xcode 26 picks package mode and the app schemes will not appear.
 
 The Apple Intelligence live generation smoke test is skipped by default so normal CI does not depend on a supported device. To run it locally on an eligible macOS 26+ system:
 
@@ -468,7 +485,7 @@ Keeping the manifest change on the release tag lets `main` stay source-build fri
 Scripts/test-binary-release.sh v0.3.0
 ```
 
-The release workflow runs the same smoke test after uploading the GitHub release asset, then builds the iOS smoke app against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, iOS package compilation, app-style iOS links, and llama symbol linkage from the published binary target.
+The release workflow runs a consumer import check after uploading the GitHub release asset, then builds the smoke and demo apps from the root Xcode project against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, app-style macOS/iOS links, and llama symbol linkage from the published binary target.
 
 ### Quick release checklist
 
@@ -479,7 +496,30 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
 
    ```sh
    swift test
-   swift build --target CLLMSmoke
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMSmokeMac \
+     -destination 'generic/platform=macOS' \
+     -derivedDataPath .build/CLLMSmokeMacDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMSmokeIOS \
+     -destination 'generic/platform=iOS' \
+     -derivedDataPath .build/CLLMSmokeIOSDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMDemoMac \
+     -destination 'generic/platform=macOS' \
+     -derivedDataPath .build/CLLMDemoMacDerivedData \
+     CODE_SIGNING_ALLOWED=NO
+   xcodebuild build \
+     -project Apps.xcodeproj \
+     -scheme CLLMDemoIOS \
+     -destination 'generic/platform=iOS' \
+     -derivedDataPath .build/CLLMDemoIOSDerivedData \
+     CODE_SIGNING_ALLOWED=NO
    ```
 
 3. In GitHub Actions, run `Publish Llama Binary Artifact` with `tag: v0.3.0`, `prerelease: false`, `dry_run: true`.
@@ -504,13 +544,13 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
 
 `main` should normally keep `llamaBinaryArtifactURL` and `llamaBinaryArtifactChecksum` empty so library development uses the source-build path. Release tags can point those constants at the published binary artifact.
 
-### Smoke app
+### Smoke apps
 
-`CLLMSmoke` shows Apple Intelligence in the picker when `LocalLLMEngine.availableSystemModels()` reports it available. The smoke test asks every provider for JSON; installed GGUF models use grammar-constrained generation, while Apple Intelligence uses prompt guidance plus balanced-JSON post-processing.
+`CLLMSmokeMac` and `CLLMSmokeIOS` are app schemes defined in `Apps.xcodeproj` (see [Open in Xcode](#open-in-xcode) for which entry point to use). They show Apple Intelligence in the picker when `LocalLLMEngine.availableSystemModels()` reports it available. The macOS smoke asks every provider for JSON; installed GGUF models use grammar-constrained generation, while Apple Intelligence uses prompt guidance plus balanced-JSON post-processing.
 
-Open `Package.swift` in Xcode.
+For macOS:
 
-1. Select the `CLLMSmoke` scheme.
+1. Select the `CLLMSmokeMac` scheme.
 2. Set the destination to `My Mac`.
 3. Run.
 4. Select an installed model or available system model in the left pane.
@@ -524,7 +564,7 @@ The smoke app uses the shared model cache by default:
 
 For unsigned/dev builds where the App Group container is unavailable, the core storage helper falls back to per-app Application Support.
 
-If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmoke` again.
+If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmokeMac` again.
 
 A successful run prints model load details, streaming events, a normalized JSON response, and:
 
@@ -532,9 +572,9 @@ A successful run prints model load details, streaming events, a normalized JSON 
 smoke: ok
 ```
 
-### iOS demo app
+For iOS, select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it. Both the `CLLMSmokeMac` and `CLLMSmokeIOS` schemes compile from the unified source at `Apps/CLLMSmoke/CLLMSmokeApp.swift`, so the iOS smoke runs the same automated JSON flow as the macOS smoke and ends with `smoke: ok`.
 
-`Examples/CLLMSmokeIOS` is a minimal iOS app for validating the same model picker and generation flow on device or simulator. It lets you manage/select models, enter a prompt, run generation, and inspect streaming events.
+For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, run/cancel controls, output, and a streaming event log.
 
 On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
 
@@ -544,39 +584,30 @@ Build the local multi-platform llama artifact first:
 Scripts/build-llama-xcframework.sh
 ```
 
-Then open the top-level workspace from the repository root:
-
-```text
-CarbocationLocalLLM.xcworkspace
-```
-
-Select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it.
-
 For Gemma GGUFs, seeing `embeddedTemplate: true` together with `templateMode=gemma-fallback` is acceptable. It means the model exposes a template, but llama.cpp did not apply it successfully through the native template path, so the shared runtime used its known Gemma fallback prompt format.
 
 ### Package layout
 
 ```text
-CarbocationLocalLLM.xcworkspace            Xcode workspace for package development and the iOS smoke demo
-CarbocationLocalLLM.xcodeproj              Xcode app wrapper for the iOS smoke demo
+Apps.xcodeproj                             Root Xcode project hosting first-party macOS and iOS app targets
+Apps/
+  CLLMSmoke/                              Unified macOS + iOS smoke app source; compiled by both root CLLMSmokeMac and CLLMSmokeIOS schemes
+  CLLMDemo/                               Unified macOS + iOS interactive demo source; compiled by CLLMDemoMac and CLLMDemoIOS schemes
 Sources/
   CarbocationLocalLLM/                    Core models, selection, context policy, generation options, JSON helpers
   CarbocationLocalLLMRuntime/             Unified facade over llama.cpp and Apple Intelligence
   CarbocationLlamaRuntime/                llama.cpp-backed runtime
   CarbocationAppleIntelligenceRuntime/    Foundation Models-backed runtime (consumed via the unified facade)
   CarbocationLocalLLMUI/                  SwiftUI model library picker
-  CLLMSmoke/                              Xcode-friendly smoke app
   llama/                                  module map for the llama.cpp build
 Tests/
-Examples/
-  CLLMSmokeIOS/                          iOS demo app for model picking and prompt generation
 Scripts/
   build-llama-apple-platform.sh           Shared Apple-platform llama.cpp static library builder
   build-llama-macos.sh                    Local llama.cpp source build
   build-llama-from-xcode.sh               Adjacent-checkout build helper for host apps
   build-llama-xcframework.sh              Binary artifact packager
   set-llama-binary-artifact.sh            Release manifest stamper
-  test-binary-release.sh                  Clean downstream release smoke test
+  test-binary-release.sh                  Clean downstream release import check
 Vendor/
   llama.cpp/                              git submodule
 ```

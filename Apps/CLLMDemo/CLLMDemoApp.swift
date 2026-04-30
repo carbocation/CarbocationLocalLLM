@@ -5,18 +5,28 @@ import Observation
 import SwiftUI
 
 @main
-struct CLLMSmokeIOSApp: App {
-    @State private var state = SmokeDemoState()
+struct CLLMDemoApp: App {
+    @State private var state = DemoState()
 
     var body: some Scene {
         WindowGroup {
-            SmokeRootView(state: state)
+            DemoRootView(state: state)
         }
     }
 }
 
-private struct SmokeRootView: View {
-    @Bindable var state: SmokeDemoState
+private enum CLLMDemoMetadata {
+#if os(macOS)
+    static let displayName = "CLLMDemoMac"
+#else
+    static let displayName = "CLLMDemoIOS"
+#endif
+    static let appSupportFolderName = "CLLMDemo"
+    static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
+}
+
+private struct DemoRootView: View {
+    @Bindable var state: DemoState
 
     var body: some View {
         TabView {
@@ -24,7 +34,7 @@ private struct SmokeRootView: View {
                 ModelLibraryPickerView(
                     library: state.library,
                     selectedModelID: $state.selectedModelID,
-                    title: "CLLMSmokeIOS",
+                    title: CLLMDemoMetadata.displayName,
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
                     systemModels: state.systemModels,
@@ -33,7 +43,7 @@ private struct SmokeRootView: View {
                     }
                 )
                 .navigationTitle("Models")
-                .navigationBarTitleDisplayMode(.inline)
+                .demoNavigationTitleDisplayModeInline()
             }
             .tabItem {
                 Label("Models", systemImage: "cpu")
@@ -42,7 +52,7 @@ private struct SmokeRootView: View {
             NavigationStack {
                 PromptPane(state: state)
                     .navigationTitle("Prompt")
-                    .navigationBarTitleDisplayMode(.inline)
+                    .demoNavigationTitleDisplayModeInline()
             }
             .tabItem {
                 Label("Prompt", systemImage: "text.bubble")
@@ -55,7 +65,7 @@ private struct SmokeRootView: View {
 }
 
 private struct PromptPane: View {
-    @Bindable var state: SmokeDemoState
+    @Bindable var state: DemoState
 
     var body: some View {
         ScrollView {
@@ -68,7 +78,7 @@ private struct PromptPane: View {
             }
             .padding()
         }
-        .scrollDismissesKeyboard(.interactively)
+        .demoScrollDismissesKeyboardInteractively()
     }
 
     @ViewBuilder
@@ -100,8 +110,7 @@ private struct PromptPane: View {
                 .font(.headline)
             TextEditor(text: $state.systemPrompt)
                 .frame(minHeight: 80)
-                .textInputAutocapitalization(.sentences)
-                .autocorrectionDisabled()
+                .demoTextEditorInput()
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
 
@@ -110,7 +119,7 @@ private struct PromptPane: View {
                 .padding(.top, 8)
             TextEditor(text: $state.prompt)
                 .frame(minHeight: 150)
-                .textInputAutocapitalization(.sentences)
+                .demoTextEditorInput()
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
         }
@@ -175,7 +184,7 @@ private struct PromptPane: View {
 
 @MainActor
 @Observable
-private final class SmokeDemoState {
+private final class DemoState {
     private static let requestedContext = 2_048
 
     let library: ModelLibrary
@@ -193,14 +202,14 @@ private final class SmokeDemoState {
     private var activeEngine: LocalLLMEngine?
 
     init() {
-        let root = ModelStorage.modelsDirectory(appSupportFolderName: "CLLMSmokeIOS")
+        let root = ModelStorage.modelsDirectory(appSupportFolderName: CLLMDemoMetadata.appSupportFolderName)
         library = ModelLibrary(
             root: root,
             contextLengthProbe: { url in
                 LocalLLMEngine.probeTrainingContext(at: url)
             }
         )
-        selectedModelID = UserDefaults.standard.string(forKey: "CLLMSmokeIOS.selectedModelID") ?? ""
+        selectedModelID = UserDefaults.standard.string(forKey: CLLMDemoMetadata.selectedModelDefaultsKey) ?? ""
         normalizeSelection()
     }
 
@@ -228,7 +237,7 @@ private final class SmokeDemoState {
     }
 
     func persistSelection(_ value: String) {
-        UserDefaults.standard.set(value, forKey: "CLLMSmokeIOS.selectedModelID")
+        UserDefaults.standard.set(value, forKey: CLLMDemoMetadata.selectedModelDefaultsKey)
     }
 
     func run() {
@@ -349,5 +358,35 @@ private final class SmokeDemoState {
         case .done(let totalBytes, let duration):
             return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func demoNavigationTitleDisplayModeInline() -> some View {
+#if os(iOS)
+        navigationBarTitleDisplayMode(.inline)
+#else
+        self
+#endif
+    }
+
+    @ViewBuilder
+    func demoScrollDismissesKeyboardInteractively() -> some View {
+#if os(iOS)
+        scrollDismissesKeyboard(.interactively)
+#else
+        self
+#endif
+    }
+
+    @ViewBuilder
+    func demoTextEditorInput() -> some View {
+#if os(iOS)
+        textInputAutocapitalization(.sentences)
+            .autocorrectionDisabled()
+#else
+        self
+#endif
     }
 }
