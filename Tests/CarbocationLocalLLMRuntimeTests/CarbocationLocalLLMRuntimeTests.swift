@@ -40,6 +40,111 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
         XCTAssertFalse(system.usesExactTokenCounts)
     }
 
+    @MainActor
+    func testLoadPlanRefreshesBeforeResolvingInstalledModel() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let model = try installFixtureModel(
+            displayName: "Planned Model",
+            contextLength: 32_768,
+            in: root
+        )
+
+        let stalePlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            refreshingLibrary: false
+        )
+        XCTAssertNil(stalePlan)
+
+        let resolvedPlan = await LocalLLMEngine.loadPlan(from: model.id.uuidString, in: library)
+        let plan = try XCTUnwrap(resolvedPlan)
+
+        XCTAssertEqual(plan.selection, .installed(model.id))
+        XCTAssertEqual(plan.displayName, "Planned Model")
+        XCTAssertEqual(plan.requestedContext, LlamaContextPolicy.defaultAutoCap)
+        XCTAssertEqual(plan.capabilities.contextSize, 32_768)
+        XCTAssertTrue(plan.capabilities.supportsGrammar)
+        XCTAssertTrue(plan.capabilities.usesExactTokenCounts)
+    }
+
+    @MainActor
+    func testLoadPlanReturnsNilForInvalidAndDeletedSelections() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let model = try installFixtureModel(displayName: "Deleted Model", contextLength: 8_192, in: root)
+
+        let invalidPlan = await LocalLLMEngine.loadPlan(from: "not-a-model", in: library)
+        XCTAssertNil(invalidPlan)
+
+        let existingPlan = await LocalLLMEngine.loadPlan(from: model.id.uuidString, in: library)
+        XCTAssertNotNil(existingPlan)
+
+        try FileManager.default.removeItem(at: model.directory(in: root))
+
+        let deletedPlan = await LocalLLMEngine.loadPlan(from: model.id.uuidString, in: library)
+        XCTAssertNil(deletedPlan)
+    }
+
+    @MainActor
+    func testLoadPlanHonorsAutoAndManualContextPolicy() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let model = try installFixtureModel(
+            displayName: "Context Model",
+            contextLength: 65_536,
+            in: root
+        )
+        let suiteName = "CarbocationLocalLLMRuntimeTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let automaticPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults
+        )
+        let automatic = try XCTUnwrap(automaticPlan)
+        XCTAssertEqual(automatic.requestedContext, LlamaContextPolicy.defaultAutoCap)
+
+        defaults.set(LlamaContextMode.manual.rawValue, forKey: "llama.contextMode")
+        defaults.set(32_768, forKey: "llama.numCtx")
+
+        let manualPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false
+        )
+        let manual = try XCTUnwrap(manualPlan)
+        XCTAssertEqual(manual.requestedContext, 32_768)
+    }
+
+    @MainActor
+    func testLoadPlanHandlesSystemModelAvailability() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let storageValue = LLMSystemModelID.appleIntelligence.rawValue
+
+        guard let option = LocalLLMEngine.availableSystemModels().first(where: {
+            $0.selection == .system(.appleIntelligence)
+        }) else {
+            let plan = await LocalLLMEngine.loadPlan(from: storageValue, in: library)
+            XCTAssertNil(plan)
+            return
+        }
+
+        let resolvedPlan = await LocalLLMEngine.loadPlan(from: storageValue, in: library)
+        let plan = try XCTUnwrap(resolvedPlan)
+
+        XCTAssertEqual(plan.selection, option.selection)
+        XCTAssertEqual(plan.displayName, option.displayName)
+        XCTAssertEqual(plan.requestedContext, plan.capabilities.contextSize)
+        XCTAssertEqual(plan.capabilities.contextSize, option.contextLength)
+        XCTAssertFalse(plan.capabilities.supportsGrammar)
+        XCTAssertFalse(plan.capabilities.usesExactTokenCounts)
+    }
+
     func testGenerateRequiresLoadedSelection() async {
         let engine = LocalLLMEngine()
 
@@ -97,4 +202,35 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
 private struct RuntimeLivePayload: Decodable {
     var ok: Bool?
     var message: String?
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CarbocationLocalLLMRuntimeTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}
+
+private func installFixtureModel(
+    id: UUID = UUID(),
+    displayName: String,
+    contextLength: Int,
+    in root: URL
+) throws -> InstalledModel {
+    let filename = "Fixture-Q4_K_M.gguf"
+    let payload = Data("fake gguf".utf8)
+    let model = InstalledModel(
+        id: id,
+        displayName: displayName,
+        filename: filename,
+        sizeBytes: Int64(payload.count),
+        contextLength: contextLength,
+        quantization: "Q4_K_M",
+        source: .imported
+    )
+    let directory = model.directory(in: root)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try payload.write(to: model.weightsURL(in: root))
+    try LocalLLMJSON.makePrettyEncoder().encode(model).write(to: model.metadataURL(in: root))
+    return model
 }

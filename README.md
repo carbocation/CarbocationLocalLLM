@@ -73,7 +73,7 @@ See [Products](#products) for the full list.
 
 ### Minimal working integration
 
-Build a model library once at startup, then load a saved selection and generate:
+Build a model library once at startup, refresh its cached state, then load a saved selection and generate:
 
 ```swift
 @MainActor
@@ -91,12 +91,14 @@ func generate(
     using library: ModelLibrary,
     storedSelection: String
 ) async throws -> String {
-    let selection = try LocalLLMEngine.selection(from: storedSelection)
+    guard let plan = await LocalLLMEngine.loadPlan(from: storedSelection, in: library) else {
+        throw LocalLLMEngineError.invalidSelection(storedSelection)
+    }
 
     let loaded = try await LocalLLMEngine.shared.load(
-        selection: selection,
+        selection: plan.selection,
         from: library,
-        requestedContext: LocalLLMEngine.capabilities(for: selection, in: library).contextSize
+        requestedContext: plan.requestedContext
     )
 
     let response = try await LocalLLMEngine.shared.generate(
@@ -105,7 +107,7 @@ func generate(
         options: GenerationOptions(maxOutputTokens: 512)
     ) { _ in }
 
-    return response.text
+    return response
 }
 ```
 
@@ -130,6 +132,7 @@ func makeLibrary() -> ModelLibrary {
 ```
 
 The `contextLengthProbe` lets imported GGUF files record their training context up front, so the picker and engine can size contexts correctly.
+Call `await library.refresh()` before reading `library.models` directly. For persisted selections, prefer `LocalLLMEngine.loadPlan(from:in:)`, which refreshes before resolving installed models. The bundled picker refreshes the library for you.
 
 To share installed GGUF models across multiple of your apps, give them the same App Group entitlement and pass that identifier explicitly:
 
@@ -157,11 +160,12 @@ Persist `LLMModelSelection.storageValue`, not a model filename. Installed GGUF m
 
 ```swift
 let systemModels = LocalLLMEngine.availableSystemModels()
+await library.refresh()
 let installed = await MainActor.run { library.models.first }
 
 let selection: LLMModelSelection
-if let appleIntelligence = systemModels.first(where: { $0.availability.isAvailable }) {
-    selection = appleIntelligence.selection
+if let systemModel = systemModels.first {
+    selection = systemModel.selection
 } else if let model = installed {
     selection = .installed(model.id)
 } else {
@@ -174,18 +178,27 @@ let valueToPersist = selection.storageValue
 Restore later with:
 
 ```swift
-let selection = try LocalLLMEngine.selection(from: valueFromPreferences)
+guard let plan = await LocalLLMEngine.loadPlan(from: valueFromPreferences, in: library) else {
+    // Show the picker or clear the stale preference.
+    return
+}
 ```
 
 `LocalLLMEngine.availableSystemModels()` returns only system models that should be visible on this machine. On unsupported devices or builds without Foundation Models, Apple Intelligence is omitted from the picker entirely.
+Use `LocalLLMEngine.loadPlan` for UI state such as "has usable model", settings labels, and context summaries. Direct model list displays can still use `await library.refresh()` followed by cached `library.models` reads.
 
 ### Generate text
 
 ```swift
+guard let plan = await LocalLLMEngine.loadPlan(from: valueFromPreferences, in: library) else {
+    // Show the picker or clear the stale preference.
+    return
+}
+
 let loaded = try await LocalLLMEngine.shared.load(
-    selection: selection,
+    selection: plan.selection,
     from: library,
-    requestedContext: LocalLLMEngine.capabilities(for: selection, in: library).contextSize
+    requestedContext: plan.requestedContext
 )
 
 let response = try await LocalLLMEngine.shared.generate(
@@ -197,7 +210,7 @@ let response = try await LocalLLMEngine.shared.generate(
 }
 ```
 
-Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.capabilities(for:in:)` (or the `LocalLLMLoadedModelInfo` returned by `load`) before exposing provider-specific controls.
+Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
 ### Constrain JSON output
 

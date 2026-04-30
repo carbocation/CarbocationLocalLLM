@@ -104,7 +104,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     @MainActor
-    func testModelLibraryImportsSyncsAndDeletesGGUF() throws {
+    func testModelLibraryImportsSyncsAndDeletesGGUF() async throws {
         let root = try makeTemporaryDirectory()
         let source = root.appendingPathComponent("source-Q4_K_M.gguf")
         try Data("fake gguf".utf8).write(to: source)
@@ -114,7 +114,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
             url.lastPathComponent == "source-Q4_K_M.gguf" ? 32_768 : nil
         }
 
-        let model = try library.importFile(at: source, displayName: "Test Model")
+        let model = try await library.importFile(at: source, displayName: "Test Model")
 
         XCTAssertEqual(library.models.count, 1)
         XCTAssertEqual(model.displayName, "Test Model")
@@ -123,16 +123,16 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: model.weightsURL(in: modelsRoot).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: model.metadataURL(in: modelsRoot).path))
 
-        try library.syncContextLength(65_536, for: model.id)
+        try await library.syncContextLength(65_536, for: model.id)
         XCTAssertEqual(library.model(id: model.id)?.contextLength, 65_536)
 
-        try library.delete(id: model.id)
+        try await library.delete(id: model.id)
         XCTAssertTrue(library.models.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: model.directory(in: modelsRoot).path))
     }
 
     @MainActor
-    func testModelLibrarySynthesizesOrphanMetadata() throws {
+    func testModelLibrarySynthesizesOrphanMetadata() async throws {
         let root = try makeTemporaryDirectory()
         let modelID = UUID()
         let directory = root.appendingPathComponent(modelID.uuidString, isDirectory: true)
@@ -140,11 +140,95 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try Data("fake".utf8).write(to: directory.appendingPathComponent("Orphan-Q5_K_M.gguf"))
 
         let library = ModelLibrary(root: root)
+        await library.refresh()
 
         XCTAssertEqual(library.models.count, 1)
         XCTAssertEqual(library.models[0].id, modelID)
         XCTAssertEqual(library.models[0].displayName, "Orphan-Q5_K_M")
         XCTAssertEqual(library.models[0].quantization, "Q5_K_M")
+    }
+
+    @MainActor
+    func testModelLibraryResolveInstalledModelRefreshesOnDemand() async throws {
+        let root = try makeTemporaryDirectory()
+        let modelID = UUID()
+        let directory = root.appendingPathComponent(modelID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("fake".utf8).write(to: directory.appendingPathComponent("Resolvable-Q4_K_M.gguf"))
+
+        let library = ModelLibrary(root: root)
+
+        XCTAssertNil(library.model(id: modelID))
+        let cachedOnly = await library.resolveInstalledModel(id: modelID, refreshing: false)
+        XCTAssertNil(cachedOnly)
+
+        let resolved = await library.resolveInstalledModel(id: modelID)
+
+        XCTAssertEqual(resolved?.id, modelID)
+        XCTAssertEqual(resolved?.displayName, "Resolvable-Q4_K_M")
+        XCTAssertEqual(library.model(id: modelID)?.id, modelID)
+    }
+
+    @MainActor
+    func testModelLibraryContextProbeRunsOffMainThread() async throws {
+        let root = try makeTemporaryDirectory()
+        let source = root.appendingPathComponent("probe-Q4_K_M.gguf")
+        try Data("fake gguf".utf8).write(to: source)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let recorder = ThreadProbeRecorder()
+
+        let library = ModelLibrary(root: modelsRoot) { _ in
+            recorder.record(Thread.isMainThread)
+            return 16_384
+        }
+
+        let model = try await library.importFile(at: source, displayName: "Probe Model")
+
+        XCTAssertEqual(model.contextLength, 16_384)
+        XCTAssertEqual(recorder.value, false)
+    }
+
+    @MainActor
+    func testModelLibraryRefreshIgnoresHiddenStagingDirectories() async throws {
+        let root = try makeTemporaryDirectory()
+        let modelID = UUID()
+        let stagingDirectory = root
+            .appendingPathComponent(".staging", isDirectory: true)
+            .appendingPathComponent("\(modelID.uuidString)-staged", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        try Data("fake".utf8).write(to: stagingDirectory.appendingPathComponent("Staged-Q5_K_M.gguf"))
+
+        let library = ModelLibrary(root: root)
+        await library.refresh()
+
+        XCTAssertTrue(library.models.isEmpty)
+    }
+
+    @MainActor
+    func testModelLibraryFailedInstallLeavesNoVisibleModel() async throws {
+        let root = try makeTemporaryDirectory()
+        let source = root.appendingPathComponent("source-Q4_K_M.gguf")
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
+        try Data("fake gguf".utf8).write(to: source)
+        try Data("not a directory".utf8).write(to: modelsRoot.appendingPathComponent(".staging"))
+
+        let library = ModelLibrary(root: modelsRoot)
+
+        do {
+            _ = try await library.importFile(at: source, displayName: "Broken")
+            XCTFail("Expected import to fail when staging cannot be created.")
+        } catch {
+            await library.refresh()
+            XCTAssertTrue(library.models.isEmpty)
+            XCTAssertFalse(
+                try FileManager.default.contentsOfDirectory(
+                    at: modelsRoot,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ).contains { $0.pathExtension == "gguf" || UUID(uuidString: $0.lastPathComponent) != nil }
+            )
+        }
     }
 
     func testHuggingFaceURLParsesExpectedForms() {
@@ -337,5 +421,22 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .appendingPathComponent("CarbocationLocalLLMTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+}
+
+private final class ThreadProbeRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValue: Bool?
+
+    var value: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedValue
+    }
+
+    func record(_ value: Bool) {
+        lock.lock()
+        recordedValue = value
+        lock.unlock()
     }
 }

@@ -61,6 +61,9 @@ private struct DemoRootView: View {
         .onChange(of: state.selectedModelID) { _, newValue in
             state.persistSelection(newValue)
         }
+        .task {
+            await state.refreshLibrary()
+        }
     }
 }
 
@@ -185,8 +188,6 @@ private struct PromptPane: View {
 @MainActor
 @Observable
 private final class DemoState {
-    private static let requestedContext = 2_048
-
     let library: ModelLibrary
 
     var selectedModelID: String
@@ -240,10 +241,13 @@ private final class DemoState {
         UserDefaults.standard.set(value, forKey: CLLMDemoMetadata.selectedModelDefaultsKey)
     }
 
+    func refreshLibrary() async {
+        await library.refresh()
+        normalizeSelection()
+    }
+
     func run() {
-        guard !isRunning,
-              let selection = LLMModelSelection(storageValue: selectedModelID)
-        else { return }
+        guard !isRunning, !selectedModelID.isEmpty else { return }
 
         isRunning = true
         output = ""
@@ -256,8 +260,9 @@ private final class DemoState {
         ))
         activeEngine = engine
 
+        let storedSelection = selectedModelID
         generationTask = Task { @MainActor [weak self] in
-            await self?.run(selection: selection, engine: engine)
+            await self?.run(storedSelection: storedSelection, engine: engine)
         }
     }
 
@@ -280,7 +285,7 @@ private final class DemoState {
         errorMessage = nil
     }
 
-    private func run(selection: LLMModelSelection, engine: LocalLLMEngine) async {
+    private func run(storedSelection: String, engine: LocalLLMEngine) async {
         defer {
             isRunning = false
             generationTask = nil
@@ -288,10 +293,18 @@ private final class DemoState {
         }
 
         do {
+            guard let plan = await LocalLLMEngine.loadPlan(from: storedSelection, in: library) else {
+                normalizeSelection()
+                errorMessage = "Selected model is unavailable. Pick a model in Settings."
+                appendEvent("failed: selected model unavailable")
+                await engine.unload()
+                return
+            }
+
             let loaded = try await engine.load(
-                selection: selection,
+                selection: plan.selection,
                 from: library,
-                requestedContext: Self.requestedContext
+                requestedContext: plan.requestedContext
             )
             loadedInfo = loaded
 

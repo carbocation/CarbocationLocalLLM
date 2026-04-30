@@ -147,9 +147,7 @@ public struct ModelLibraryPickerView: View {
             footer
         }
         .task {
-            library.refresh()
-            normalizeSelection()
-            refreshToken = UUID()
+            await refresh()
         }
         .sheet(isPresented: $showCustomSheet) {
             CustomHFSheet { repo, filename, displayName in
@@ -192,8 +190,7 @@ public struct ModelLibraryPickerView: View {
             presenting: showDeletePartialConfirm
         ) { partial in
             Button("Delete", role: .destructive) {
-                library.deletePartial(partial)
-                refresh()
+                deletePartial(partial)
             }
             Button("Cancel", role: .cancel) {}
         } message: { partial in
@@ -319,7 +316,7 @@ public struct ModelLibraryPickerView: View {
                 Spacer()
 
                 Button {
-                    refresh()
+                    Task { await refresh() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -536,7 +533,7 @@ public struct ModelLibraryPickerView: View {
                 Button("Cancel", role: .destructive) {
                     download.cancel()
                     activeDownload = nil
-                    refresh()
+                    Task { await refresh() }
                 }
             }
             .font(.caption)
@@ -612,7 +609,7 @@ public struct ModelLibraryPickerView: View {
                 downloadError = error.localizedDescription
             }
             activeDownload = nil
-            refresh()
+            Task { await refresh() }
         }
     }
 
@@ -641,30 +638,41 @@ public struct ModelLibraryPickerView: View {
             return
         }
 
-        let didStart = url.startAccessingSecurityScopedResource()
-        defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+        Task {
+            let didStart = url.startAccessingSecurityScopedResource()
+            defer { if didStart { url.stopAccessingSecurityScopedResource() } }
 
-        do {
-            let model = try library.importFile(at: url)
-            if selectedModelID.isEmpty {
-                selectedModelID = model.id.uuidString
+            do {
+                let model = try await library.importFile(at: url)
+                if selectedModelID.isEmpty {
+                    selectedModelID = model.id.uuidString
+                }
+                await refresh()
+            } catch {
+                downloadError = error.localizedDescription
             }
-            refresh()
-        } catch {
-            downloadError = error.localizedDescription
         }
     }
 
     private func delete(_ model: InstalledModel) {
-        do {
-            try library.delete(id: model.id)
-            if selectedModelID == model.id.uuidString {
-                selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
+        Task {
+            do {
+                try await library.delete(id: model.id)
+                if selectedModelID == model.id.uuidString {
+                    selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
+                }
+                await refresh()
+                onModelDeleted(model)
+            } catch {
+                downloadError = error.localizedDescription
             }
-            refresh()
-            onModelDeleted(model)
-        } catch {
-            downloadError = error.localizedDescription
+        }
+    }
+
+    private func deletePartial(_ partial: PartialDownload) {
+        Task {
+            await library.deletePartial(partial)
+            await refresh()
         }
     }
 
@@ -674,8 +682,8 @@ public struct ModelLibraryPickerView: View {
     }
     #endif
 
-    private func refresh() {
-        library.refresh()
+    private func refresh() async {
+        await library.refresh()
         normalizeSelection()
         refreshToken = UUID()
     }
@@ -751,7 +759,7 @@ private final class ModelLibraryDownload {
                         }
                     }
                 )
-                let model = try library.add(
+                let model = try await library.add(
                     weightsAt: result.tempURL,
                     displayName: displayName,
                     filename: hfFilename,

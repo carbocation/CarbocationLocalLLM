@@ -84,6 +84,25 @@ public struct LocalLLMModelCapabilities: Hashable, Sendable {
     }
 }
 
+public struct LocalLLMLoadPlan: Hashable, Sendable {
+    public var selection: LLMModelSelection
+    public var displayName: String
+    public var requestedContext: Int
+    public var capabilities: LocalLLMModelCapabilities
+
+    public init(
+        selection: LLMModelSelection,
+        displayName: String,
+        requestedContext: Int,
+        capabilities: LocalLLMModelCapabilities
+    ) {
+        self.selection = selection
+        self.displayName = displayName
+        self.requestedContext = requestedContext
+        self.capabilities = capabilities
+    }
+}
+
 public enum LocalLLMEngineError: Error, LocalizedError, Sendable {
     case invalidSelection(String)
     case installedModelNotFound(UUID)
@@ -156,6 +175,52 @@ public actor LocalLLMEngine: LLMEngine {
                 supportsGrammar: false,
                 usesExactTokenCounts: false,
                 contextSize: AppleIntelligenceEngine.availability().contextSize
+            )
+        }
+    }
+
+    @MainActor
+    public static func loadPlan(
+        from storageValue: String,
+        in library: ModelLibrary,
+        defaults: UserDefaults = .standard,
+        contextKeys: LlamaContextPreferenceKeys = .init(),
+        refreshingLibrary: Bool = true
+    ) async -> LocalLLMLoadPlan? {
+        if refreshingLibrary {
+            await library.refresh()
+        }
+
+        guard let selection = LLMModelSelection(storageValue: storageValue) else {
+            return nil
+        }
+
+        switch selection {
+        case .installed(let id):
+            guard let model = library.model(id: id) else {
+                return nil
+            }
+            let capabilities = capabilities(for: selection, in: library)
+            return LocalLLMLoadPlan(
+                selection: selection,
+                displayName: model.displayName,
+                requestedContext: LlamaContextPolicy.resolvedRequestedContext(
+                    for: model,
+                    defaults: defaults,
+                    keys: contextKeys
+                ),
+                capabilities: capabilities
+            )
+        case .system:
+            guard let option = availableSystemModels().first(where: { $0.selection == selection }) else {
+                return nil
+            }
+            let capabilities = capabilities(for: selection, in: library)
+            return LocalLLMLoadPlan(
+                selection: selection,
+                displayName: option.displayName,
+                requestedContext: capabilities.contextSize,
+                capabilities: capabilities
             )
         }
     }
