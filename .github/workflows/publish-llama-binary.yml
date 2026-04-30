@@ -38,7 +38,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Select latest Xcode >= 26.4
+      - name: Select latest stable Xcode >= 26.4
         run: |
           set -euo pipefail
 
@@ -49,6 +49,9 @@ jobs:
                     file = $NF
                     sub(/^Xcode_/, "", file)
                     sub(/\.app$/, "", file)
+                    # Skip betas and other non-stable releases (e.g. Xcode_26.5_beta_2.app),
+                    # which often lack the matching iOS platform/runtime on hosted runners.
+                    if (file !~ /^[0-9]+(\.[0-9]+)*$/) next
                     split(file, parts, ".")
                     major = parts[1] + 0
                     minor = parts[2] + 0
@@ -63,7 +66,7 @@ jobs:
           )
 
           if [ -z "$selected" ]; then
-            echo "::error::No Xcode 26.4 or newer is pre-installed on this runner" >&2
+            echo "::error::No stable Xcode 26.4 or newer is pre-installed on this runner" >&2
             ls -d /Applications/Xcode_*.app 2>/dev/null || true
             exit 1
           fi
