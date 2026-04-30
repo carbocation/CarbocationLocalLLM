@@ -38,6 +38,40 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Select latest Xcode >= 26.4
+        run: |
+          set -euo pipefail
+
+          selected=$(
+            ls -d /Applications/Xcode_*.app 2>/dev/null \
+              | awk -F'/' '
+                  {
+                    file = $NF
+                    sub(/^Xcode_/, "", file)
+                    sub(/\.app$/, "", file)
+                    split(file, parts, ".")
+                    major = parts[1] + 0
+                    minor = parts[2] + 0
+                    if (major > 26 || (major == 26 && minor >= 4)) {
+                      print file "\t" $0
+                    }
+                  }
+                ' \
+              | sort -V \
+              | tail -1 \
+              | cut -f2
+          )
+
+          if [ -z "$selected" ]; then
+            echo "::error::No Xcode 26.4 or newer is pre-installed on this runner" >&2
+            ls -d /Applications/Xcode_*.app 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Selecting $selected"
+          sudo xcode-select -s "$selected"
+          xcodebuild -version
+
       - name: Build XCFramework archive
         run: Scripts/build-llama-xcframework.sh
 
