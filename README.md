@@ -11,6 +11,7 @@ The package owns shared LLM infrastructure: neutral model storage, GGUF model ma
 - [Quick Start](#quick-start)
 - [Integration Guide](#integration-guide)
 - [Requirements](#requirements)
+- [License](#license)
 - [Reference](#reference)
 - [For Package Developers](#for-package-developers)
 
@@ -303,6 +304,14 @@ GGUF weights are user data, not part of the Swift package. Let the app download 
 
 On iOS, model downloads use foreground `URLSession` work with resumable partial files. This package does not manage background transfer sessions in this release.
 
+## License
+
+CarbocationLocalLLM is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Published release assets that include `llama.xcframework.zip` redistribute static llama.cpp/ggml object code through `libllama-combined.a`; no separate `ggml*.dylib` files are shipped. Third-party notices for llama.cpp, ggml, and conservative vendored upstream notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Model weights are not distributed by this package. Downloaded or imported GGUF files remain governed by their own upstream model licenses.
+
 ## Reference
 
 ### Products
@@ -326,7 +335,7 @@ The binary artifact is a static XCFramework containing:
 - iOS device `arm64`
 - iOS simulator `arm64` and `x86_64`
 
-SwiftPM handles the link step. The llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`.
+SwiftPM handles the link step. The llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`. The archive redistributes static llama.cpp/ggml object code through `libllama-combined.a`; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled and linked notices.
 
 Apple Intelligence has no package artifact. When the SDK, OS, device, and user setting line up, the runtime exposes it as an available system model.
 

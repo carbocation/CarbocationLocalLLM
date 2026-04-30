@@ -226,6 +226,10 @@ jobs:
           cat > release-notes.md <<EOF
           SwiftPM binary artifact for CarbocationLocalLLM's llama runtime.
 
+          This archive redistributes static llama.cpp/ggml object code through
+          libllama-combined.a. See THIRD_PARTY_NOTICES.md in this release tag
+          for bundled and linked notices.
+
           Checksum:
           \`${{ steps.artifact.outputs.checksum }}\`
           EOF
