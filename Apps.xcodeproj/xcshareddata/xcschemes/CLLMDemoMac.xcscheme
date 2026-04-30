@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "CLLM100000000000000000005001"
-               BuildableName = "CLLMSmokeIOS.app"
-               BlueprintName = "CLLMSmokeIOS"
-               ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+               BlueprintIdentifier = "CLLM100000000000000000005004"
+               BuildableName = "CLLMDemoMac.app"
+               BlueprintName = "CLLMDemoMac"
+               ReferencedContainer = "container:Apps.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -39,16 +39,15 @@
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
-      debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CLLM100000000000000000005001"
-            BuildableName = "CLLMSmokeIOS.app"
-            BlueprintName = "CLLMSmokeIOS"
-            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+            BlueprintIdentifier = "CLLM100000000000000000005004"
+            BuildableName = "CLLMDemoMac.app"
+            BlueprintName = "CLLMDemoMac"
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,10 +61,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CLLM100000000000000000005001"
-            BuildableName = "CLLMSmokeIOS.app"
-            BlueprintName = "CLLMSmokeIOS"
-            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+            BlueprintIdentifier = "CLLM100000000000000000005004"
+            BuildableName = "CLLMDemoMac.app"
+            BlueprintName = "CLLMDemoMac"
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

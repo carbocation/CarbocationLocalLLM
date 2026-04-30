@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "CLLM100000000000000000005001"
-               BuildableName = "CLLMDemoIOS.app"
-               BlueprintName = "CLLMDemoIOS"
-               ReferencedContainer = "container:CLLMDemoIOS.xcodeproj">
+               BuildableName = "CLLMSmokeIOS.app"
+               BlueprintName = "CLLMSmokeIOS"
+               ReferencedContainer = "container:Apps.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,9 +46,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "CLLM100000000000000000005001"
-            BuildableName = "CLLMDemoIOS.app"
-            BlueprintName = "CLLMDemoIOS"
-            ReferencedContainer = "container:CLLMDemoIOS.xcodeproj">
+            BuildableName = "CLLMSmokeIOS.app"
+            BlueprintName = "CLLMSmokeIOS"
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -63,9 +63,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "CLLM100000000000000000005001"
-            BuildableName = "CLLMDemoIOS.app"
-            BlueprintName = "CLLMDemoIOS"
-            ReferencedContainer = "container:CLLMDemoIOS.xcodeproj">
+            BuildableName = "CLLMSmokeIOS.app"
+            BlueprintName = "CLLMSmokeIOS"
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

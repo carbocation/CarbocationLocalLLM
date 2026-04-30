@@ -18,7 +18,7 @@
                BlueprintIdentifier = "CLLM100000000000000000005002"
                BuildableName = "CLLMSmokeMac.app"
                BlueprintName = "CLLMSmokeMac"
-               ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+               ReferencedContainer = "container:Apps.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -47,7 +47,7 @@
             BlueprintIdentifier = "CLLM100000000000000000005002"
             BuildableName = "CLLMSmokeMac.app"
             BlueprintName = "CLLMSmokeMac"
-            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -64,7 +64,7 @@
             BlueprintIdentifier = "CLLM100000000000000000005002"
             BuildableName = "CLLMSmokeMac.app"
             BlueprintName = "CLLMSmokeMac"
-            ReferencedContainer = "container:CLLMSmoke.xcodeproj">
+            ReferencedContainer = "container:Apps.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
