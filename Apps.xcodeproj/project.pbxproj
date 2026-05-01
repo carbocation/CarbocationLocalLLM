@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -14,15 +14,23 @@
 		CLLM100000000000000000001006 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001007 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001008 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
-		CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources (iOS) */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002003 /* CLLMSmokeApp.swift */; };
-		CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks (Demo iOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
-		CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks (Demo iOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks (Demo iOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
-		CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources (iOS) */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
-		CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks (Demo macOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
-		CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks (Demo macOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks (Demo macOS) */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
-		CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources (macOS) */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
+		CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002003 /* CLLMSmokeApp.swift */; };
+		CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
+		CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
+		CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
+		CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
+		CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
+		CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
+		CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
+		CLLM100000000000000000001019 /* CarbocationLlamaRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007004 /* CarbocationLlamaRuntime */; };
+		CLLM100000000000000000001020 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001021 /* CLLMCalgacusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */; };
+		CLLM100000000000000000001022 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
+		CLLM100000000000000000001023 /* CarbocationLlamaRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007004 /* CarbocationLlamaRuntime */; };
+		CLLM100000000000000000001024 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001025 /* CLLMCalgacusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +40,9 @@
 		CLLM100000000000000000002005 /* CLLMDemoIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMDemoIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002006 /* CLLMDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMDemoApp.swift; sourceTree = "<group>"; };
 		CLLM100000000000000000002007 /* CLLMDemoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMDemoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CLLM100000000000000000002008 /* CLLMCalgacusIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMCalgacusIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMCalgacusApp.swift; sourceTree = "<group>"; };
+		CLLM100000000000000000002010 /* CLLMCalgacusMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMCalgacusMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -59,9 +70,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks (Demo iOS) */,
-				CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks (Demo iOS) */,
-				CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks (Demo iOS) */,
+				CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks */,
+				CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks */,
+				CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -69,9 +80,29 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks (Demo macOS) */,
-				CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks (Demo macOS) */,
-				CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks (Demo macOS) */,
+				CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks */,
+				CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */,
+				CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CLLM100000000000000000003009 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */,
+				CLLM100000000000000000001019 /* CarbocationLlamaRuntime in Frameworks */,
+				CLLM100000000000000000001020 /* CarbocationLocalLLMUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CLLM100000000000000000003010 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CLLM100000000000000000001022 /* CarbocationLocalLLM in Frameworks */,
+				CLLM100000000000000000001023 /* CarbocationLlamaRuntime in Frameworks */,
+				CLLM100000000000000000001024 /* CarbocationLocalLLMUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,8 +112,9 @@
 		CLLM100000000000000000004001 = {
 			isa = PBXGroup;
 			children = (
-				CLLM100000000000000000004004 /* CLLMSmoke */,
-				CLLM100000000000000000004005 /* CLLMDemo */,
+				CLLM100000000000000000004004 /* Apps/CLLMSmoke */,
+				CLLM100000000000000000004005 /* Apps/CLLMDemo */,
+				CLLM100000000000000000004006 /* Apps/CLLMCalgacus */,
 				CLLM100000000000000000004003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -94,11 +126,13 @@
 				CLLM100000000000000000002002 /* CLLMSmokeIOS.app */,
 				CLLM100000000000000000002007 /* CLLMDemoMac.app */,
 				CLLM100000000000000000002005 /* CLLMDemoIOS.app */,
+				CLLM100000000000000000002010 /* CLLMCalgacusMac.app */,
+				CLLM100000000000000000002008 /* CLLMCalgacusIOS.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-		CLLM100000000000000000004004 /* CLLMSmoke */ = {
+		CLLM100000000000000000004004 /* Apps/CLLMSmoke */ = {
 			isa = PBXGroup;
 			children = (
 				CLLM100000000000000000002003 /* CLLMSmokeApp.swift */,
@@ -106,7 +140,7 @@
 			path = Apps/CLLMSmoke;
 			sourceTree = "<group>";
 		};
-		CLLM100000000000000000004005 /* CLLMDemo */ = {
+		CLLM100000000000000000004005 /* Apps/CLLMDemo */ = {
 			isa = PBXGroup;
 			children = (
 				CLLM100000000000000000002006 /* CLLMDemoApp.swift */,
@@ -114,30 +148,17 @@
 			path = Apps/CLLMDemo;
 			sourceTree = "<group>";
 		};
+		CLLM100000000000000000004006 /* Apps/CLLMCalgacus */ = {
+			isa = PBXGroup;
+			children = (
+				CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */,
+			);
+			path = Apps/CLLMCalgacus;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		CLLM100000000000000000005002 /* CLLMSmokeMac */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = CLLM100000000000000000006004 /* Build configuration list for PBXNativeTarget "CLLMSmokeMac" */;
-			buildPhases = (
-				CLLM100000000000000000003004 /* Sources */,
-				CLLM100000000000000000003003 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = CLLMSmokeMac;
-			packageProductDependencies = (
-				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
-				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
-			);
-			productName = CLLMSmokeMac;
-			productReference = CLLM100000000000000000002004 /* CLLMSmokeMac.app */;
-			productType = "com.apple.product-type.application";
-		};
 		CLLM100000000000000000005001 /* CLLMSmokeIOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = CLLM100000000000000000006003 /* Build configuration list for PBXNativeTarget "CLLMSmokeIOS" */;
@@ -157,6 +178,27 @@
 			);
 			productName = CLLMSmokeIOS;
 			productReference = CLLM100000000000000000002002 /* CLLMSmokeIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CLLM100000000000000000005002 /* CLLMSmokeMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CLLM100000000000000000006004 /* Build configuration list for PBXNativeTarget "CLLMSmokeMac" */;
+			buildPhases = (
+				CLLM100000000000000000003004 /* Sources */,
+				CLLM100000000000000000003003 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CLLMSmokeMac;
+			packageProductDependencies = (
+				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
+				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+			);
+			productName = CLLMSmokeMac;
+			productReference = CLLM100000000000000000002004 /* CLLMSmokeMac.app */;
 			productType = "com.apple.product-type.application";
 		};
 		CLLM100000000000000000005003 /* CLLMDemoIOS */ = {
@@ -201,6 +243,48 @@
 			productReference = CLLM100000000000000000002007 /* CLLMDemoMac.app */;
 			productType = "com.apple.product-type.application";
 		};
+		CLLM100000000000000000005005 /* CLLMCalgacusIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CLLM100000000000000000006007 /* Build configuration list for PBXNativeTarget "CLLMCalgacusIOS" */;
+			buildPhases = (
+				CLLM100000000000000000003011 /* Sources */,
+				CLLM100000000000000000003009 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CLLMCalgacusIOS;
+			packageProductDependencies = (
+				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
+				CLLM100000000000000000007004 /* CarbocationLlamaRuntime */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+			);
+			productName = CLLMCalgacusIOS;
+			productReference = CLLM100000000000000000002008 /* CLLMCalgacusIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CLLM100000000000000000005006 /* CLLMCalgacusMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CLLM100000000000000000006008 /* Build configuration list for PBXNativeTarget "CLLMCalgacusMac" */;
+			buildPhases = (
+				CLLM100000000000000000003012 /* Sources */,
+				CLLM100000000000000000003010 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CLLMCalgacusMac;
+			packageProductDependencies = (
+				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
+				CLLM100000000000000000007004 /* CarbocationLlamaRuntime */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+			);
+			productName = CLLMCalgacusMac;
+			productReference = CLLM100000000000000000002010 /* CLLMCalgacusMac.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -223,9 +307,15 @@
 					CLLM100000000000000000005004 = {
 						CreatedOnToolsVersion = 26.0;
 					};
+					CLLM100000000000000000005005 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					CLLM100000000000000000005006 = {
+						CreatedOnToolsVersion = 26.0;
+					};
 				};
 			};
-			buildConfigurationList = CLLM100000000000000000006001 /* Build configuration list for PBXProject "CarbocationLocalLLM" */;
+			buildConfigurationList = CLLM100000000000000000006001 /* Build configuration list for PBXProject "Apps" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -245,6 +335,8 @@
 				CLLM100000000000000000005001 /* CLLMSmokeIOS */,
 				CLLM100000000000000000005004 /* CLLMDemoMac */,
 				CLLM100000000000000000005003 /* CLLMDemoIOS */,
+				CLLM100000000000000000005006 /* CLLMCalgacusMac */,
+				CLLM100000000000000000005005 /* CLLMCalgacusIOS */,
 			);
 		};
 /* End PBXProject section */
@@ -254,7 +346,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources (iOS) */,
+				CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -270,7 +362,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources (iOS) */,
+				CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -278,7 +370,23 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources (macOS) */,
+				CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CLLM100000000000000000003011 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CLLM100000000000000000001021 /* CLLMCalgacusApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CLLM100000000000000000003012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CLLM100000000000000000001025 /* CLLMCalgacusApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -409,9 +517,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CLLMSmokeIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -439,9 +547,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CLLMSmokeIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -521,9 +629,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CLLMDemoIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -551,9 +659,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CLLMDemoIOS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -624,10 +732,152 @@
 			};
 			name = Release;
 		};
+		CLLM100000000000000000006209 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMCalgacusIOS;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMCalgacusIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CLLM100000000000000000006210 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMCalgacusIOS;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMCalgacusIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		CLLM100000000000000000006211 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = YTU97Z787R;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMCalgacusMac;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMCalgacusMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CLLM100000000000000000006212 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = YTU97Z787R;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = CLLMCalgacusMac;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carbocation.CLLMCalgacusMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		CLLM100000000000000000006001 /* Build configuration list for PBXProject "CarbocationLocalLLM" */ = {
+		CLLM100000000000000000006001 /* Build configuration list for PBXProject "Apps" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				CLLM100000000000000000006101 /* Debug */,
@@ -672,6 +922,24 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		CLLM100000000000000000006007 /* Build configuration list for PBXNativeTarget "CLLMCalgacusIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CLLM100000000000000000006209 /* Debug */,
+				CLLM100000000000000000006210 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CLLM100000000000000000006008 /* Build configuration list for PBXNativeTarget "CLLMCalgacusMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CLLM100000000000000000006211 /* Debug */,
+				CLLM100000000000000000006212 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -696,6 +964,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
 			productName = CarbocationLocalLLMUI;
+		};
+		CLLM100000000000000000007004 /* CarbocationLlamaRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
+			productName = CarbocationLlamaRuntime;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

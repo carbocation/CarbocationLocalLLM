@@ -57,6 +57,120 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertNil(LlamaEngine.trimmingAtFirstStopSequence("alpha beta", stopSequences: [""]))
     }
 
+    func testCalgacusRankUsesDescendingLogitsAndTokenIDTieBreak() throws {
+        let logits: [Float] = [0.5, 2.0, 2.0, -1.0]
+
+        XCTAssertEqual(try LlamaEngine.calgacusRank(of: 1, in: logits), 1)
+        XCTAssertEqual(try LlamaEngine.calgacusRank(of: 2, in: logits), 2)
+        XCTAssertEqual(try LlamaEngine.calgacusRank(of: 0, in: logits), 3)
+        XCTAssertEqual(try LlamaEngine.calgacusRank(of: 3, in: logits), 4)
+    }
+
+    func testCalgacusTokenAtRankUsesSameOrdering() throws {
+        let logits: [Float] = [0.5, 2.0, 2.0, -1.0]
+
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 1, in: logits), 1)
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 2, in: logits), 2)
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 3, in: logits), 0)
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 4, in: logits), 3)
+    }
+
+    func testCalgacusRankTreatsNonFiniteLogitsAsLeastLikely() throws {
+        let logits: [Float] = [.nan, 1.0, -.infinity, .infinity]
+
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 1, in: logits), 1)
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 2, in: logits), 0)
+        XCTAssertEqual(try LlamaEngine.calgacusToken(atRank: 3, in: logits), 2)
+    }
+
+    func testCalgacusNegativeLogProbabilityUsesSoftmax() throws {
+        let logits: [Float] = [0, 0]
+
+        XCTAssertEqual(
+            try LlamaEngine.calgacusNegativeLogProbability(of: 0, in: logits),
+            log(2.0),
+            accuracy: 0.000_001
+        )
+    }
+
+    func testCalgacusStatsSummarizeTrace() {
+        let trace = [
+            CalgacusTraceEntry(index: 0, tokenID: 10, tokenText: "a", rank: 1, negativeLogProbability: 0.1),
+            CalgacusTraceEntry(index: 1, tokenID: 11, tokenText: "b", rank: 5, negativeLogProbability: 0.2),
+            CalgacusTraceEntry(index: 2, tokenID: 12, tokenText: "c", rank: 9, negativeLogProbability: 0.3)
+        ]
+
+        let stats = LlamaEngine.calgacusStats(for: trace)
+
+        XCTAssertEqual(stats.tokenCount, 3)
+        XCTAssertEqual(stats.maxRank, 9)
+        XCTAssertEqual(stats.meanRank, 5)
+        XCTAssertEqual(stats.medianRank, 5)
+        XCTAssertEqual(stats.cumulativeNegativeLogProbability, 0.6, accuracy: 0.000_001)
+        XCTAssertEqual(stats.averageNegativeLogProbability, 0.2, accuracy: 0.000_001)
+    }
+
+    func testCalgacusContextBudgetRejectsOverflow() {
+        XCTAssertNoThrow(try LlamaEngine.calgacusValidateBudget(
+            operation: "test",
+            contextSize: 8,
+            contextTokenCount: 3,
+            payloadTokenCount: 5
+        ))
+
+        XCTAssertThrowsError(try LlamaEngine.calgacusValidateBudget(
+            operation: "test",
+            contextSize: 8,
+            contextTokenCount: 4,
+            payloadTokenCount: 5
+        )) { error in
+            guard case CalgacusError.contextBudgetExceeded = error else {
+                return XCTFail("Expected contextBudgetExceeded, got \(error)")
+            }
+        }
+    }
+
+    func testCalgacusLiveRoundTripWhenModelPathProvided() async throws {
+        guard let path = ProcessInfo.processInfo.environment["CALGACUS_TEST_MODEL_PATH"],
+              !path.isEmpty
+        else {
+            throw XCTSkip("Set CALGACUS_TEST_MODEL_PATH to run the live Calgacus round-trip test.")
+        }
+
+        let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
+            gpuLayerCount: 0,
+            useMemoryMap: true,
+            batchSizeLimit: 512,
+            threadCount: 2,
+            promptReserveTokens: 0
+        ))
+        let loaded = try await engine.load(
+            modelAt: URL(fileURLWithPath: path),
+            requestedContext: 1_024
+        )
+
+        let secret = "The recipe is simple."
+        let encoded = try await engine.encodeCalgacus(
+            CalgacusEncodeRequest(
+                secretText: secret,
+                coverPrompt: "Write a friendly note about soup:",
+                requestedContext: loaded.contextSize
+            ),
+            onEvent: { _ in }
+        )
+        let decoded = try await engine.decodeCalgacus(
+            CalgacusDecodeRequest(
+                coverText: encoded.coverText,
+                coverPrompt: "Write a friendly note about soup:",
+                requestedContext: loaded.contextSize
+            ),
+            onEvent: { _ in }
+        )
+
+        XCTAssertEqual(decoded.secretText, secret)
+        await engine.unload()
+    }
+
     func testFallbackPromptDetectsGemmaWithoutAppConcepts() throws {
         let descriptor = LlamaModelDescriptor(
             url: URL(fileURLWithPath: "/tmp/gemma-3.gguf"),
