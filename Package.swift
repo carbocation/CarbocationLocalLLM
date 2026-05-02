@@ -74,6 +74,9 @@ let package = Package(
             targets: ["CarbocationLocalLLMUI"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0")
+    ],
     targets: [
         .target(
             name: "CarbocationLocalLLM"
@@ -83,7 +86,8 @@ let package = Package(
             name: "CarbocationLlamaRuntime",
             dependencies: [
                 "CarbocationLocalLLM",
-                "llama"
+                "llama",
+                .product(name: "Jinja", package: "swift-jinja")
             ],
             linkerSettings: llamaUnsafeLinkerSettings + [
                 .linkedLibrary("c++"),

@@ -82,6 +82,56 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertNil(LlamaEngine.trimmingAtFirstStopSequence("alpha beta", stopSequences: [""]))
     }
 
+    func testMergingStopSequencesPreservesCallerOrderAndDeduplicates() {
+        XCTAssertEqual(
+            LlamaEngine.mergingStopSequences(["END", "STOP"], ["STOP", "<turn|>", ""]),
+            ["END", "STOP", "<turn|>"]
+        )
+    }
+
+    func testSwiftJinjaAppliesGemma4Template() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "System",
+            user: "User",
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+
+        XCTAssertTrue(prompt.contains("<|turn>system\n"))
+        XCTAssertTrue(prompt.contains("System"))
+        XCTAssertTrue(prompt.contains("<turn|>\n"))
+        XCTAssertTrue(prompt.contains("<|turn>user\n"))
+        XCTAssertTrue(prompt.contains("User"))
+        XCTAssertTrue(prompt.contains("<|turn>model\n"))
+        XCTAssertTrue(prompt.hasSuffix("<|turn>model\n<|channel>thought\n<channel|>"))
+        XCTAssertFalse(prompt.contains("<start_of_turn>"))
+        XCTAssertFalse(prompt.contains("<end_of_turn>"))
+    }
+
+    func testSwiftJinjaRejectsNonTemplateAliasBeforeLegacyFallback() {
+        XCTAssertThrowsError(try ChatTemplatePromptFormatter.format(
+            template: "chatml",
+            system: "System",
+            user: "User",
+            bosToken: "",
+            eosToken: ""
+        ))
+    }
+
+    func testLegacyCAPIStillSupportsChatMLAlias() {
+        let prompt = LlamaEngine.formatMessagesWithLegacyTemplate(
+            template: "chatml",
+            system: "System",
+            user: "User"
+        )
+
+        XCTAssertNotNil(prompt)
+        XCTAssertTrue(prompt?.contains("<|im_start|>system") == true)
+        XCTAssertTrue(prompt?.contains("<|im_start|>assistant") == true)
+    }
+
     func testCalgacusRankUsesDescendingLogitsAndTokenIDTieBreak() throws {
         let logits: [Float] = [0.5, 2.0, 2.0, -1.0]
 
@@ -251,5 +301,38 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 return XCTFail("Expected chatTemplateUnavailable, got \(error)")
             }
         }
+    }
+
+    func testEmbeddedTemplateFailureDoesNotInferFallbackFromDescriptor() {
+        let descriptor = LlamaModelDescriptor(
+            url: URL(fileURLWithPath: "/tmp/gemma-4.gguf"),
+            displayName: "Gemma 4",
+            filename: "gemma-4.gguf"
+        )
+
+        XCTAssertThrowsError(try LlamaEngine.fallbackPrompt(
+            system: "System",
+            user: "User",
+            embeddedTemplate: "{{ unsupported_gemma4_marker }}",
+            descriptor: descriptor
+        )) { error in
+            guard case LLMEngineError.chatTemplateUnavailable = error else {
+                return XCTFail("Expected chatTemplateUnavailable, got \(error)")
+            }
+        }
+    }
+}
+
+private extension CarbocationLlamaRuntimeTests {
+    static var packageRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    static var gemma4TemplateURL: URL {
+        packageRoot
+            .appendingPathComponent("Vendor/llama.cpp/models/templates/google-gemma-4-31B-it.jinja")
     }
 }

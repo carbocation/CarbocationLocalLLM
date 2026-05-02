@@ -606,7 +606,7 @@ Build the local multi-platform llama artifact first:
 Scripts/build-llama-xcframework.sh
 ```
 
-For Gemma GGUFs, seeing `embeddedTemplate: true` together with `templateMode=gemma-fallback` is acceptable. It means the model exposes a template, but llama.cpp did not apply it successfully through the native template path, so the shared runtime used its known Gemma fallback prompt format.
+For GGUFs with an embedded chat template, the runtime should report `embeddedTemplate: true` with `formatter=swift-jinja` or, for templates accepted by llama.cpp's legacy C API, `formatter=legacy-c-api`. If both embedded-template paths fail, the runtime reports a template error instead of silently falling back to descriptor- or filename-inferred prompt tokens.
 
 ### Package layout
 

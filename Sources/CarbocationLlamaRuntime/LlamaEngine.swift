@@ -122,6 +122,7 @@ public actor LlamaEngine: LLMEngine {
     private var loadedDescriptor: LlamaModelDescriptor?
     private var loadedInfo: LlamaLoadedModelInfo?
     private var chatTemplate: String?
+    private var outputSanitizationProfile: OutputSanitizationProfile = .empty
 
     public init(configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()) {
         self.configuration = configuration
@@ -287,6 +288,7 @@ public actor LlamaEngine: LLMEngine {
             throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
         }
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
+        let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
             modelPath: path,
@@ -303,6 +305,9 @@ public actor LlamaEngine: LLMEngine {
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
         self.chatTemplate = template
+        self.outputSanitizationProfile = outputProfile
+
+        Self.logOutputSanitizationProfile(outputProfile, descriptor: descriptor, hasEmbeddedTemplate: template != nil)
 
         return info
     }
@@ -317,6 +322,7 @@ public actor LlamaEngine: LLMEngine {
         self.loadedDescriptor = nil
         self.loadedInfo = nil
         self.chatTemplate = nil
+        self.outputSanitizationProfile = .empty
     }
 
     public func generate(
@@ -361,7 +367,11 @@ public actor LlamaEngine: LLMEngine {
             throw error
         }
 
-        let promptTokens = try tokenize(vocab: vocabulary, text: renderedPrompt, addSpecial: true)
+        let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
+            renderedPrompt,
+            vocab: vocabulary
+        )
+        let promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
         promptTokenCount = promptTokens.count
         guard !promptTokens.isEmpty else {
             throw LLMEngineError.tokenizationFailed
@@ -416,6 +426,11 @@ public actor LlamaEngine: LLMEngine {
         var jsonInString = false
         var jsonEscaped = false
         var jsonStarted = false
+        let activeOutputProfile = chatTemplate == nil ? OutputSanitizationProfile.empty : outputSanitizationProfile
+        let effectiveStopSequences = Self.mergingStopSequences(
+            options.stopSequences,
+            activeOutputProfile.extraStopStrings
+        )
 
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
@@ -435,7 +450,7 @@ public actor LlamaEngine: LLMEngine {
 
                 if let trimmed = Self.trimmingAtFirstStopSequence(
                     accumulatedText,
-                    stopSequences: options.stopSequences
+                    stopSequences: effectiveStopSequences
                 ) {
                     accumulatedText = trimmed
                     stopReason = "stop-sequence"
@@ -506,6 +521,9 @@ public actor LlamaEngine: LLMEngine {
         if accumulatedText.isEmpty, !accumulatedData.isEmpty {
             accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
         }
+        let returnedText = activeOutputProfile.isEmpty
+            ? accumulatedText
+            : LLMResponseSanitizer.unwrapStructuredOutput(accumulatedText, using: activeOutputProfile)
 
         emittedStats = true
         onEvent(.generationStats(
@@ -514,8 +532,8 @@ public actor LlamaEngine: LLMEngine {
             stopReason: stopReason,
             templateMode: templateMode
         ))
-        onEvent(.done(totalBytes: accumulatedData.count, duration: Date().timeIntervalSince(startedAt)))
-        return accumulatedText
+        onEvent(.done(totalBytes: returnedText.utf8.count, duration: Date().timeIntervalSince(startedAt)))
+        return returnedText
     }
 
     public func encodeCalgacus(
@@ -638,26 +656,56 @@ public actor LlamaEngine: LLMEngine {
     }
 
     private func applyChatTemplate(system: String, user: String) throws -> (text: String, mode: LLMChatTemplateMode) {
-        if let chatTemplate,
-           let formatted = formatMessages(template: chatTemplate, system: system, user: user) {
-            Self.logChatTemplateSelection(
-                mode: .embedded,
-                descriptor: loadedDescriptor,
-                hasEmbeddedTemplate: true
-            )
-            return (formatted, .embedded)
+        if let chatTemplate {
+            do {
+                let formatted = try formatMessagesViaSwiftJinja(
+                    template: chatTemplate,
+                    system: system,
+                    user: user
+                )
+                Self.logChatTemplateSelection(
+                    mode: .embedded,
+                    descriptor: loadedDescriptor,
+                    hasEmbeddedTemplate: true,
+                    formatter: "swift-jinja"
+                )
+                return (formatted, .embedded)
+            } catch {
+                llamaRuntimeLog.info(
+                    "Swift Jinja chat template application failed: \(String(describing: error), privacy: .public)"
+                )
+            }
+
+            if let formatted = Self.formatMessagesWithLegacyTemplate(
+                template: chatTemplate,
+                system: system,
+                user: user
+            ) {
+                Self.logChatTemplateSelection(
+                    mode: .embedded,
+                    descriptor: loadedDescriptor,
+                    hasEmbeddedTemplate: true,
+                    formatter: "legacy-c-api"
+                )
+                return (formatted, .embedded)
+            }
+
+            throw LLMEngineError.chatTemplateUnavailable(Self.embeddedTemplateFailureDescription(
+                descriptor: loadedDescriptor
+            ))
         }
 
         let fallback = try Self.fallbackPrompt(
             system: system,
             user: user,
-            embeddedTemplate: chatTemplate,
+            embeddedTemplate: nil,
             descriptor: loadedDescriptor
         )
         Self.logChatTemplateSelection(
             mode: fallback.mode,
             descriptor: loadedDescriptor,
-            hasEmbeddedTemplate: chatTemplate != nil
+            hasEmbeddedTemplate: false,
+            formatter: "fallback"
         )
         return fallback
     }
@@ -685,9 +733,8 @@ public actor LlamaEngine: LLMEngine {
         embeddedTemplate: String?,
         descriptor: LlamaModelDescriptor?
     ) -> KnownTemplateFamily? {
-        if let embeddedTemplate,
-           let family = templateFamily(from: embeddedTemplate) {
-            return family
+        if let embeddedTemplate {
+            return templateFamily(from: embeddedTemplate)
         }
 
         let probes = [
@@ -719,28 +766,72 @@ public actor LlamaEngine: LLMEngine {
         return nil
     }
 
+    private func formatMessagesViaSwiftJinja(
+        template: String,
+        system: String,
+        user: String
+    ) throws -> String {
+        guard let vocabulary else {
+            throw LLMEngineError.noModelLoaded
+        }
+        return try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: system,
+            user: user,
+            bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
+            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? ""
+        )
+    }
+
     private static func templateUnavailableDescription(
         embeddedTemplate: String?,
         descriptor: LlamaModelDescriptor?
     ) -> String {
+        if embeddedTemplate != nil {
+            if let descriptor {
+                return "Embedded template exists but its family is not supported. Model: \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename))."
+            }
+            return "Embedded template exists but its family is not supported."
+        }
         if let descriptor {
             return "Model: \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename))."
         }
-        if embeddedTemplate != nil {
-            return "Embedded template exists but its family is not supported."
-        }
         return "The GGUF metadata did not expose a known template family."
+    }
+
+    private static func embeddedTemplateFailureDescription(
+        descriptor: LlamaModelDescriptor?
+    ) -> String {
+        if let descriptor {
+            return "Embedded template exists but could not be applied. Model: \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename))."
+        }
+        return "Embedded template exists but could not be applied."
     }
 
     private static func logChatTemplateSelection(
         mode: LLMChatTemplateMode,
         descriptor: LlamaModelDescriptor?,
-        hasEmbeddedTemplate: Bool
+        hasEmbeddedTemplate: Bool,
+        formatter: String
     ) {
         let source = mode == .embedded ? "embedded" : "fallback"
         let modelName = descriptor?.displayName ?? descriptor?.filename ?? "unknown"
         llamaRuntimeLog.info(
-            "Chat template selected: source=\(source, privacy: .public) mode=\(mode.rawValue, privacy: .public) embeddedTemplatePresent=\(hasEmbeddedTemplate, privacy: .public) model=\(modelName, privacy: .public)"
+            "Chat template selected: source=\(source, privacy: .public) mode=\(mode.rawValue, privacy: .public) formatter=\(formatter, privacy: .public) embeddedTemplatePresent=\(hasEmbeddedTemplate, privacy: .public) model=\(modelName, privacy: .public)"
+        )
+    }
+
+    private static func logOutputSanitizationProfile(
+        _ profile: OutputSanitizationProfile,
+        descriptor: LlamaModelDescriptor?,
+        hasEmbeddedTemplate: Bool
+    ) {
+        let modelName = descriptor?.displayName ?? descriptor?.filename ?? "unknown"
+        let stops = profile.extraStopStrings.joined(separator: ",")
+        let scrubTokens = profile.scrubTokens.joined(separator: ",")
+        let sliceAfter = profile.sliceAfterMarker ?? "none"
+        llamaRuntimeLog.info(
+            "Output sanitization profile selected: embeddedTemplatePresent=\(hasEmbeddedTemplate, privacy: .public) thinkingPairs=\(profile.thinkingPairs.count, privacy: .public) stopStrings=\(stops, privacy: .public) sliceAfter=\(sliceAfter, privacy: .public) scrubTokens=\(scrubTokens, privacy: .public) model=\(modelName, privacy: .public)"
         )
     }
 
@@ -757,7 +848,7 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
-    private func formatMessages(template: String, system: String, user: String) -> String? {
+    static func formatMessagesWithLegacyTemplate(template: String, system: String, user: String) -> String? {
         guard let roleSystem = strdup("system"),
               let roleUser = strdup("user"),
               let systemContent = strdup(system),
@@ -852,10 +943,37 @@ public actor LlamaEngine: LLMEngine {
         return Array(tokens.prefix(Int(tokenCount)))
     }
 
-    private func tokenToPiece(vocab: OpaquePointer, token: llama_token) -> Data {
+    private func promptWithAutoAddedSpecialTokensStripped(
+        _ prompt: String,
+        vocab: OpaquePointer
+    ) -> String {
+        var output = prompt
+        if llama_vocab_get_add_bos(vocab),
+           let bosToken = specialTokenString(vocab: vocab, token: llama_vocab_bos(vocab)),
+           !bosToken.isEmpty,
+           output.hasPrefix(bosToken) {
+            output = String(output.dropFirst(bosToken.count))
+        }
+        if llama_vocab_get_add_eos(vocab),
+           let eosToken = specialTokenString(vocab: vocab, token: llama_vocab_eos(vocab)),
+           !eosToken.isEmpty,
+           output.hasSuffix(eosToken) {
+            output = String(output.dropLast(eosToken.count))
+        }
+        return output
+    }
+
+    private func specialTokenString(vocab: OpaquePointer, token: llama_token) -> String? {
+        guard token >= 0 else { return nil }
+        let data = tokenToPiece(vocab: vocab, token: token, special: true)
+        guard !data.isEmpty else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func tokenToPiece(vocab: OpaquePointer, token: llama_token, special: Bool = false) -> Data {
         var probe = [CChar](repeating: 0, count: 32)
         let probeCount = probe.withUnsafeMutableBufferPointer { buffer in
-            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, false)
+            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, special)
         }
 
         if probeCount >= 0 {
@@ -867,7 +985,7 @@ public actor LlamaEngine: LLMEngine {
         let neededCount = Int(-probeCount)
         var bytes = [CChar](repeating: 0, count: neededCount)
         let byteCount = bytes.withUnsafeMutableBufferPointer { buffer in
-            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, false)
+            llama_token_to_piece(vocab, token, buffer.baseAddress, Int32(buffer.count), 0, special)
         }
 
         guard byteCount > 0 else {
@@ -924,6 +1042,14 @@ public actor LlamaEngine: LLMEngine {
         }
 
         return chain
+    }
+
+    static func mergingStopSequences(_ callerStops: [String], _ templateStops: [String]) -> [String] {
+        var merged: [String] = []
+        for stop in callerStops + templateStops where !stop.isEmpty && !merged.contains(stop) {
+            merged.append(stop)
+        }
+        return merged
     }
 
     static func trimmingAtFirstStopSequence(

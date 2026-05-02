@@ -410,6 +410,95 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(try JSONSalvage.decode(Payload.self, from: raw), Payload(title: "Example"))
     }
 
+    func testOutputProfileDerivationGemma4() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(profile.thinkingPairs.contains(OutputDelimiterPair(
+            open: "<|channel>thought",
+            close: "<channel|>"
+        )))
+        XCTAssertTrue(profile.extraStopStrings.contains("<turn|>"))
+        XCTAssertTrue(profile.extraStopStrings.contains("<|turn>"))
+    }
+
+    func testOutputProfileDerivationChatML() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        {% for message in messages %}<|im_start|>{{ message.role }}
+        {{ message.content }}<|im_end|>
+        {% endfor %}<|im_start|>assistant
+        """)
+
+        XCTAssertEqual(profile.extraStopStrings, ["<|im_end|>", "<|im_start|>"])
+        XCTAssertTrue(profile.thinkingPairs.isEmpty)
+    }
+
+    func testOutputProfileDerivationLegacyGemma() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        {{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>' }}
+        """)
+
+        XCTAssertEqual(profile.extraStopStrings, ["<end_of_turn>", "<start_of_turn>"])
+    }
+
+    func testOutputProfileDerivationHarmony() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        <|channel|>final<|message|>{{ content }}<|return|><|end|>
+        """)
+
+        XCTAssertEqual(profile.sliceAfterMarker, "<|channel|>final<|message|>")
+        XCTAssertEqual(profile.scrubTokens, ["<|return|>", "<|end|>"])
+    }
+
+    func testOutputProfileDerivationUnknownModelIsEmpty() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: "plain template")
+
+        XCTAssertEqual(profile, .empty)
+    }
+
+    func testProfileDrivenSanitizerDoesNotStripUnknownThinkContent() {
+        let raw = "The literal <think> tag can be discussed safely."
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(raw, using: .empty),
+            raw
+        )
+    }
+
+    func testProfileDrivenSanitizerStripsGemma4ThinkingBlock() {
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [
+                OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
+            ]
+        )
+        let raw = """
+        <|channel>thought
+        hidden notes
+        <channel|>
+        visible answer
+        """
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(raw, using: profile),
+            "visible answer"
+        )
+    }
+
+    func testProfileDrivenSanitizerSlicesHarmonyFinalMarker() {
+        let profile = OutputSanitizationProfile(
+            sliceAfterMarker: "<|channel|>final<|message|>",
+            scrubTokens: ["<|return|>"]
+        )
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(
+                "analysis<|channel|>final<|message|>{\"ok\":true}<|return|>",
+                using: profile
+            ),
+            "{\"ok\":true}"
+        )
+    }
+
     func testPreviewDescribesEmptyAndWhitespaceResponses() {
         XCTAssertEqual(LLMResponsePreview.describe(""), "<empty response>")
         XCTAssertEqual(LLMResponsePreview.describe("  \n"), "<whitespace-only response: ..\\n>")
@@ -499,6 +588,20 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
     private func appendInt64(_ value: Int64, to data: inout Data) {
         appendUInt64(UInt64(bitPattern: value), to: &data)
+    }
+}
+
+private extension CarbocationLocalLLMTests {
+    static var packageRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    static var gemma4TemplateURL: URL {
+        packageRoot
+            .appendingPathComponent("Vendor/llama.cpp/models/templates/google-gemma-4-31B-it.jinja")
     }
 }
 

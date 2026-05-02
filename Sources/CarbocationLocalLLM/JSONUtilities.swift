@@ -85,6 +85,25 @@ public enum LLMResponseSanitizer {
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Applies only the model-specific cleanup described by a derived output profile.
+    public static func unwrapStructuredOutput(
+        _ text: String,
+        using profile: OutputSanitizationProfile
+    ) -> String {
+        var output = stripThinkingBlocks(from: text, pairs: profile.thinkingPairs)
+
+        if let marker = profile.sliceAfterMarker,
+           let range = output.range(of: marker, options: .backwards) {
+            output = String(output[range.upperBound...])
+        }
+
+        for token in profile.scrubTokens {
+            output = output.replacingOccurrences(of: token, with: "")
+        }
+
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func stripReasoningBlocks(from text: String) -> String {
         var output = text
         for pattern in [
@@ -92,6 +111,23 @@ public enum LLMResponseSanitizer {
             #"(?is)<\|channel(?:\|)?>thought\b[\s\S]*?(?:<channel\|>|<\|channel\|>)\s*"#
         ] {
             output = replacingMatches(in: output, pattern: pattern, with: "")
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func stripThinkingBlocks(
+        from text: String,
+        pairs: [OutputDelimiterPair]
+    ) -> String {
+        var output = text
+        for pair in pairs {
+            while let openRange = output.range(of: pair.open),
+                  let closeRange = output.range(
+                    of: pair.close,
+                    range: openRange.upperBound..<output.endIndex
+                  ) {
+                output.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+            }
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -119,6 +155,19 @@ public enum JSONSalvage {
 
     public static func decode<T: Decodable>(_ type: T.Type, from text: String) throws -> T {
         let stripped = LLMResponseSanitizer.unwrapStructuredOutput(text)
+        return try decode(type, fromUnwrapped: stripped)
+    }
+
+    public static func decode<T: Decodable>(
+        _ type: T.Type,
+        from text: String,
+        using profile: OutputSanitizationProfile
+    ) throws -> T {
+        let stripped = LLMResponseSanitizer.unwrapStructuredOutput(text, using: profile)
+        return try decode(type, fromUnwrapped: stripped)
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, fromUnwrapped stripped: String) throws -> T {
         let blocks = extractFencedBlocksReversed(from: stripped)
         let candidates = blocks.isEmpty ? [stripped] : blocks
 
@@ -167,6 +216,18 @@ public enum JSONSalvage {
 
     public static func unwrapResponse(_ text: String) -> String {
         let stripped = LLMResponseSanitizer.unwrapStructuredOutput(text)
+        return unwrapResponse(fromUnwrapped: stripped)
+    }
+
+    public static func unwrapResponse(
+        _ text: String,
+        using profile: OutputSanitizationProfile
+    ) -> String {
+        let stripped = LLMResponseSanitizer.unwrapStructuredOutput(text, using: profile)
+        return unwrapResponse(fromUnwrapped: stripped)
+    }
+
+    private static func unwrapResponse(fromUnwrapped stripped: String) -> String {
         let blocks = extractFencedBlocksReversed(from: stripped)
         let inner = blocks.first ?? stripped
         return stripFences(inner).trimmingCharacters(in: .whitespacesAndNewlines)
