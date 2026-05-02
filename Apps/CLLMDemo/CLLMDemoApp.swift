@@ -69,6 +69,9 @@ private struct DemoRootView: View {
 
 private struct PromptPane: View {
     @Bindable var state: DemoState
+#if os(iOS)
+    @FocusState private var focusedEditor: PromptEditorField?
+#endif
 
     var body: some View {
         ScrollView {
@@ -82,6 +85,16 @@ private struct PromptPane: View {
             .padding()
         }
         .demoScrollDismissesKeyboardInteractively()
+#if os(iOS)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    focusedEditor = nil
+                }
+            }
+        }
+#endif
     }
 
     @ViewBuilder
@@ -114,6 +127,9 @@ private struct PromptPane: View {
             TextEditor(text: $state.systemPrompt)
                 .frame(minHeight: 80)
                 .demoTextEditorInput()
+#if os(iOS)
+                .focused($focusedEditor, equals: .system)
+#endif
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
 
@@ -123,6 +139,9 @@ private struct PromptPane: View {
             TextEditor(text: $state.prompt)
                 .frame(minHeight: 150)
                 .demoTextEditorInput()
+#if os(iOS)
+                .focused($focusedEditor, equals: .prompt)
+#endif
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
         }
@@ -184,6 +203,13 @@ private struct PromptPane: View {
         }
     }
 }
+
+#if os(iOS)
+private enum PromptEditorField: Hashable {
+    case system
+    case prompt
+}
+#endif
 
 @MainActor
 @Observable
