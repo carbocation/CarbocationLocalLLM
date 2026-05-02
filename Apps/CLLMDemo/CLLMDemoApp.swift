@@ -200,7 +200,9 @@ private final class DemoState {
     var isRunning = false
 
     private var generationTask: Task<Void, Never>?
-    private var activeEngine: LocalLLMEngine?
+    private let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
+        heartbeatInterval: 0.5
+    ))
 
     init() {
         let root = ModelStorage.modelsDirectory(appSupportFolderName: CLLMDemoMetadata.appSupportFolderName)
@@ -235,6 +237,9 @@ private final class DemoState {
         loadedInfo = nil
         errorMessage = nil
         persistSelection(selectedModelID)
+        Task { [engine] in
+            await engine.unload()
+        }
     }
 
     func persistSelection(_ value: String) {
@@ -253,16 +258,10 @@ private final class DemoState {
         output = ""
         events = ""
         errorMessage = nil
-        loadedInfo = nil
-
-        let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
-            heartbeatInterval: 0.5
-        ))
-        activeEngine = engine
 
         let storedSelection = selectedModelID
         generationTask = Task { @MainActor [weak self] in
-            await self?.run(storedSelection: storedSelection, engine: engine)
+            await self?.run(storedSelection: storedSelection)
         }
     }
 
@@ -272,10 +271,9 @@ private final class DemoState {
         isRunning = false
         appendEvent("cancelled")
 
-        let engine = activeEngine
-        activeEngine = nil
-        Task {
-            await engine?.unload()
+        loadedInfo = nil
+        Task { [engine] in
+            await engine.unload()
         }
     }
 
@@ -285,11 +283,10 @@ private final class DemoState {
         errorMessage = nil
     }
 
-    private func run(storedSelection: String, engine: LocalLLMEngine) async {
+    private func run(storedSelection: String) async {
         defer {
             isRunning = false
             generationTask = nil
-            activeEngine = nil
         }
 
         do {
@@ -327,14 +324,15 @@ private final class DemoState {
             }
 
             output = response
-            await engine.unload()
             appendEvent("done")
         } catch is CancellationError {
             appendEvent("cancelled")
+            loadedInfo = nil
             await engine.unload()
         } catch {
             errorMessage = error.localizedDescription
             appendEvent("failed: \(error.localizedDescription)")
+            loadedInfo = nil
             await engine.unload()
         }
     }

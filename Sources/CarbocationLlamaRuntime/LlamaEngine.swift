@@ -5,9 +5,11 @@ import llama
 #if os(iOS)
 private let platformDefaultGPULayerCount: Int32 = 0
 private let platformDefaultBatchSizeLimit = 512
+private let platformMaximumContextSize = 4_096
 #else
 private let platformDefaultGPULayerCount: Int32 = 999
 private let platformDefaultBatchSizeLimit = 2_048
+private let platformMaximumContextSize = Int.max
 #endif
 
 public struct LlamaEngineConfiguration: Hashable, Sendable {
@@ -141,10 +143,17 @@ public actor LlamaEngine: LLMEngine {
     }
 
     public static func probeTrainingContext(at url: URL) -> Int? {
-        probeTrainingContext(atPath: url.path)
+        GGUFMetadata.trainingContextLength(at: url) ?? probeTrainingContextByLoadingModel(atPath: url.path)
     }
 
     public static func probeTrainingContext(atPath path: String) -> Int? {
+        GGUFMetadata.trainingContextLength(atPath: path) ?? probeTrainingContextByLoadingModel(atPath: path)
+    }
+
+    private static func probeTrainingContextByLoadingModel(atPath path: String) -> Int? {
+#if os(iOS)
+        return nil
+#else
         LlamaBackend.ensureInitialized()
 
         var params = llama_model_default_params()
@@ -160,6 +169,7 @@ public actor LlamaEngine: LLMEngine {
 
         let trainingContext = Int(llama_model_n_ctx_train(model))
         return trainingContext > 0 ? trainingContext : nil
+#endif
     }
 
     @discardableResult
@@ -1012,7 +1022,8 @@ public actor LlamaEngine: LLMEngine {
         let requested = requestedContext > 0
             ? requestedContext
             : (normalizedTrainingContext > 0 ? normalizedTrainingContext : LlamaContextPolicy.unknownTrainingFallback)
-        let upperBound = normalizedTrainingContext > 0 ? normalizedTrainingContext : requested
+        let modelUpperBound = normalizedTrainingContext > 0 ? normalizedTrainingContext : requested
+        let upperBound = min(modelUpperBound, platformMaximumContextSize)
         return max(LlamaContextPolicy.minimumContext, min(requested, upperBound))
     }
 

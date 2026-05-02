@@ -221,8 +221,13 @@ public struct LlamaContextPreferenceKeys: Sendable {
 }
 
 public enum LlamaContextPolicy {
+#if os(iOS)
+    public static let defaultAutoCap = 4_096
+    public static let unknownTrainingFallback = 4_096
+#else
     public static let defaultAutoCap = 16_384
     public static let unknownTrainingFallback = 8_192
+#endif
     public static let legacyDefaultNumCtx = 8_192
     public static let minimumContext = 512
 

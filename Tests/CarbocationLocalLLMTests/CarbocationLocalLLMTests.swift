@@ -73,6 +73,14 @@ final class CarbocationLocalLLMTests: XCTestCase {
         )
     }
 
+    func testGGUFMetadataReadsTrainingContextLength() throws {
+        let root = try makeTemporaryDirectory()
+        let url = root.appendingPathComponent("metadata-only.gguf")
+        try makeMinimalGGUF(contextLength: 32_768).write(to: url)
+
+        XCTAssertEqual(GGUFMetadata.trainingContextLength(at: url), 32_768)
+    }
+
     func testGenerationOptionsResolverUsesSafeDefaultsUnlessCustom() {
         let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -129,6 +137,32 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try await library.delete(id: model.id)
         XCTAssertTrue(library.models.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: model.directory(in: modelsRoot).path))
+    }
+
+    @MainActor
+    func testModelLibraryTrustsProvidedContextLengthWithoutProbe() async throws {
+        let root = try makeTemporaryDirectory()
+        let source = root.appendingPathComponent("download-Q4_K_M.gguf")
+        try Data("fake gguf".utf8).write(to: source)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let recorder = ThreadProbeRecorder()
+
+        let library = ModelLibrary(root: modelsRoot) { _ in
+            recorder.record(true)
+            return 16_384
+        }
+
+        let model = try await library.add(
+            weightsAt: source,
+            displayName: "Known Context Model",
+            filename: "download-Q4_K_M.gguf",
+            sizeBytes: 9,
+            source: .curated,
+            contextLength: 32_768
+        )
+
+        XCTAssertEqual(model.contextLength, 32_768)
+        XCTAssertNil(recorder.value)
     }
 
     @MainActor
@@ -421,6 +455,50 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .appendingPathComponent("CarbocationLocalLLMTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func makeMinimalGGUF(contextLength: UInt32) -> Data {
+        var data = Data([0x47, 0x47, 0x55, 0x46])
+        appendUInt32(3, to: &data)
+        appendInt64(0, to: &data)
+        appendInt64(2, to: &data)
+
+        appendGGUFString("general.architecture", to: &data)
+        appendInt32(8, to: &data)
+        appendGGUFString("llama", to: &data)
+
+        appendGGUFString("llama.context_length", to: &data)
+        appendInt32(4, to: &data)
+        appendUInt32(contextLength, to: &data)
+        return data
+    }
+
+    private func appendGGUFString(_ string: String, to data: inout Data) {
+        let bytes = Array(string.utf8)
+        appendUInt64(UInt64(bytes.count), to: &data)
+        data.append(contentsOf: bytes)
+    }
+
+    private func appendUInt32(_ value: UInt32, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) {
+            data.append(contentsOf: $0)
+        }
+    }
+
+    private func appendInt32(_ value: Int32, to data: inout Data) {
+        appendUInt32(UInt32(bitPattern: value), to: &data)
+    }
+
+    private func appendUInt64(_ value: UInt64, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) {
+            data.append(contentsOf: $0)
+        }
+    }
+
+    private func appendInt64(_ value: Int64, to data: inout Data) {
+        appendUInt64(UInt64(bitPattern: value), to: &data)
     }
 }
 

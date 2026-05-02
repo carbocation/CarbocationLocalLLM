@@ -15,10 +15,17 @@ public enum LlamaRuntimeSmoke {
 
 public enum LlamaRuntimeModelProbe {
     public static func probeTrainingContext(at url: URL) -> Int? {
-        probeTrainingContext(atPath: url.path)
+        GGUFMetadata.trainingContextLength(at: url) ?? probeTrainingContextByLoadingModel(atPath: url.path)
     }
 
     public static func probeTrainingContext(atPath path: String) -> Int? {
+        GGUFMetadata.trainingContextLength(atPath: path) ?? probeTrainingContextByLoadingModel(atPath: path)
+    }
+
+    private static func probeTrainingContextByLoadingModel(atPath path: String) -> Int? {
+#if os(iOS)
+        return nil
+#else
         LlamaBackend.ensureInitialized()
 
         var params = llama_model_default_params()
@@ -34,5 +41,6 @@ public enum LlamaRuntimeModelProbe {
 
         let trainingContext = Int(llama_model_n_ctx_train(model))
         return trainingContext > 0 ? trainingContext : nil
+#endif
     }
 }

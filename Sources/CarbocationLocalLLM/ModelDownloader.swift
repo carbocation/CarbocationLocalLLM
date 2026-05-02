@@ -91,9 +91,9 @@ public struct PartialDownload: Identifiable, Sendable, Hashable {
 public struct ModelDownloadResult: Sendable, Hashable {
     public let tempURL: URL
     public let sizeBytes: Int64
-    public let sha256: String
+    public let sha256: String?
 
-    public init(tempURL: URL, sizeBytes: Int64, sha256: String) {
+    public init(tempURL: URL, sizeBytes: Int64, sha256: String?) {
         self.tempURL = tempURL
         self.sizeBytes = sizeBytes
         self.sha256 = sha256
@@ -541,6 +541,7 @@ private final class RangedDownloadDelegate: NSObject, URLSessionDataDelegate, @u
 public enum ModelDownloader {
     private static let currentPartialPrefix = "cllm-partial-"
     private static let userAgent = "CarbocationLocalLLM/1.0"
+    private static let sha256ChunkSize = 1 << 20
 
     public static func huggingFaceResolveURL(hfRepo: String, hfFilename: String) throws -> URL {
         let urlString = "https://huggingface.co/\(hfRepo)/resolve/main/\(hfFilename)?download=true"
@@ -765,7 +766,6 @@ public enum ModelDownloader {
         let validator = sidecar.etag ?? sidecar.lastModified
         let delegate = RangedDownloadDelegate()
         let session = makeURLSession(configuration: configuration, delegate: delegate)
-        defer { session.invalidateAndCancel() }
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -791,16 +791,20 @@ public enum ModelDownloader {
                 try await group.waitForAll()
             }
             try writer.close()
+            session.finishTasksAndInvalidate()
         } catch is CancellationError {
             try? writer.close()
+            session.invalidateAndCancel()
             await queue.flush()
             throw ModelDownloaderError.cancelled
         } catch let error as URLError where error.code == .cancelled {
             try? writer.close()
+            session.invalidateAndCancel()
             await queue.flush()
             throw ModelDownloaderError.cancelled
         } catch {
             try? writer.close()
+            session.invalidateAndCancel()
             await queue.flush()
             throw error
         }
@@ -811,7 +815,7 @@ public enum ModelDownloader {
             throw ModelDownloaderError.httpStatus(-2)
         }
 
-        let digest: String
+        let digest: String?
         do {
             digest = try verifyFinalHash(at: partialURL, expected: expectedSHA256)
         } catch {
@@ -974,8 +978,11 @@ public enum ModelDownloader {
             }
         }
 
-        var hasher = SHA256()
-        if existingSize > 0 {
+        var hasher: SHA256?
+        if expectedSHA256.hasNonEmptyValue {
+            hasher = SHA256()
+        }
+        if existingSize > 0, hasher != nil {
             try updateHasher(&hasher, withPrefixOf: partialURL, byteCount: existingSize)
         }
 
@@ -998,7 +1005,7 @@ public enum ModelDownloader {
                 if buffer.count >= (1 << 20) {
                     let data = Data(buffer)
                     try handle.write(contentsOf: data)
-                    hasher.update(data: data)
+                    updateHasher(&hasher, data: data)
                     received += Int64(data.count)
                     emitProgressIfNeeded(
                         received: received,
@@ -1019,7 +1026,7 @@ public enum ModelDownloader {
         if !buffer.isEmpty {
             let data = Data(buffer)
             try handle.write(contentsOf: data)
-            hasher.update(data: data)
+            updateHasher(&hasher, data: data)
             received += Int64(data.count)
         }
 
@@ -1027,12 +1034,12 @@ public enum ModelDownloader {
             throw ModelDownloaderError.incompleteResponse
         }
 
-        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        if let expected = expectedSHA256?.lowercased(),
-           !expected.isEmpty,
-           expected != digest.lowercased() {
+        let digest: String?
+        do {
+            digest = try finalizeHash(&hasher, expected: expectedSHA256)
+        } catch {
             discardPartial(partialURL: partialURL, sidecarURL: sidecarURL)
-            throw ModelDownloaderError.hashMismatch(expected: expected, actual: digest)
+            throw error
         }
 
         try? FileManager.default.removeItem(at: sidecarURL)
@@ -1195,17 +1202,29 @@ public enum ModelDownloader {
         return 0
     }
 
-    private static func updateHasher(_ hasher: inout SHA256, withPrefixOf url: URL, byteCount: Int64) throws {
+    private static func updateHasher(_ hasher: inout SHA256?, withPrefixOf url: URL, byteCount: Int64) throws {
+        guard hasher != nil else { return }
+
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
         var remaining = byteCount
         while remaining > 0 {
-            let count = Int(min(Int64(1 << 20), remaining))
-            guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
-            remaining -= Int64(chunk.count)
+            let count = Int(min(Int64(sha256ChunkSize), remaining))
+            let bytesRead = try autoreleasepool {
+                guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { return 0 }
+                updateHasher(&hasher, data: chunk)
+                return chunk.count
+            }
+            guard bytesRead > 0 else { break }
+            remaining -= Int64(bytesRead)
         }
+    }
+
+    private static func updateHasher(_ hasher: inout SHA256?, data: Data) {
+        guard var activeHasher = hasher else { return }
+        activeHasher.update(data: data)
+        hasher = activeHasher
     }
 
     private static func emitProgressIfNeeded(
@@ -1223,10 +1242,20 @@ public enum ModelDownloader {
         onProgress(DownloadProgress(bytesReceived: received, totalBytes: total, bytesPerSecond: bytesPerSecond))
     }
 
-    private static func verifyFinalHash(at url: URL, expected: String?) throws -> String {
+    private static func verifyFinalHash(at url: URL, expected: String?) throws -> String? {
+        guard let expected = expected.normalizedNonEmptySHA256 else { return nil }
         let actual = try computeSHA256(at: url)
-        if let expected = expected?.lowercased(),
-           !expected.isEmpty,
+        if expected != actual.lowercased() {
+            throw ModelDownloaderError.hashMismatch(expected: expected, actual: actual)
+        }
+        return actual
+    }
+
+    private static func finalizeHash(_ hasher: inout SHA256?, expected: String?) throws -> String? {
+        guard let activeHasher = hasher else { return nil }
+        let actual = activeHasher.finalize().map { String(format: "%02x", $0) }.joined()
+        hasher = nil
+        if let expected = expected.normalizedNonEmptySHA256,
            expected != actual.lowercased() {
             throw ModelDownloaderError.hashMismatch(expected: expected, actual: actual)
         }
@@ -1239,8 +1268,12 @@ public enum ModelDownloader {
 
         var hasher = SHA256()
         while true {
-            guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
+            let bytesRead = try autoreleasepool {
+                guard let chunk = try handle.read(upToCount: sha256ChunkSize), !chunk.isEmpty else { return 0 }
+                hasher.update(data: chunk)
+                return chunk.count
+            }
+            guard bytesRead > 0 else { break }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -1257,6 +1290,19 @@ public enum ModelDownloader {
         let parts = url.pathComponents.filter { $0 != "/" }
         guard parts.count >= 5, parts[2] == "resolve" || parts[2] == "blob" else { return nil }
         return ("\(parts[0])/\(parts[1])", parts.suffix(from: 4).joined(separator: "/"))
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var hasNonEmptyValue: Bool {
+        normalizedNonEmptySHA256 != nil
+    }
+
+    var normalizedNonEmptySHA256: String? {
+        guard let value = self?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value.lowercased()
     }
 }
 

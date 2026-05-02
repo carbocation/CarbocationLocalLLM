@@ -325,7 +325,14 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
                 sizeBytes = fileSize(at: destination)
             }
 
-            let resolvedContextLength = contextLengthProbe?(destination) ?? max(0, contextLength)
+            let resolvedContextLength: Int
+            if contextLength > 0 {
+                resolvedContextLength = contextLength
+            } else {
+                resolvedContextLength = GGUFMetadata.trainingContextLength(at: destination)
+                    ?? contextLengthProbe?(destination)
+                    ?? 0
+            }
             let metadata = InstalledModel(
                 id: id,
                 displayName: displayName,
