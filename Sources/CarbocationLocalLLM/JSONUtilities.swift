@@ -90,7 +90,27 @@ public enum LLMResponseSanitizer {
         _ text: String,
         using profile: OutputSanitizationProfile
     ) -> String {
-        var output = stripThinkingBlocks(from: text, pairs: profile.thinkingPairs)
+        unwrapStructuredOutput(
+            text,
+            using: profile,
+            continuingOpenThinkingPairs: []
+        )
+    }
+
+    /// Applies model-specific cleanup when the rendered prompt already opened a thinking block.
+    public static func unwrapStructuredOutput(
+        _ text: String,
+        using profile: OutputSanitizationProfile,
+        continuingOpenThinkingPairs: [OutputDelimiterPair]
+    ) -> String {
+        guard let thinkingPrefixStripped = stripContinuingThinkingPrefix(
+            from: text,
+            pairs: continuingOpenThinkingPairs
+        ) else {
+            return ""
+        }
+
+        var output = stripThinkingBlocks(from: thinkingPrefixStripped, pairs: profile.thinkingPairs)
 
         if let marker = profile.sliceAfterMarker,
            let range = output.range(of: marker, options: .backwards) {
@@ -113,6 +133,20 @@ public enum LLMResponseSanitizer {
             output = replacingMatches(in: output, pattern: pattern, with: "")
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func stripContinuingThinkingPrefix(
+        from text: String,
+        pairs: [OutputDelimiterPair]
+    ) -> String? {
+        var output = text
+        for pair in pairs {
+            guard let closeRange = output.range(of: pair.close) else {
+                return nil
+            }
+            output.removeSubrange(output.startIndex..<closeRange.upperBound)
+        }
+        return output
     }
 
     private static func stripThinkingBlocks(

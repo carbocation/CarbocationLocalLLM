@@ -461,6 +461,17 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(profile.scrubTokens, ["<|return|>", "<|end|>"])
     }
 
+    func testOutputProfileDerivationStartEndThinkingPair() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        <|START_THINKING|>{{ reasoning }}<|END_THINKING|>{{ content }}
+        """)
+
+        XCTAssertTrue(profile.thinkingPairs.contains(OutputDelimiterPair(
+            open: "<|START_THINKING|>",
+            close: "<|END_THINKING|>"
+        )))
+    }
+
     func testOutputProfileDerivationUnknownModelIsEmpty() {
         let profile = OutputSanitizationProfile.derived(fromChatTemplate: "plain template")
 
@@ -472,6 +483,45 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
         XCTAssertEqual(
             LLMResponseSanitizer.unwrapStructuredOutput(raw, using: .empty),
+            raw
+        )
+    }
+
+    func testProfileDrivenSanitizerStripsPromptPrefilledThinkingPrefix() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(
+                "private reasoning\n</think>\nfinal answer",
+                using: profile,
+                continuingOpenThinkingPairs: [pair]
+            ),
+            "final answer"
+        )
+    }
+
+    func testProfileDrivenSanitizerReturnsEmptyForUnclosedPromptPrefilledThinking() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(
+                "private reasoning that never closed",
+                using: profile,
+                continuingOpenThinkingPairs: [pair]
+            ),
+            ""
+        )
+    }
+
+    func testProfileDrivenSanitizerDoesNotStripStrayThinkingCloseWithoutContinuation() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let raw = "</think> final answer"
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(raw, using: profile),
             raw
         )
     }
@@ -491,6 +541,22 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
         XCTAssertEqual(
             LLMResponseSanitizer.unwrapStructuredOutput(raw, using: profile),
+            "visible answer"
+        )
+    }
+
+    func testProfileDrivenSanitizerStripsStartEndThinkingBlock() {
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [
+                OutputDelimiterPair(open: "<|START_THINKING|>", close: "<|END_THINKING|>")
+            ]
+        )
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(
+                "<|START_THINKING|>hidden notes<|END_THINKING|>visible answer",
+                using: profile
+            ),
             "visible answer"
         )
     }

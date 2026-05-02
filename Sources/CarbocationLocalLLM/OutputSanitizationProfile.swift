@@ -44,7 +44,8 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
         for pair in [
             OutputDelimiterPair(open: "<think>", close: "</think>"),
             OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>"),
-            OutputDelimiterPair(open: "<|channel|>thought", close: "<|channel|>")
+            OutputDelimiterPair(open: "<|channel|>thought", close: "<|channel|>"),
+            OutputDelimiterPair(open: "<|START_THINKING|>", close: "<|END_THINKING|>")
         ] where template.contains(pair.open) && template.contains(pair.close) {
             profile.appendThinkingPair(pair)
         }

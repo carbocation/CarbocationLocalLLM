@@ -150,6 +150,68 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(prompt.contains("<end_of_turn>"))
     }
 
+    func testSwiftJinjaQwenThinkingEnabledLeavesThinkingOpen() throws {
+        let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "System",
+            user: "User",
+            bosToken: "<bos>",
+            eosToken: "<eos>",
+            enableThinking: true
+        )
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(prompt.hasSuffix("<|im_start|>assistant\n<think>\n"))
+        XCTAssertEqual(
+            LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile),
+            [OutputDelimiterPair(open: "<think>", close: "</think>")]
+        )
+    }
+
+    func testSwiftJinjaQwenThinkingDisabledUsesClosedEmptyThinkingBlock() throws {
+        let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "System",
+            user: "User",
+            bosToken: "<bos>",
+            eosToken: "<eos>",
+            enableThinking: false
+        )
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(prompt.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+        XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
+    }
+
+    func testContinuingOpenThinkingPairsIgnoresLiteralUserThinkingTagBeforeAssistantPrompt() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let renderedPrompt = """
+        <|im_start|>user
+        What does the literal <think> tag mean?<|im_end|>
+        <|im_start|>assistant
+        """
+
+        XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: renderedPrompt, profile: profile), [])
+    }
+
+    func testSwiftJinjaGemma4DefaultThinkingPromptIsClosed() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "System",
+            user: "User",
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(prompt.hasSuffix("<|turn>model\n<|channel>thought\n<channel|>"))
+        XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
+    }
+
     func testPreparedSwiftJinjaFormatterCanBeReused() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
         let formatter = try ChatTemplatePromptFormatter(template: template)
@@ -427,5 +489,10 @@ private extension CarbocationLlamaRuntimeTests {
     static var gemma4TemplateURL: URL {
         packageRoot
             .appendingPathComponent("Vendor/llama.cpp/models/templates/google-gemma-4-31B-it.jinja")
+    }
+
+    static var qwen35TemplateURL: URL {
+        packageRoot
+            .appendingPathComponent("Vendor/llama.cpp/models/templates/Qwen3.5-4B.jinja")
     }
 }

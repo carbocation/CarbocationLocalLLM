@@ -447,6 +447,10 @@ public actor LlamaEngine: LLMEngine {
         }
 
         let activeOutputProfile = promptFormatting.outputProfile
+        let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
+            in: renderedPrompt,
+            profile: activeOutputProfile
+        )
         let effectiveStopSequences = Self.mergingStopSequences(
             options.stopSequences,
             activeOutputProfile.extraStopStrings
@@ -518,7 +522,11 @@ public actor LlamaEngine: LLMEngine {
         }
         let returnedText = activeOutputProfile.isEmpty
             ? accumulatedText
-            : LLMResponseSanitizer.unwrapStructuredOutput(accumulatedText, using: activeOutputProfile)
+            : LLMResponseSanitizer.unwrapStructuredOutput(
+                accumulatedText,
+                using: activeOutputProfile,
+                continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            )
 
         cachedPromptTokens = promptTokens
         promptCacheCommitted = true
@@ -1156,6 +1164,26 @@ public actor LlamaEngine: LLMEngine {
             merged.append(stop)
         }
         return merged
+    }
+
+    static func continuingOpenThinkingPairs(
+        in renderedPrompt: String,
+        profile: OutputSanitizationProfile
+    ) -> [OutputDelimiterPair] {
+        profile.thinkingPairs.filter { pair in
+            guard let openRange = renderedPrompt.range(of: pair.open, options: .backwards) else {
+                return false
+            }
+            guard let closeRange = renderedPrompt.range(of: pair.close, options: .backwards) else {
+                return renderedPrompt[openRange.upperBound...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+            }
+            return closeRange.lowerBound < openRange.lowerBound
+                && renderedPrompt[openRange.upperBound...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+        }
     }
 
     static func trimmingAtFirstStopSequence(
