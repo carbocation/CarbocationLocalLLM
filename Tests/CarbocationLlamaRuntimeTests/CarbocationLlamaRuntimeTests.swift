@@ -197,6 +197,175 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: renderedPrompt, profile: profile), [])
     }
 
+    func testGenerationGrammarModeUsesLazyForThinkingStructuredOutput() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let options = GenerationOptions(grammar: "root ::= object", enableThinking: true)
+
+        let mode = LlamaEngine.generationGrammarMode(
+            for: options,
+            profile: profile,
+            continuingOpenThinkingPairs: [pair]
+        )
+
+        guard case .lazy(let grammar, let triggerPatterns) = mode else {
+            return XCTFail("Expected lazy grammar mode.")
+        }
+        XCTAssertEqual(grammar, "root ::= object")
+        XCTAssertTrue(triggerPatterns.contains(#"</think>\s*(\{|\[)"#))
+        XCTAssertTrue(triggerPatterns.contains(#"^\s*(\{|\[)"#))
+    }
+
+    func testGenerationGrammarModeKeepsEagerGrammarWhenThinkingDisabled() {
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [OutputDelimiterPair(open: "<think>", close: "</think>")]
+        )
+        let options = GenerationOptions(grammar: "root ::= object", enableThinking: false)
+
+        let mode = LlamaEngine.generationGrammarMode(
+            for: options,
+            profile: profile,
+            continuingOpenThinkingPairs: []
+        )
+
+        XCTAssertEqual(mode, .eager(grammar: "root ::= object"))
+    }
+
+    func testStructuredBoundaryWaitsForPromptOpenThinkingCloseBeforeJSON() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let plan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [pair],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: [pair]
+                )
+            )
+        )
+
+        XCTAssertNil(LlamaEngine.firstStructuredGenerationBoundary(
+            in: #"reasoning {"draft":true}"#,
+            stopSequences: [],
+            stopAtBalancedJSON: true,
+            plan: plan
+        ))
+        XCTAssertEqual(
+            LlamaEngine.structuredOutputPhase(in: #"reasoning {"draft":true}"#, plan: plan),
+            .thinking
+        )
+
+        let text = #"reasoning {"draft":true}</think>{"title":"x"} trailing"#
+        let boundary = LlamaEngine.firstStructuredGenerationBoundary(
+            in: text,
+            stopSequences: [],
+            stopAtBalancedJSON: true,
+            plan: plan
+        )
+
+        XCTAssertEqual(boundary?.text, #"reasoning {"draft":true}</think>{"title":"x"}"#)
+        XCTAssertEqual(boundary?.reason, "json-complete")
+    }
+
+    func testStructuredBoundarySkipsGeneratedThinkingBlockBeforeJSON() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let plan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: []
+                )
+            )
+        )
+        let text = #"<think>{"draft":true}</think>{"title":"x"} trailing"#
+
+        let boundary = LlamaEngine.firstStructuredGenerationBoundary(
+            in: text,
+            stopSequences: [],
+            stopAtBalancedJSON: true,
+            plan: plan
+        )
+
+        XCTAssertEqual(boundary?.text, #"<think>{"draft":true}</think>{"title":"x"}"#)
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                boundary?.text ?? "",
+                profile: profile,
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: true
+            ),
+            #"{"title":"x"}"#
+        )
+    }
+
+    func testStructuredBoundaryWaitsForFinalMarkerBeforeJSON() {
+        let profile = OutputSanitizationProfile(
+            sliceAfterMarker: "<|channel|>final<|message|>",
+            scrubTokens: ["<|return|>"]
+        )
+        let plan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: []
+                )
+            )
+        )
+        let text = #"analysis {"draft":true}<|channel|>final<|message|>{"title":"x"} trailing"#
+
+        let boundary = LlamaEngine.firstStructuredGenerationBoundary(
+            in: text,
+            stopSequences: [],
+            stopAtBalancedJSON: true,
+            plan: plan
+        )
+
+        XCTAssertEqual(
+            boundary?.text,
+            #"analysis {"draft":true}<|channel|>final<|message|>{"title":"x"}"#
+        )
+        XCTAssertEqual(boundary?.reason, "json-complete")
+    }
+
+    func testStructuredSanitizerThrowsWhenPromptOpenThinkingNeverCloses() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+
+        XCTAssertThrowsError(try LlamaEngine.sanitizedGeneratedText(
+            #"reasoning {"draft":true}"#,
+            profile: profile,
+            continuingOpenThinkingPairs: [pair],
+            requiresNonEmptyStructuredOutput: true
+        )) { error in
+            guard case LLMEngineError.structuredOutputPhaseFailed = error else {
+                return XCTFail("Expected structured output phase failure, got \(error).")
+            }
+        }
+    }
+
+    func testStructuredSanitizerReturnsJSONAfterPromptOpenThinkingCloses() throws {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+
+        let returned = try LlamaEngine.sanitizedGeneratedText(
+            #"reasoning</think>{"title":"x"}"#,
+            profile: profile,
+            continuingOpenThinkingPairs: [pair],
+            requiresNonEmptyStructuredOutput: true
+        )
+
+        XCTAssertEqual(returned, #"{"title":"x"}"#)
+    }
+
     func testSwiftJinjaGemma4DefaultThinkingPromptIsClosed() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
         let prompt = try ChatTemplatePromptFormatter.format(

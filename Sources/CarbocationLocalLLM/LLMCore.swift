@@ -329,6 +329,7 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
     case samplerInitFailed
     case grammarParseFailed
     case chatTemplateUnavailable(String)
+    case structuredOutputPhaseFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -350,6 +351,8 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
             return "Failed to parse the JSON grammar."
         case .chatTemplateUnavailable(let detail):
             return "Loaded model has no supported chat template. \(detail)"
+        case .structuredOutputPhaseFailed(let detail):
+            return "Structured output generation failed: \(detail)"
         }
     }
 }

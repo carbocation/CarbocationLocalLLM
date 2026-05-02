@@ -122,6 +122,45 @@ public actor LlamaEngine: LLMEngine {
         var decodeStartIndex: Int
     }
 
+    enum GenerationGrammarMode: Equatable {
+        case none
+        case eager(grammar: String)
+        case lazy(grammar: String, triggerPatterns: [String])
+
+        var logLabel: String {
+            switch self {
+            case .none:
+                return "none"
+            case .eager:
+                return "eager"
+            case .lazy:
+                return "lazy"
+            }
+        }
+
+        var usesLazyGrammar: Bool {
+            if case .lazy = self { return true }
+            return false
+        }
+    }
+
+    enum StructuredOutputPhase: String, Equatable {
+        case thinking
+        case awaitingFinal = "awaiting-final"
+        case final
+        case complete
+    }
+
+    struct StructuredOutputPlan: Equatable {
+        var profile: OutputSanitizationProfile
+        var continuingOpenThinkingPairs: [OutputDelimiterPair]
+        var grammarMode: GenerationGrammarMode
+
+        var usesLazyGrammar: Bool {
+            grammarMode.usesLazyGrammar
+        }
+    }
+
     private struct PromptFormattingResult {
         var text: String
         var mode: LLMChatTemplateMode
@@ -416,7 +455,28 @@ public actor LlamaEngine: LLMEngine {
             )
         }
 
-        let sampler = try buildSampler(options: options, vocab: vocabulary)
+        let activeOutputProfile = promptFormatting.outputProfile
+        let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
+            in: renderedPrompt,
+            profile: activeOutputProfile
+        )
+        let grammarMode = Self.generationGrammarMode(
+            for: options,
+            profile: activeOutputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+        )
+        let structuredOutputPlan = grammarMode.usesLazyGrammar
+            ? StructuredOutputPlan(
+                profile: activeOutputProfile,
+                continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+                grammarMode: grammarMode
+            )
+            : nil
+        llamaRuntimeLog.info(
+            "Generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public)"
+        )
+
+        let sampler = try buildSampler(grammarMode: grammarMode, options: options, vocab: vocabulary)
         defer { llama_sampler_free(sampler) }
 
         try preparePromptContext(promptTokens, context: context)
@@ -426,6 +486,9 @@ public actor LlamaEngine: LLMEngine {
         var accumulatedText = ""
         var sawFirstToken = false
         var lastHeartbeat = Date()
+        var structuredPhase = structuredOutputPlan.map {
+            Self.structuredOutputPhase(in: accumulatedText, plan: $0)
+        }
         let contextMaxNew = Self.maxGenerationTokens(
             contextSize: currentContextSize(),
             promptTokenCount: promptTokens.count,
@@ -446,11 +509,6 @@ public actor LlamaEngine: LLMEngine {
             )
         }
 
-        let activeOutputProfile = promptFormatting.outputProfile
-        let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
-            in: renderedPrompt,
-            profile: activeOutputProfile
-        )
         let effectiveStopSequences = Self.mergingStopSequences(
             options.stopSequences,
             activeOutputProfile.extraStopStrings
@@ -465,23 +523,50 @@ public actor LlamaEngine: LLMEngine {
                 break
             }
 
-            let piece = tokenToPiece(vocab: vocabulary, token: next)
+            let rawPiece = tokenToPiece(vocab: vocabulary, token: next)
+            let piece = rawPiece.isEmpty
+                ? tokenToPiece(vocab: vocabulary, token: next, special: true)
+                : rawPiece
             if !piece.isEmpty {
                 accumulatedData.append(piece)
                 if let decoded = String(data: accumulatedData, encoding: .utf8) {
                     accumulatedText = decoded
                 }
 
-                if let boundary = Self.firstGenerationBoundary(
-                    in: accumulatedText,
-                    stopSequences: effectiveStopSequences,
-                    stopAtBalancedJSON: options.stopAtBalancedJSON
-                ) {
+                if let plan = structuredOutputPlan {
+                    let nextPhase = Self.structuredOutputPhase(in: accumulatedText, plan: plan)
+                    if nextPhase != structuredPhase {
+                        structuredPhase = nextPhase
+                        llamaRuntimeLog.info(
+                            "Structured output phase changed: phase=\(nextPhase.rawValue, privacy: .public) rawBytes=\(accumulatedData.count, privacy: .public)"
+                        )
+                    }
+                }
+
+                let boundary = if let plan = structuredOutputPlan {
+                    Self.firstStructuredGenerationBoundary(
+                        in: accumulatedText,
+                        stopSequences: effectiveStopSequences,
+                        stopAtBalancedJSON: options.stopAtBalancedJSON,
+                        plan: plan
+                    )
+                } else {
+                    Self.firstGenerationBoundary(
+                        in: accumulatedText,
+                        stopSequences: effectiveStopSequences,
+                        stopAtBalancedJSON: options.stopAtBalancedJSON
+                    )
+                }
+
+                if let boundary {
                     accumulatedText = boundary.text
                     stopReason = boundary.reason
                 }
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" {
+                    if stopReason == "json-complete", structuredOutputPlan != nil {
+                        structuredPhase = .complete
+                    }
                     break
                 }
             }
@@ -520,13 +605,43 @@ public actor LlamaEngine: LLMEngine {
         if accumulatedText.isEmpty, !accumulatedData.isEmpty {
             accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
         }
-        let returnedText = activeOutputProfile.isEmpty
-            ? accumulatedText
-            : LLMResponseSanitizer.unwrapStructuredOutput(
+
+        if let plan = structuredOutputPlan {
+            let finalPhase = structuredPhase ?? Self.structuredOutputPhase(in: accumulatedText, plan: plan)
+            if finalPhase == .thinking || finalPhase == .awaitingFinal {
+                stopReason = finalPhase == .thinking
+                    ? "thinking-not-closed"
+                    : "structured-output-not-started"
+                llamaRuntimeLog.error(
+                    "Structured output phase failed before sanitization: phase=\(finalPhase.rawValue, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+                )
+                throw LLMEngineError.structuredOutputPhaseFailed(
+                    "Generation ended before final structured output began."
+                )
+            }
+        }
+
+        let returnedText: String
+        do {
+            returnedText = try Self.sanitizedGeneratedText(
                 accumulatedText,
-                using: activeOutputProfile,
-                continuingOpenThinkingPairs: continuingOpenThinkingPairs
+                profile: activeOutputProfile,
+                continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+                requiresNonEmptyStructuredOutput: options.grammar != nil && !activeOutputProfile.isEmpty
             )
+        } catch let error as LLMEngineError {
+            if case .structuredOutputPhaseFailed = error {
+                stopReason = "structured-sanitization-empty"
+                llamaRuntimeLog.error(
+                    "Structured output sanitization failed: rawBytes=\(accumulatedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+                )
+            }
+            throw error
+        }
+
+        llamaRuntimeLog.info(
+            "Generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+        )
 
         cachedPromptTokens = promptTokens
         promptCacheCommitted = true
@@ -1114,6 +1229,7 @@ public actor LlamaEngine: LLMEngine {
     private static let penaltyRepeat: Float = 1.3
 
     private func buildSampler(
+        grammarMode: GenerationGrammarMode,
         options: GenerationOptions,
         vocab: OpaquePointer
     ) throws -> UnsafeMutablePointer<llama_sampler> {
@@ -1127,16 +1243,32 @@ public actor LlamaEngine: LLMEngine {
             llama_sampler_init_penalties(Self.penaltyLastN, Self.penaltyRepeat, 0.0, 0.0)
         )
 
-        if let grammar = options.grammar {
-            let grammarSampler: UnsafeMutablePointer<llama_sampler>? = grammar.withCString { grammarPointer in
-                "root".withCString { rootPointer in
-                    llama_sampler_init_grammar(vocab, grammarPointer, rootPointer)
-                }
-            }
+        switch grammarMode {
+        case .none:
+            break
+        case .eager(let grammar):
+            let grammarSampler = Self.makeEagerGrammarSampler(
+                grammar: grammar,
+                vocab: vocab
+            )
             guard let grammarSampler else {
                 llama_sampler_free(chain)
                 throw LLMEngineError.grammarParseFailed
             }
+            llama_sampler_chain_add(chain, grammarSampler)
+        case .lazy(let grammar, let triggerPatterns):
+            let grammarSampler = Self.makeLazyGrammarSampler(
+                grammar: grammar,
+                triggerPatterns: triggerPatterns,
+                vocab: vocab
+            )
+            guard let grammarSampler else {
+                llama_sampler_free(chain)
+                throw LLMEngineError.grammarParseFailed
+            }
+            llamaRuntimeLog.info(
+                "Lazy grammar sampler initialized: triggerPatterns=\(triggerPatterns.count, privacy: .public)"
+            )
             llama_sampler_chain_add(chain, grammarSampler)
         }
 
@@ -1156,6 +1288,116 @@ public actor LlamaEngine: LLMEngine {
         }
 
         return chain
+    }
+
+    private static func makeEagerGrammarSampler(
+        grammar: String,
+        vocab: OpaquePointer
+    ) -> UnsafeMutablePointer<llama_sampler>? {
+        grammar.withCString { grammarPointer in
+            "root".withCString { rootPointer in
+                llama_sampler_init_grammar(vocab, grammarPointer, rootPointer)
+            }
+        }
+    }
+
+    private static func makeLazyGrammarSampler(
+        grammar: String,
+        triggerPatterns: [String],
+        vocab: OpaquePointer
+    ) -> UnsafeMutablePointer<llama_sampler>? {
+        let allocatedPatternPointers: [UnsafeMutablePointer<CChar>?] = triggerPatterns.map { strdup($0) }
+        defer {
+            for pointer in allocatedPatternPointers {
+                free(pointer)
+            }
+        }
+        guard allocatedPatternPointers.allSatisfy({ $0 != nil }) else {
+            return nil
+        }
+        var patternPointers: [UnsafePointer<CChar>?] = allocatedPatternPointers.map { pointer in
+            guard let pointer else { return nil }
+            return UnsafePointer(pointer)
+        }
+
+        return grammar.withCString { grammarPointer in
+            "root".withCString { rootPointer in
+                patternPointers.withUnsafeMutableBufferPointer { buffer in
+                    llama_sampler_init_grammar_lazy_patterns(
+                        vocab,
+                        grammarPointer,
+                        rootPointer,
+                        buffer.baseAddress,
+                        buffer.count,
+                        nil,
+                        0
+                    )
+                }
+            }
+        }
+    }
+
+    static func generationGrammarMode(
+        for options: GenerationOptions,
+        profile: OutputSanitizationProfile,
+        continuingOpenThinkingPairs: [OutputDelimiterPair]
+    ) -> GenerationGrammarMode {
+        guard let grammar = options.grammar else { return .none }
+
+        let canStageStructuredOutput = !profile.thinkingPairs.isEmpty
+            || profile.sliceAfterMarker != nil
+            || !continuingOpenThinkingPairs.isEmpty
+        guard options.enableThinking, canStageStructuredOutput else {
+            return .eager(grammar: grammar)
+        }
+
+        let triggerPatterns = lazyGrammarTriggerPatterns(
+            profile: profile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+        )
+        guard !triggerPatterns.isEmpty else {
+            return .eager(grammar: grammar)
+        }
+        return .lazy(grammar: grammar, triggerPatterns: triggerPatterns)
+    }
+
+    static func lazyGrammarTriggerPatterns(
+        profile: OutputSanitizationProfile,
+        continuingOpenThinkingPairs: [OutputDelimiterPair]
+    ) -> [String] {
+        var patterns: [String] = []
+        let jsonStartCapture = #"\s*(\{|\[)"#
+
+        for pair in continuingOpenThinkingPairs {
+            patterns.append(regexEscaped(pair.close) + jsonStartCapture)
+        }
+
+        for pair in profile.thinkingPairs {
+            patterns.append(regexEscaped(pair.close) + jsonStartCapture)
+        }
+
+        if let marker = profile.sliceAfterMarker {
+            patterns.append(regexEscaped(marker) + jsonStartCapture)
+        }
+
+        patterns.append(#"^\s*(\{|\[)"#)
+
+        var deduplicated: [String] = []
+        for pattern in patterns where !deduplicated.contains(pattern) {
+            deduplicated.append(pattern)
+        }
+        return deduplicated
+    }
+
+    static func regexEscaped(_ literal: String) -> String {
+        var escaped = ""
+        for character in literal {
+            if #"\\.^$|?*+()[]{}"#.contains(character) {
+                escaped.append("\\")
+            }
+            escaped.append(character)
+        }
+        return escaped
     }
 
     static func mergingStopSequences(_ callerStops: [String], _ templateStops: [String]) -> [String] {
@@ -1184,6 +1426,208 @@ public actor LlamaEngine: LLMEngine {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .isEmpty
         }
+    }
+
+    static func structuredOutputPhase(
+        in text: String,
+        plan: StructuredOutputPlan
+    ) -> StructuredOutputPhase {
+        guard structuredFinalOutputSearchRange(in: text, plan: plan) == nil else {
+            return .final
+        }
+        return structuredOutputIsInsideThinking(in: text, plan: plan)
+            ? .thinking
+            : .awaitingFinal
+    }
+
+    private static func structuredOutputIsInsideThinking(
+        in text: String,
+        plan: StructuredOutputPlan
+    ) -> Bool {
+        var lowerBound = text.startIndex
+        for pair in plan.continuingOpenThinkingPairs {
+            guard let closeRange = text.range(of: pair.close, range: lowerBound..<text.endIndex) else {
+                return true
+            }
+            lowerBound = closeRange.upperBound
+        }
+
+        let trimmedLowerBound = indexAfterWhitespace(in: text, from: lowerBound)
+        for pair in plan.profile.thinkingPairs where text[trimmedLowerBound...].hasPrefix(pair.open) {
+            return text.range(of: pair.close, range: trimmedLowerBound..<text.endIndex) == nil
+        }
+        return false
+    }
+
+    static func firstStructuredGenerationBoundary(
+        in text: String,
+        stopSequences: [String],
+        stopAtBalancedJSON: Bool,
+        plan: StructuredOutputPlan
+    ) -> GenerationBoundary? {
+        let phase = structuredOutputPhase(in: text, plan: plan)
+        let activeStopSequences = stopSequencesForStructuredPhase(
+            stopSequences,
+            phase: phase,
+            plan: plan
+        )
+        var boundaryIndex: String.Index?
+        var boundaryText: String?
+        var reason: String?
+
+        if let stopRange = firstStopSequenceRange(in: text, stopSequences: activeStopSequences) {
+            boundaryIndex = stopRange.lowerBound
+            boundaryText = String(text[..<stopRange.lowerBound])
+            reason = "stop-sequence"
+        }
+
+        if stopAtBalancedJSON,
+           let finalSearchRange = structuredFinalOutputSearchRange(in: text, plan: plan),
+           let jsonRange = balancedJSONValueRange(in: text, searchRange: finalSearchRange),
+           boundaryIndex.map({ jsonRange.upperBound < $0 }) ?? true {
+            boundaryIndex = jsonRange.upperBound
+            boundaryText = String(text[..<jsonRange.upperBound])
+            reason = "json-complete"
+        }
+
+        guard boundaryIndex != nil, let boundaryText, let reason else {
+            return nil
+        }
+        return GenerationBoundary(text: boundaryText, reason: reason)
+    }
+
+    private static func stopSequencesForStructuredPhase(
+        _ stopSequences: [String],
+        phase: StructuredOutputPhase,
+        plan: StructuredOutputPlan
+    ) -> [String] {
+        guard phase == .thinking || phase == .awaitingFinal else {
+            return stopSequences
+        }
+
+        let structuralStops = Set(
+            plan.profile.thinkingPairs.map(\.close)
+                + plan.continuingOpenThinkingPairs.map(\.close)
+                + [plan.profile.sliceAfterMarker].compactMap { $0 }
+        )
+        return stopSequences.filter { !structuralStops.contains($0) }
+    }
+
+    static func structuredFinalOutputSearchRange(
+        in text: String,
+        plan: StructuredOutputPlan
+    ) -> Range<String.Index>? {
+        guard !text.isEmpty else { return nil }
+
+        var lowerBound = text.startIndex
+        for pair in plan.continuingOpenThinkingPairs {
+            guard let closeRange = text.range(of: pair.close, range: lowerBound..<text.endIndex) else {
+                return nil
+            }
+            lowerBound = closeRange.upperBound
+        }
+
+        guard let afterThinkingBlocks = indexAfterGeneratedThinkingPrefix(
+            in: text,
+            from: lowerBound,
+            pairs: plan.profile.thinkingPairs
+        ) else {
+            return nil
+        }
+        lowerBound = afterThinkingBlocks
+
+        if let jsonStart = immediateJSONStartIndex(in: text, from: lowerBound) {
+            return jsonStart..<text.endIndex
+        }
+
+        if let marker = plan.profile.sliceAfterMarker,
+           let markerRange = text.range(of: marker, range: lowerBound..<text.endIndex) {
+            lowerBound = markerRange.upperBound
+            guard let afterMarkerThinkingBlocks = indexAfterGeneratedThinkingPrefix(
+                in: text,
+                from: lowerBound,
+                pairs: plan.profile.thinkingPairs
+            ) else {
+                return nil
+            }
+            lowerBound = afterMarkerThinkingBlocks
+
+            if let jsonStart = immediateJSONStartIndex(in: text, from: lowerBound) {
+                return jsonStart..<text.endIndex
+            }
+        }
+
+        return nil
+    }
+
+    private static func indexAfterGeneratedThinkingPrefix(
+        in text: String,
+        from start: String.Index,
+        pairs: [OutputDelimiterPair]
+    ) -> String.Index? {
+        var lowerBound = indexAfterWhitespace(in: text, from: start)
+        var strippedBlock = true
+
+        while strippedBlock {
+            strippedBlock = false
+            for pair in pairs where text[lowerBound...].hasPrefix(pair.open) {
+                guard let closeRange = text.range(of: pair.close, range: lowerBound..<text.endIndex) else {
+                    return nil
+                }
+                lowerBound = indexAfterWhitespace(in: text, from: closeRange.upperBound)
+                strippedBlock = true
+                break
+            }
+        }
+
+        return lowerBound
+    }
+
+    private static func immediateJSONStartIndex(
+        in text: String,
+        from start: String.Index
+    ) -> String.Index? {
+        let lowerBound = indexAfterWhitespace(in: text, from: start)
+        guard lowerBound < text.endIndex else { return nil }
+        return text[lowerBound] == "{" || text[lowerBound] == "["
+            ? lowerBound
+            : nil
+    }
+
+    private static func indexAfterWhitespace(
+        in text: String,
+        from start: String.Index
+    ) -> String.Index {
+        var index = start
+        while index < text.endIndex, text[index].isWhitespace {
+            index = text.index(after: index)
+        }
+        return index
+    }
+
+    static func sanitizedGeneratedText(
+        _ accumulatedText: String,
+        profile: OutputSanitizationProfile,
+        continuingOpenThinkingPairs: [OutputDelimiterPair],
+        requiresNonEmptyStructuredOutput: Bool
+    ) throws -> String {
+        let returnedText = profile.isEmpty
+            ? accumulatedText
+            : LLMResponseSanitizer.unwrapStructuredOutput(
+                accumulatedText,
+                using: profile,
+                continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            )
+
+        if requiresNonEmptyStructuredOutput,
+           !accumulatedText.isEmpty,
+           returnedText.isEmpty {
+            throw LLMEngineError.structuredOutputPhaseFailed(
+                "Sanitization removed all generated structured output."
+            )
+        }
+
+        return returnedText
     }
 
     static func trimmingAtFirstStopSequence(
@@ -1243,13 +1687,20 @@ public actor LlamaEngine: LLMEngine {
     }
 
     static func balancedJSONValueRange(in text: String) -> Range<String.Index>? {
+        balancedJSONValueRange(in: text, searchRange: text.startIndex..<text.endIndex)
+    }
+
+    static func balancedJSONValueRange(
+        in text: String,
+        searchRange: Range<String.Index>
+    ) -> Range<String.Index>? {
         var startIndex: String.Index?
         var expectedClosers: [Character] = []
         var inString = false
         var escaped = false
 
-        var index = text.startIndex
-        while index < text.endIndex {
+        var index = searchRange.lowerBound
+        while index < searchRange.upperBound {
             let character = text[index]
 
             if startIndex == nil {
