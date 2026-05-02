@@ -37,6 +37,31 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testContextBatchCandidatesFallBackByHalving() {
+        XCTAssertEqual(
+            LlamaEngine.contextBatchCandidates(contextSize: 4_096, batchSizeLimit: 64),
+            [64, 32, 16, 8, 4, 2, 1]
+        )
+        XCTAssertEqual(
+            LlamaEngine.contextBatchCandidates(contextSize: 32, batchSizeLimit: 512),
+            [32, 16, 8, 4, 2, 1]
+        )
+    }
+
+    func testContextParamsClampBatchAndMicroBatchTogether() {
+        let params = LlamaEngine.contextParams(
+            contextSize: 4_096,
+            batchSize: 64,
+            threads: 2
+        )
+
+        XCTAssertEqual(params.n_ctx, 4_096)
+        XCTAssertEqual(params.n_batch, 64)
+        XCTAssertEqual(params.n_ubatch, 64)
+        XCTAssertEqual(params.n_threads, 2)
+        XCTAssertEqual(params.n_threads_batch, 2)
+    }
+
     func testGenerationBudgetMath() {
         XCTAssertEqual(
             LlamaEngine.maxGenerationTokens(contextSize: 4_096, promptTokenCount: 3_000, reserve: 1_024),

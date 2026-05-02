@@ -87,11 +87,11 @@ private struct PromptPane: View {
         .demoScrollDismissesKeyboardInteractively()
 #if os(iOS)
         .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
+            ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") {
                     focusedEditor = nil
                 }
+                .disabled(focusedEditor == nil)
             }
         }
 #endif
@@ -124,26 +124,42 @@ private struct PromptPane: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("System")
                 .font(.headline)
+#if os(iOS)
+            TextField("System prompt", text: $state.systemPrompt, axis: .vertical)
+                .lineLimit(3...6)
+                .textFieldStyle(.plain)
+                .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
+                .demoTextEditorInput()
+                .focused($focusedEditor, equals: .system)
+                .padding(8)
+                .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+#else
             TextEditor(text: $state.systemPrompt)
                 .frame(minHeight: 80)
                 .demoTextEditorInput()
-#if os(iOS)
-                .focused($focusedEditor, equals: .system)
-#endif
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+#endif
 
             Text("Prompt")
                 .font(.headline)
                 .padding(.top, 8)
+#if os(iOS)
+            TextField("Prompt", text: $state.prompt, axis: .vertical)
+                .lineLimit(6...10)
+                .textFieldStyle(.plain)
+                .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+                .demoTextEditorInput()
+                .focused($focusedEditor, equals: .prompt)
+                .padding(8)
+                .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+#else
             TextEditor(text: $state.prompt)
                 .frame(minHeight: 150)
                 .demoTextEditorInput()
-#if os(iOS)
-                .focused($focusedEditor, equals: .prompt)
-#endif
                 .padding(8)
                 .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+#endif
         }
     }
 
@@ -422,6 +438,9 @@ private extension View {
 #if os(iOS)
         textInputAutocapitalization(.sentences)
             .autocorrectionDisabled()
+            .keyboardType(.asciiCapable)
+            .textContentType(nil)
+            .submitLabel(.done)
 #else
         self
 #endif

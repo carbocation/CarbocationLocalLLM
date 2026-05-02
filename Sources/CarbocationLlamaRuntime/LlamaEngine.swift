@@ -1,10 +1,17 @@
 import CarbocationLocalLLM
 import Foundation
+import OSLog
 import llama
+
+private let llamaRuntimeLog = Logger(
+    subsystem: "com.carbocation.CarbocationLocalLLM",
+    category: "LlamaRuntime"
+)
 
 #if os(iOS)
 private let platformDefaultGPULayerCount: Int32 = 0
-private let platformDefaultBatchSizeLimit = 512
+// Large mobile GGUFs can fit model + KV memory but fail llama.cpp's 512-token graph reservation.
+private let platformDefaultBatchSizeLimit = 64
 private let platformMaximumContextSize = 4_096
 #else
 private let platformDefaultGPULayerCount: Int32 = 999
@@ -244,18 +251,34 @@ public actor LlamaEngine: LLMEngine {
             trainingContext: trainingContext
         )
 
-        var contextParams = llama_context_default_params()
-        contextParams.n_ctx = UInt32(chosenContext)
-        contextParams.n_batch = UInt32(min(chosenContext, max(1, configuration.batchSizeLimit)))
-
         let threads = configuration.threadCount
             ?? Int32(max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
-        contextParams.n_threads = threads
-        contextParams.n_threads_batch = threads
 
-        guard let loadedContext = llama_init_from_model(loadedModel, contextParams) else {
+        let batchCandidates = Self.contextBatchCandidates(
+            contextSize: chosenContext,
+            batchSizeLimit: configuration.batchSizeLimit
+        )
+        var attemptedBatchSizes: [Int] = []
+        var initializedContext: OpaquePointer?
+        for batchSize in batchCandidates {
+            attemptedBatchSizes.append(batchSize)
+            let contextParams = Self.contextParams(
+                contextSize: chosenContext,
+                batchSize: batchSize,
+                threads: threads
+            )
+            if let context = llama_init_from_model(loadedModel, contextParams) {
+                initializedContext = context
+                break
+            }
+        }
+
+        guard let loadedContext = initializedContext else {
             llama_model_free(loadedModel)
-            throw LLMEngineError.contextInitFailed("llama_init_from_model returned null")
+            let attempted = attemptedBatchSizes.map(String.init).joined(separator: ", ")
+            throw LLMEngineError.contextInitFailed(
+                "llama_init_from_model returned null (context=\(chosenContext), attempted batch sizes: \(attempted))"
+            )
         }
 
         guard let loadedVocabulary = llama_model_get_vocab(loadedModel) else {
@@ -617,15 +640,26 @@ public actor LlamaEngine: LLMEngine {
     private func applyChatTemplate(system: String, user: String) throws -> (text: String, mode: LLMChatTemplateMode) {
         if let chatTemplate,
            let formatted = formatMessages(template: chatTemplate, system: system, user: user) {
+            Self.logChatTemplateSelection(
+                mode: .embedded,
+                descriptor: loadedDescriptor,
+                hasEmbeddedTemplate: true
+            )
             return (formatted, .embedded)
         }
 
-        return try Self.fallbackPrompt(
+        let fallback = try Self.fallbackPrompt(
             system: system,
             user: user,
             embeddedTemplate: chatTemplate,
             descriptor: loadedDescriptor
         )
+        Self.logChatTemplateSelection(
+            mode: fallback.mode,
+            descriptor: loadedDescriptor,
+            hasEmbeddedTemplate: chatTemplate != nil
+        )
+        return fallback
     }
 
     static func fallbackPrompt(
@@ -696,6 +730,18 @@ public actor LlamaEngine: LLMEngine {
             return "Embedded template exists but its family is not supported."
         }
         return "The GGUF metadata did not expose a known template family."
+    }
+
+    private static func logChatTemplateSelection(
+        mode: LLMChatTemplateMode,
+        descriptor: LlamaModelDescriptor?,
+        hasEmbeddedTemplate: Bool
+    ) {
+        let source = mode == .embedded ? "embedded" : "fallback"
+        let modelName = descriptor?.displayName ?? descriptor?.filename ?? "unknown"
+        llamaRuntimeLog.info(
+            "Chat template selected: source=\(source, privacy: .public) mode=\(mode.rawValue, privacy: .public) embeddedTemplatePresent=\(hasEmbeddedTemplate, privacy: .public) model=\(modelName, privacy: .public)"
+        )
     }
 
     private static func renderFallbackPrompt(
@@ -1025,6 +1071,35 @@ public actor LlamaEngine: LLMEngine {
         let modelUpperBound = normalizedTrainingContext > 0 ? normalizedTrainingContext : requested
         let upperBound = min(modelUpperBound, platformMaximumContextSize)
         return max(LlamaContextPolicy.minimumContext, min(requested, upperBound))
+    }
+
+    static func contextBatchCandidates(contextSize: Int, batchSizeLimit: Int) -> [Int] {
+        let first = min(max(1, contextSize), max(1, batchSizeLimit))
+        var candidates = [first]
+        var next = first
+        while next > 1 {
+            next = max(1, next / 2)
+            if candidates.last != next {
+                candidates.append(next)
+            }
+        }
+        return candidates
+    }
+
+    static func contextParams(
+        contextSize: Int,
+        batchSize: Int,
+        threads: Int32
+    ) -> llama_context_params {
+        var params = llama_context_default_params()
+        let clampedContext = max(1, contextSize)
+        let clampedBatch = min(clampedContext, max(1, batchSize))
+        params.n_ctx = UInt32(clampedContext)
+        params.n_batch = UInt32(clampedBatch)
+        params.n_ubatch = UInt32(clampedBatch)
+        params.n_threads = threads
+        params.n_threads_batch = threads
+        return params
     }
 
     private struct CalgacusSelectedPayload {
