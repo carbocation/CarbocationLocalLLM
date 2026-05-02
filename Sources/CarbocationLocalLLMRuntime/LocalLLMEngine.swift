@@ -331,6 +331,131 @@ public actor LocalLLMEngine: LLMEngine {
     }
 }
 
+public actor LocalLLMSession {
+    private let system: String
+    private var loadedInfo: LocalLLMLoadedModelInfo?
+    private var llamaEngine: LlamaEngine?
+    private var appleIntelligenceSession: AppleIntelligenceSession?
+
+    public init(
+        selection: LLMModelSelection,
+        system: String = "",
+        from library: ModelLibrary,
+        requestedContext: Int,
+        configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration()
+    ) async throws {
+        self.system = system
+
+        switch selection {
+        case .installed(let id):
+            let model = await MainActor.run {
+                library.model(id: id)
+            }
+            let root = await MainActor.run {
+                library.root
+            }
+            guard let model else {
+                throw LocalLLMEngineError.installedModelNotFound(id)
+            }
+
+            let engine = LlamaEngine(configuration: configuration.makeLlamaConfiguration())
+            let loaded = try await engine.load(
+                model: model,
+                from: root,
+                requestedContext: requestedContext
+            )
+            self.llamaEngine = engine
+            self.loadedInfo = LocalLLMLoadedModelInfo(
+                selection: selection,
+                displayName: loaded.displayName ?? loaded.filename,
+                contextSize: loaded.contextSize,
+                trainingContextSize: loaded.trainingContextSize,
+                supportsGrammar: true,
+                usesExactTokenCounts: true
+            )
+
+        case .system(.appleIntelligence):
+            let availability = AppleIntelligenceEngine.availability()
+            guard availability.isAvailable else {
+                throw LocalLLMEngineError.unavailableSystemModel(.appleIntelligence)
+            }
+
+            self.appleIntelligenceSession = AppleIntelligenceSession(
+                system: system,
+                configuration: configuration.makeAppleIntelligenceConfiguration()
+            )
+            self.loadedInfo = LocalLLMLoadedModelInfo(
+                selection: selection,
+                displayName: AppleIntelligenceEngine.displayName,
+                contextSize: availability.contextSize,
+                trainingContextSize: availability.contextSize,
+                supportsGrammar: false,
+                usesExactTokenCounts: false
+            )
+        }
+    }
+
+    public func currentLoadedModelInfo() -> LocalLLMLoadedModelInfo? {
+        loadedInfo
+    }
+
+    public func currentSelection() -> LLMModelSelection? {
+        loadedInfo?.selection
+    }
+
+    public func currentModelID() -> UUID? {
+        guard case .installed(let id) = loadedInfo?.selection else { return nil }
+        return id
+    }
+
+    public func currentContextSize() -> Int {
+        loadedInfo?.contextSize ?? 0
+    }
+
+    public func generate(
+        prompt: String,
+        options: GenerationOptions,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            guard let llamaEngine else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            return try await llamaEngine.generate(
+                system: system,
+                prompt: prompt,
+                options: options,
+                onEvent: onEvent
+            )
+        case .system(.appleIntelligence):
+            guard let appleIntelligenceSession else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            do {
+                return try await appleIntelligenceSession.generate(
+                    prompt: prompt,
+                    options: options,
+                    onEvent: onEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func unload() async {
+        loadedInfo = nil
+        await llamaEngine?.unload()
+        llamaEngine = nil
+        appleIntelligenceSession = nil
+    }
+}
+
 public enum LocalLLMRuntimeSmoke {
     public static func defaultModelParameterSummary() -> String {
         LlamaRuntimeSmoke.defaultModelParameterSummary()

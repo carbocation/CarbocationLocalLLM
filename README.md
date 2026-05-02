@@ -212,6 +212,49 @@ let response = try await LocalLLMEngine.shared.generate(
 
 Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
+### Keep a session live between queries
+
+`LocalLLMEngine.shared.generate(system:prompt:options:)` is still the right default for one-shot and extraction workflows. It keeps a loaded llama model/context available internally, but the API remains stateless across requests.
+
+For workflows that should explicitly keep provider state live, create a `LocalLLMSession` and hold it for the interaction:
+
+```swift
+let session = try await LocalLLMSession(
+    selection: plan.selection,
+    system: "You are a helpful assistant.",
+    from: library,
+    requestedContext: plan.requestedContext
+)
+
+let first = try await session.generate(
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 512)
+) { _ in }
+
+let followUp = try await session.generate(
+    prompt: "Now summarize that in one sentence.",
+    options: GenerationOptions(maxOutputTokens: 128)
+) { _ in }
+
+await session.unload()
+```
+
+For installed GGUF models, this owns a dedicated loaded llama engine for the session. For Apple Intelligence, this uses a reusable Foundation Models session instead of creating one per request.
+
+### Enable thinking templates
+
+`GenerationOptions.enableThinking` defaults to `false`, preserving extraction-safe behavior for models whose chat templates support reasoning channels. Apps that want model-native thinking behavior can opt in per request:
+
+```swift
+let response = try await LocalLLMEngine.shared.generate(
+    system: "Solve carefully, then return the final answer.",
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 1024, enableThinking: true)
+) { _ in }
+```
+
+The option is passed through to embedded Jinja chat templates as `enable_thinking`. Templates that do not use that variable ignore it.
+
 ### Constrain JSON output
 
 For JSON extraction, branch on `loaded.supportsGrammar`:
@@ -235,7 +278,7 @@ let response = try await LocalLLMEngine.shared.generate(
 ) { _ in }
 ```
 
-GGUF models use grammar-constrained generation. Apple Intelligence omits the grammar, leans on prompt guidance, and uses `stopAtBalancedJSON` so the shared post-processor can trim at a complete JSON object.
+GGUF models use grammar-constrained generation. Apple Intelligence omits the grammar, leans on prompt guidance, and uses `stopAtBalancedJSON` so the shared post-processor can trim at a complete top-level JSON object or array.
 
 ### Install a GGUF model
 

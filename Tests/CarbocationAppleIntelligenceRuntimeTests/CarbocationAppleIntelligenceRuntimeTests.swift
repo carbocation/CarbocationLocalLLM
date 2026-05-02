@@ -95,6 +95,23 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         XCTAssertEqual(processed.stopReason, "json-complete")
     }
 
+    func testPostProcessorSlicesBalancedJSONValueAfterPreamble() {
+        let options = GenerationOptions(stopAtBalancedJSON: true)
+        let object = AppleIntelligenceResponsePostProcessor.process(
+            #"Here is JSON: {"items":[{"ok":true}]} trailing"#,
+            options: options
+        )
+        let array = AppleIntelligenceResponsePostProcessor.process(
+            #"Result: [{"ok":true},{"ok":false}] trailing"#,
+            options: options
+        )
+
+        XCTAssertEqual(object.text, #"{"items":[{"ok":true}]}"#)
+        XCTAssertEqual(object.stopReason, "json-complete")
+        XCTAssertEqual(array.text, #"[{"ok":true},{"ok":false}]"#)
+        XCTAssertEqual(array.stopReason, "json-complete")
+    }
+
     func testPostProcessorChoosesEarliestBoundary() {
         let options = GenerationOptions(
             stopSequences: ["STOP"],
@@ -142,6 +159,24 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
                 options: .extractionSafe
             ) { _ in }
             XCTFail("Expected Apple Intelligence generation to be unavailable.")
+        } catch let error as AppleIntelligenceEngineError {
+            guard case .unavailable(.unavailable(.sdkUnavailable)) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSessionThrowsUnavailableWhenBuiltWithoutFoundationModels() async {
+        let session = AppleIntelligenceSession(system: "You are concise.")
+
+        do {
+            _ = try await session.generate(
+                prompt: "Say hello.",
+                options: .extractionSafe
+            ) { _ in }
+            XCTFail("Expected Apple Intelligence session generation to be unavailable.")
         } catch let error as AppleIntelligenceEngineError {
             guard case .unavailable(.unavailable(.sdkUnavailable)) = error else {
                 return XCTFail("Unexpected error: \(error)")

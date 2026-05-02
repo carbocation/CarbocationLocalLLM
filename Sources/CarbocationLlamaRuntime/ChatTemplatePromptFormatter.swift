@@ -2,7 +2,7 @@ import CarbocationLocalLLM
 import Foundation
 import Jinja
 
-enum ChatTemplatePromptFormatter {
+struct ChatTemplatePromptFormatter {
     enum Error: Swift.Error, LocalizedError {
         case notJinjaTemplate
         case missingUserContent
@@ -17,21 +17,43 @@ enum ChatTemplatePromptFormatter {
         }
     }
 
+    private let template: Template
+
+    init(template source: String) throws {
+        guard source.contains("{%") || source.contains("{{") || source.contains("{#") else {
+            throw Error.notJinjaTemplate
+        }
+
+        self.template = try Template(
+            source,
+            with: Template.Options(lstripBlocks: true, trimBlocks: true)
+        )
+    }
+
     static func format(
         template source: String,
         system: String,
         user: String,
         bosToken: String,
-        eosToken: String
+        eosToken: String,
+        enableThinking: Bool = false
     ) throws -> String {
-        guard source.contains("{%") || source.contains("{{") || source.contains("{#") else {
-            throw Error.notJinjaTemplate
-        }
-
-        let template = try Template(
-            source,
-            with: Template.Options(lstripBlocks: true, trimBlocks: true)
+        try Self(template: source).format(
+            system: system,
+            user: user,
+            bosToken: bosToken,
+            eosToken: eosToken,
+            enableThinking: enableThinking
         )
+    }
+
+    func format(
+        system: String,
+        user: String,
+        bosToken: String,
+        eosToken: String,
+        enableThinking: Bool = false
+    ) throws -> String {
         let context: [String: Value] = [
             "messages": [
                 [
@@ -46,7 +68,7 @@ enum ChatTemplatePromptFormatter {
             "bos_token": .string(bosToken),
             "eos_token": .string(eosToken),
             "add_generation_prompt": true,
-            "enable_thinking": false,
+            "enable_thinking": .boolean(enableThinking),
             "tools": []
         ]
 

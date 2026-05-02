@@ -109,6 +109,17 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil(options.seed)
         XCTAssertEqual(options.stopSequences, [])
         XCTAssertFalse(options.stopAtBalancedJSON)
+        XCTAssertFalse(options.enableThinking)
+    }
+
+    func testGenerationOptionsOnlyEncodesEnableThinkingWhenTrue() throws {
+        let data = try JSONEncoder().encode(GenerationOptions(enableThinking: true))
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        XCTAssertEqual(object?["enableThinking"] as? Bool, true)
+        XCTAssertNil((try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(GenerationOptions())
+        ) as? [String: Any])?["enableThinking"])
     }
 
     @MainActor

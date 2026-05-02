@@ -198,25 +198,28 @@ public enum AppleIntelligenceResponsePostProcessor {
         _ text: String,
         options: CarbocationLocalLLM.GenerationOptions
     ) -> AppleIntelligenceProcessedResponse {
-        var stopIndex: String.Index?
+        var boundaryIndex: String.Index?
+        var processedText: String?
         var stopReason: String?
 
         if let range = firstStopSequenceRange(in: text, stopSequences: options.stopSequences) {
-            stopIndex = range.lowerBound
+            boundaryIndex = range.lowerBound
+            processedText = String(text[..<range.lowerBound])
             stopReason = "stop-sequence"
         }
 
         if options.stopAtBalancedJSON,
-           let jsonEnd = endIndexAfterBalancedJSONObject(in: text),
-           stopIndex.map({ jsonEnd < $0 }) ?? true {
-            stopIndex = jsonEnd
+           let jsonRange = balancedJSONValueRange(in: text),
+           boundaryIndex.map({ jsonRange.upperBound < $0 }) ?? true {
+            boundaryIndex = jsonRange.upperBound
+            processedText = String(text[jsonRange])
             stopReason = "json-complete"
         }
 
-        guard let stopIndex else {
+        guard boundaryIndex != nil, let processedText else {
             return AppleIntelligenceProcessedResponse(text: text, stopReason: nil)
         }
-        return AppleIntelligenceProcessedResponse(text: String(text[..<stopIndex]), stopReason: stopReason)
+        return AppleIntelligenceProcessedResponse(text: processedText, stopReason: stopReason)
     }
 
     public static func firstStopSequenceRange(
@@ -230,8 +233,12 @@ public enum AppleIntelligenceResponsePostProcessor {
     }
 
     public static func endIndexAfterBalancedJSONObject(in text: String) -> String.Index? {
-        var started = false
-        var depth = 0
+        balancedJSONValueRange(in: text)?.upperBound
+    }
+
+    public static func balancedJSONValueRange(in text: String) -> Range<String.Index>? {
+        var startIndex: String.Index?
+        var expectedClosers: [Character] = []
         var inString = false
         var escaped = false
 
@@ -239,10 +246,13 @@ public enum AppleIntelligenceResponsePostProcessor {
         while index < text.endIndex {
             let character = text[index]
 
-            if !started {
+            if startIndex == nil {
                 if character == "{" {
-                    started = true
-                    depth = 1
+                    startIndex = index
+                    expectedClosers = ["}"]
+                } else if character == "[" {
+                    startIndex = index
+                    expectedClosers = ["]"]
                 }
                 index = text.index(after: index)
                 continue
@@ -268,11 +278,24 @@ public enum AppleIntelligenceResponsePostProcessor {
 
             if !inString {
                 if character == "{" {
-                    depth += 1
+                    expectedClosers.append("}")
+                } else if character == "[" {
+                    expectedClosers.append("]")
                 } else if character == "}" {
-                    depth -= 1
-                    if depth == 0 {
-                        return text.index(after: index)
+                    guard expectedClosers.last == "}" else {
+                        return nil
+                    }
+                    expectedClosers.removeLast()
+                    if expectedClosers.isEmpty, let startIndex {
+                        return startIndex..<text.index(after: index)
+                    }
+                } else if character == "]" {
+                    guard expectedClosers.last == "]" else {
+                        return nil
+                    }
+                    expectedClosers.removeLast()
+                    if expectedClosers.isEmpty, let startIndex {
+                        return startIndex..<text.index(after: index)
                     }
                 }
             }
@@ -357,6 +380,55 @@ public actor AppleIntelligenceEngine: LLMEngine {
         }
         return try await generateWithFoundationModels(
             system: system,
+            prompt: prompt,
+            options: options,
+            resolvedOptions: resolvedOptions,
+            onEvent: onEvent
+        )
+        #else
+        throw AppleIntelligenceEngineError.unavailable(.unavailable(.sdkUnavailable))
+        #endif
+    }
+}
+
+public actor AppleIntelligenceSession {
+    private let system: String
+    private let configuration: AppleIntelligenceEngineConfiguration
+    private var foundationSessionStorage: Any?
+
+    public init(
+        system: String = "",
+        configuration: AppleIntelligenceEngineConfiguration = AppleIntelligenceEngineConfiguration()
+    ) {
+        self.system = system
+        self.configuration = configuration
+    }
+
+    public func currentContextSize() -> Int {
+        AppleIntelligenceEngine.availability().contextSize
+    }
+
+    public func generate(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        let availability = AppleIntelligenceEngine.availability()
+        guard availability.isAvailable else {
+            throw AppleIntelligenceEngineError.unavailable(availability)
+        }
+
+        let resolvedOptions = AppleIntelligenceOptionsMapper.resolve(options)
+        if configuration.unsupportedFeatureBehavior == .fail,
+           !resolvedOptions.unsupportedFeatures.isEmpty {
+            throw AppleIntelligenceEngineError.unsupportedFeatures(resolvedOptions.unsupportedFeatures)
+        }
+
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw AppleIntelligenceEngineError.unavailable(.unavailable(.operatingSystemUnavailable))
+        }
+        return try await generateWithFoundationModels(
             prompt: prompt,
             options: options,
             resolvedOptions: resolvedOptions,
@@ -479,6 +551,121 @@ extension AppleIntelligenceEngine {
     }
 
     private nonisolated func stopReasonForCompletedResponse(
+        result: String,
+        generatedTokens: Int,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) -> String {
+        if let maxOutputTokens = options.maxOutputTokens,
+           maxOutputTokens > 0,
+           generatedTokens >= maxOutputTokens {
+            return "max-tokens"
+        }
+        return "complete"
+    }
+}
+
+extension AppleIntelligenceSession {
+    @available(iOS 26.0, macOS 26.0, *)
+    private func generateWithFoundationModels(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        resolvedOptions: AppleIntelligenceResolvedOptions,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        onEvent(.requestSent)
+        let startedAt = Date()
+        let session = foundationModelsSession(options: options)
+
+        let response = try await session.respond(
+            to: prompt,
+            options: Self.foundationModelsOptions(from: resolvedOptions)
+        )
+        let processed = AppleIntelligenceResponsePostProcessor.process(response.content, options: options)
+        let result = processed.text
+        let duration = Date().timeIntervalSince(startedAt)
+        let promptTokens = TokenEstimator.estimate(text: system) + TokenEstimator.estimate(text: prompt)
+        let generatedTokens = TokenEstimator.estimate(text: result)
+        let stopReason = processed.stopReason ?? Self.stopReasonForCompletedResponse(
+            result: result,
+            generatedTokens: generatedTokens,
+            options: options
+        )
+
+        onEvent(.firstByteReceived(after: duration))
+        if !result.isEmpty {
+            onEvent(.tokenChunk(preview: String(result.suffix(60)), bytesSoFar: result.utf8.count))
+        }
+        onEvent(.generationStats(
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            stopReason: stopReason,
+            templateMode: .unavailable
+        ))
+        onEvent(.done(totalBytes: result.utf8.count, duration: duration))
+
+        return result
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private func foundationModelsSession(options: CarbocationLocalLLM.GenerationOptions) -> LanguageModelSession {
+        if let session = foundationSessionStorage as? LanguageModelSession {
+            return session
+        }
+
+        let instructions = Self.instructions(system: system, options: options)
+        let session: LanguageModelSession
+        if instructions.isEmpty {
+            session = LanguageModelSession()
+        } else {
+            session = LanguageModelSession(instructions: instructions)
+        }
+        foundationSessionStorage = session
+        return session
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private nonisolated static func foundationModelsOptions(
+        from options: AppleIntelligenceResolvedOptions
+    ) -> FoundationModels.GenerationOptions {
+        FoundationModels.GenerationOptions(
+            sampling: foundationModelsSampling(from: options.sampling),
+            temperature: options.temperature,
+            maximumResponseTokens: options.maximumResponseTokens
+        )
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private nonisolated static func foundationModelsSampling(
+        from policy: AppleIntelligenceSamplingPolicy
+    ) -> FoundationModels.GenerationOptions.SamplingMode? {
+        switch policy {
+        case .systemDefault:
+            return nil
+        case .greedy:
+            return .greedy
+        case .randomTopK(let top, let seed):
+            return .random(top: top, seed: seed)
+        case .randomProbabilityThreshold(let probabilityThreshold, let seed):
+            return .random(probabilityThreshold: probabilityThreshold, seed: seed)
+        }
+    }
+
+    private nonisolated static func instructions(
+        system: String,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) -> String {
+        var parts: [String] = []
+        let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSystem.isEmpty {
+            parts.append(trimmedSystem)
+        }
+        if options.grammar != nil || options.stopAtBalancedJSON {
+            parts.append("Follow the requested output format exactly. If the prompt asks for JSON, return only valid JSON with no surrounding prose.")
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private nonisolated static func stopReasonForCompletedResponse(
         result: String,
         generatedTokens: Int,
         options: CarbocationLocalLLM.GenerationOptions

@@ -10,6 +10,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
     public var stopAtBalancedJSON: Bool
     /// Optional GBNF grammar for token-constrained generation.
     public var grammar: String?
+    /// Enables model-native thinking/reasoning channels when the chat template supports them.
+    public var enableThinking: Bool
 
     public init(
         temperature: Double? = nil,
@@ -19,7 +21,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         seed: UInt32? = nil,
         stopSequences: [String] = [],
         stopAtBalancedJSON: Bool = false,
-        grammar: String? = nil
+        grammar: String? = nil,
+        enableThinking: Bool = false
     ) {
         self.temperature = temperature
         self.topP = topP
@@ -29,6 +32,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         self.stopSequences = stopSequences
         self.stopAtBalancedJSON = stopAtBalancedJSON
         self.grammar = grammar
+        self.enableThinking = enableThinking
     }
 
     public static var extractionSafe: GenerationOptions {
@@ -50,6 +54,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         case stopSequences
         case stopAtBalancedJSON
         case grammar
+        case enableThinking
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,6 +67,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
         stopAtBalancedJSON = try container.decodeIfPresent(Bool.self, forKey: .stopAtBalancedJSON) ?? false
         grammar = try container.decodeIfPresent(String.self, forKey: .grammar)
+        enableThinking = try container.decodeIfPresent(Bool.self, forKey: .enableThinking) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -78,6 +84,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
             try container.encode(stopAtBalancedJSON, forKey: .stopAtBalancedJSON)
         }
         try container.encodeIfPresent(grammar, forKey: .grammar)
+        if enableThinking {
+            try container.encode(enableThinking, forKey: .enableThinking)
+        }
     }
 }
 

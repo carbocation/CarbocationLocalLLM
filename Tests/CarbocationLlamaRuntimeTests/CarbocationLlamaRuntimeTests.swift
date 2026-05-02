@@ -22,6 +22,46 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.prefillRanges(tokenCount: 10, maxBatchSize: 0).count, 0)
     }
 
+    func testPromptPrefillPlanReusesCommonPrefixAndRedecodesTailForLogits() {
+        let partial = LlamaEngine.promptPrefillPlan(
+            cachedPromptTokens: [1, 2, 3, 4],
+            newPromptTokens: [1, 2, 3, 9]
+        )
+        XCTAssertEqual(partial.commonPrefixCount, 3)
+        XCTAssertEqual(partial.retainedPrefixCount, 3)
+        XCTAssertFalse(partial.shouldClearMemory)
+        XCTAssertEqual(partial.removeStartPosition, 3)
+        XCTAssertEqual(partial.decodeStartIndex, 3)
+
+        let exact = LlamaEngine.promptPrefillPlan(
+            cachedPromptTokens: [1, 2, 3],
+            newPromptTokens: [1, 2, 3]
+        )
+        XCTAssertEqual(exact.commonPrefixCount, 3)
+        XCTAssertEqual(exact.retainedPrefixCount, 2)
+        XCTAssertFalse(exact.shouldClearMemory)
+        XCTAssertEqual(exact.removeStartPosition, 2)
+        XCTAssertEqual(exact.decodeStartIndex, 2)
+    }
+
+    func testPromptPrefillPlanFallsBackToFullPrefillWhenNoUsablePrefixCanBeKept() {
+        let noPrefix = LlamaEngine.promptPrefillPlan(
+            cachedPromptTokens: [1, 2, 3],
+            newPromptTokens: [9, 2, 3]
+        )
+        XCTAssertTrue(noPrefix.shouldClearMemory)
+        XCTAssertEqual(noPrefix.decodeStartIndex, 0)
+        XCTAssertNil(noPrefix.removeStartPosition)
+
+        let oneTokenExact = LlamaEngine.promptPrefillPlan(
+            cachedPromptTokens: [1],
+            newPromptTokens: [1]
+        )
+        XCTAssertTrue(oneTokenExact.shouldClearMemory)
+        XCTAssertEqual(oneTokenExact.commonPrefixCount, 1)
+        XCTAssertEqual(oneTokenExact.decodeStartIndex, 0)
+    }
+
     func testContextClampRespectsTrainingLimitAndMinimum() {
         XCTAssertEqual(
             LlamaEngine.clampedContextSize(requestedContext: 32_768, trainingContext: 16_384),
@@ -108,6 +148,28 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(prompt.hasSuffix("<|turn>model\n<|channel>thought\n<channel|>"))
         XCTAssertFalse(prompt.contains("<start_of_turn>"))
         XCTAssertFalse(prompt.contains("<end_of_turn>"))
+    }
+
+    func testPreparedSwiftJinjaFormatterCanBeReused() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let formatter = try ChatTemplatePromptFormatter(template: template)
+
+        let first = try formatter.format(
+            system: "System",
+            user: "First",
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+        let second = try formatter.format(
+            system: "System",
+            user: "Second",
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+
+        XCTAssertTrue(first.contains("First"))
+        XCTAssertTrue(second.contains("Second"))
+        XCTAssertFalse(second.contains("First"))
     }
 
     func testSwiftJinjaRejectsNonTemplateAliasBeforeLegacyFallback() {
@@ -263,6 +325,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(rendered.mode, .gemmaFallback)
         XCTAssertTrue(rendered.text.contains("<start_of_turn>user"))
         XCTAssertTrue(rendered.text.contains("<start_of_turn>model"))
+        XCTAssertEqual(rendered.outputProfile.extraStopStrings, ["<end_of_turn>", "<start_of_turn>"])
     }
 
     func testFallbackPromptDetectsChatMLWithoutAppConcepts() throws {
@@ -282,6 +345,36 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(rendered.mode, .chatMLFallback)
         XCTAssertTrue(rendered.text.contains("<|im_start|>system"))
         XCTAssertTrue(rendered.text.contains("<|im_start|>assistant"))
+        XCTAssertEqual(rendered.outputProfile.extraStopStrings, ["<|im_end|>", "<|im_start|>"])
+    }
+
+    func testGenerationBoundaryStopsAtBalancedObjectOrArrayValue() {
+        let object = LlamaEngine.firstGenerationBoundary(
+            in: #"preamble {"items":[{"ok":true}]} trailing"#,
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+        XCTAssertEqual(object?.text, #"{"items":[{"ok":true}]}"#)
+        XCTAssertEqual(object?.reason, "json-complete")
+
+        let array = LlamaEngine.firstGenerationBoundary(
+            in: #"lead [{"ok":true},{"ok":false}] trailing"#,
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+        XCTAssertEqual(array?.text, #"[{"ok":true},{"ok":false}]"#)
+        XCTAssertEqual(array?.reason, "json-complete")
+    }
+
+    func testGenerationBoundaryUsesEarlierStopSequenceBeforeJSON() {
+        let boundary = LlamaEngine.firstGenerationBoundary(
+            in: #"prefix STOP {"ok":true}"#,
+            stopSequences: ["STOP"],
+            stopAtBalancedJSON: true
+        )
+
+        XCTAssertEqual(boundary?.text, "prefix ")
+        XCTAssertEqual(boundary?.reason, "stop-sequence")
     }
 
     func testFallbackPromptRejectsUnknownTemplateFamily() {

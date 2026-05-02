@@ -114,6 +114,25 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
 public actor LlamaEngine: LLMEngine {
     public static let shared = LlamaEngine()
 
+    struct PromptPrefillPlan: Equatable {
+        var commonPrefixCount: Int
+        var retainedPrefixCount: Int
+        var shouldClearMemory: Bool
+        var removeStartPosition: Int?
+        var decodeStartIndex: Int
+    }
+
+    private struct PromptFormattingResult {
+        var text: String
+        var mode: LLMChatTemplateMode
+        var outputProfile: OutputSanitizationProfile
+    }
+
+    private enum PreparedChatTemplate {
+        case swiftJinja(ChatTemplatePromptFormatter)
+        case unavailable(String)
+    }
+
     private let configuration: LlamaEngineConfiguration
 
     private var model: OpaquePointer?
@@ -122,7 +141,9 @@ public actor LlamaEngine: LLMEngine {
     private var loadedDescriptor: LlamaModelDescriptor?
     private var loadedInfo: LlamaLoadedModelInfo?
     private var chatTemplate: String?
+    private var preparedChatTemplate: PreparedChatTemplate?
     private var outputSanitizationProfile: OutputSanitizationProfile = .empty
+    private var cachedPromptTokens: [llama_token]?
 
     public init(configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()) {
         self.configuration = configuration
@@ -288,6 +309,7 @@ public actor LlamaEngine: LLMEngine {
             throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
         }
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
+        let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
@@ -305,7 +327,9 @@ public actor LlamaEngine: LLMEngine {
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
         self.chatTemplate = template
+        self.preparedChatTemplate = preparedTemplate
         self.outputSanitizationProfile = outputProfile
+        self.cachedPromptTokens = nil
 
         Self.logOutputSanitizationProfile(outputProfile, descriptor: descriptor, hasEmbeddedTemplate: template != nil)
 
@@ -322,7 +346,9 @@ public actor LlamaEngine: LLMEngine {
         self.loadedDescriptor = nil
         self.loadedInfo = nil
         self.chatTemplate = nil
+        self.preparedChatTemplate = nil
         self.outputSanitizationProfile = .empty
+        self.cachedPromptTokens = nil
     }
 
     public func generate(
@@ -338,15 +364,18 @@ public actor LlamaEngine: LLMEngine {
         onEvent(.requestSent)
         let startedAt = Date()
 
-        llama_memory_clear(llama_get_memory(context), false)
-
         var templateMode: LLMChatTemplateMode = .unavailable
         var promptTokenCount = 0
         var generatedTokenCount = 0
         var stopReason = "cancelled"
         var emittedStats = false
+        var promptContextPrepared = false
+        var promptCacheCommitted = false
 
         defer {
+            if promptContextPrepared && !promptCacheCommitted {
+                cachedPromptTokens = nil
+            }
             if !emittedStats {
                 onEvent(.generationStats(
                     promptTokens: promptTokenCount,
@@ -357,9 +386,12 @@ public actor LlamaEngine: LLMEngine {
             }
         }
 
+        let promptFormatting: PromptFormattingResult
         let renderedPrompt: String
         do {
-            (renderedPrompt, templateMode) = try applyChatTemplate(system: system, user: prompt)
+            promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
+            renderedPrompt = promptFormatting.text
+            templateMode = promptFormatting.mode
         } catch let error as LLMEngineError {
             if case .chatTemplateUnavailable = error {
                 stopReason = "template-unavailable"
@@ -387,16 +419,8 @@ public actor LlamaEngine: LLMEngine {
         let sampler = try buildSampler(options: options, vocab: vocabulary)
         defer { llama_sampler_free(sampler) }
 
-        let maxBatchSize = max(1, Int(llama_n_batch(context)))
-        for range in Self.prefillRanges(tokenCount: promptTokens.count, maxBatchSize: maxBatchSize) {
-            var chunk = Array(promptTokens[range])
-            try chunk.withUnsafeMutableBufferPointer { buffer in
-                let batch = llama_batch_get_one(buffer.baseAddress, Int32(buffer.count))
-                if llama_decode(context, batch) != 0 {
-                    throw LLMEngineError.decodeFailed
-                }
-            }
-        }
+        try preparePromptContext(promptTokens, context: context)
+        promptContextPrepared = true
 
         var accumulatedData = Data()
         var accumulatedText = ""
@@ -422,11 +446,7 @@ public actor LlamaEngine: LLMEngine {
             )
         }
 
-        var jsonDepth = 0
-        var jsonInString = false
-        var jsonEscaped = false
-        var jsonStarted = false
-        let activeOutputProfile = chatTemplate == nil ? OutputSanitizationProfile.empty : outputSanitizationProfile
+        let activeOutputProfile = promptFormatting.outputProfile
         let effectiveStopSequences = Self.mergingStopSequences(
             options.stopSequences,
             activeOutputProfile.extraStopStrings
@@ -448,39 +468,13 @@ public actor LlamaEngine: LLMEngine {
                     accumulatedText = decoded
                 }
 
-                if let trimmed = Self.trimmingAtFirstStopSequence(
-                    accumulatedText,
-                    stopSequences: effectiveStopSequences
+                if let boundary = Self.firstGenerationBoundary(
+                    in: accumulatedText,
+                    stopSequences: effectiveStopSequences,
+                    stopAtBalancedJSON: options.stopAtBalancedJSON
                 ) {
-                    accumulatedText = trimmed
-                    stopReason = "stop-sequence"
-                }
-
-                if options.stopAtBalancedJSON {
-                    for byte in piece {
-                        if jsonEscaped {
-                            jsonEscaped = false
-                            continue
-                        }
-                        if byte == 0x5C && jsonInString {
-                            jsonEscaped = true
-                            continue
-                        }
-                        if byte == 0x22 {
-                            jsonInString.toggle()
-                            continue
-                        }
-                        if jsonInString { continue }
-                        if byte == 0x7B {
-                            jsonDepth += 1
-                            jsonStarted = true
-                        } else if byte == 0x7D && jsonStarted {
-                            jsonDepth -= 1
-                            if jsonDepth == 0 {
-                                stopReason = "json-complete"
-                            }
-                        }
-                    }
+                    accumulatedText = boundary.text
+                    stopReason = boundary.reason
                 }
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" {
@@ -508,6 +502,7 @@ public actor LlamaEngine: LLMEngine {
                 return llama_decode(context, batch)
             }
             if decodeResult != 0 {
+                cachedPromptTokens = nil
                 throw LLMEngineError.decodeFailed
             }
 
@@ -525,6 +520,8 @@ public actor LlamaEngine: LLMEngine {
             ? accumulatedText
             : LLMResponseSanitizer.unwrapStructuredOutput(accumulatedText, using: activeOutputProfile)
 
+        cachedPromptTokens = promptTokens
+        promptCacheCommitted = true
         emittedStats = true
         onEvent(.generationStats(
             promptTokens: promptTokens.count,
@@ -543,6 +540,7 @@ public actor LlamaEngine: LLMEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
+        cachedPromptTokens = nil
 
         let startedAt = Date()
         onEvent(.started(operation: "encode"))
@@ -626,6 +624,7 @@ public actor LlamaEngine: LLMEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
+        cachedPromptTokens = nil
 
         let startedAt = Date()
         onEvent(.started(operation: "decode"))
@@ -655,25 +654,43 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
-    private func applyChatTemplate(system: String, user: String) throws -> (text: String, mode: LLMChatTemplateMode) {
+    private func applyChatTemplate(
+        system: String,
+        user: String,
+        options: GenerationOptions
+    ) throws -> PromptFormattingResult {
         if let chatTemplate {
-            do {
-                let formatted = try formatMessagesViaSwiftJinja(
-                    template: chatTemplate,
-                    system: system,
-                    user: user
-                )
-                Self.logChatTemplateSelection(
-                    mode: .embedded,
-                    descriptor: loadedDescriptor,
-                    hasEmbeddedTemplate: true,
-                    formatter: "swift-jinja"
-                )
-                return (formatted, .embedded)
-            } catch {
+            switch preparedChatTemplate {
+            case .swiftJinja(let formatter):
+                do {
+                    let formatted = try formatMessagesViaSwiftJinja(
+                        formatter: formatter,
+                        system: system,
+                        user: user,
+                        options: options
+                    )
+                    Self.logChatTemplateSelection(
+                        mode: .embedded,
+                        descriptor: loadedDescriptor,
+                        hasEmbeddedTemplate: true,
+                        formatter: "swift-jinja"
+                    )
+                    return PromptFormattingResult(
+                        text: formatted,
+                        mode: .embedded,
+                        outputProfile: outputSanitizationProfile
+                    )
+                } catch {
+                    llamaRuntimeLog.info(
+                        "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+            case .unavailable(let detail):
                 llamaRuntimeLog.info(
-                    "Swift Jinja chat template application failed: \(String(describing: error), privacy: .public)"
+                    "Swift Jinja chat template unavailable: \(detail, privacy: .public)"
                 )
+            case nil:
+                break
             }
 
             if let formatted = Self.formatMessagesWithLegacyTemplate(
@@ -687,7 +704,11 @@ public actor LlamaEngine: LLMEngine {
                     hasEmbeddedTemplate: true,
                     formatter: "legacy-c-api"
                 )
-                return (formatted, .embedded)
+                return PromptFormattingResult(
+                    text: formatted,
+                    mode: .embedded,
+                    outputProfile: outputSanitizationProfile
+                )
             }
 
             throw LLMEngineError.chatTemplateUnavailable(Self.embeddedTemplateFailureDescription(
@@ -707,7 +728,11 @@ public actor LlamaEngine: LLMEngine {
             hasEmbeddedTemplate: false,
             formatter: "fallback"
         )
-        return fallback
+        return PromptFormattingResult(
+            text: fallback.text,
+            mode: fallback.mode,
+            outputProfile: fallback.outputProfile
+        )
     }
 
     static func fallbackPrompt(
@@ -715,7 +740,7 @@ public actor LlamaEngine: LLMEngine {
         user: String,
         embeddedTemplate: String?,
         descriptor: LlamaModelDescriptor?
-    ) throws -> (text: String, mode: LLMChatTemplateMode) {
+    ) throws -> (text: String, mode: LLMChatTemplateMode, outputProfile: OutputSanitizationProfile) {
         guard let family = inferredTemplateFamily(
             embeddedTemplate: embeddedTemplate,
             descriptor: descriptor
@@ -726,7 +751,11 @@ public actor LlamaEngine: LLMEngine {
             ))
         }
 
-        return (renderFallbackPrompt(system: system, user: user, family: family), family.mode)
+        return (
+            renderFallbackPrompt(system: system, user: user, family: family),
+            family.mode,
+            fallbackOutputProfile(for: family)
+        )
     }
 
     private static func inferredTemplateFamily(
@@ -766,20 +795,30 @@ public actor LlamaEngine: LLMEngine {
         return nil
     }
 
+    private static func prepareChatTemplate(_ template: String?) -> PreparedChatTemplate? {
+        guard let template else { return nil }
+        do {
+            return .swiftJinja(try ChatTemplatePromptFormatter(template: template))
+        } catch {
+            return .unavailable(String(describing: error))
+        }
+    }
+
     private func formatMessagesViaSwiftJinja(
-        template: String,
+        formatter: ChatTemplatePromptFormatter,
         system: String,
-        user: String
+        user: String,
+        options: GenerationOptions
     ) throws -> String {
         guard let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
-        return try ChatTemplatePromptFormatter.format(
-            template: template,
+        return try formatter.format(
             system: system,
             user: user,
             bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
-            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? ""
+            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
+            enableThinking: options.enableThinking
         )
     }
 
@@ -848,6 +887,15 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
+    private static func fallbackOutputProfile(for family: KnownTemplateFamily) -> OutputSanitizationProfile {
+        switch family {
+        case .gemma:
+            return OutputSanitizationProfile.derived(fromChatTemplate: "<start_of_turn><end_of_turn>")
+        case .chatML:
+            return OutputSanitizationProfile.derived(fromChatTemplate: "<|im_start|><|im_end|>")
+        }
+    }
+
     static func formatMessagesWithLegacyTemplate(template: String, system: String, user: String) -> String? {
         guard let roleSystem = strdup("system"),
               let roleUser = strdup("user"),
@@ -896,6 +944,64 @@ public actor LlamaEngine: LLMEngine {
             break
         }
         return nil
+    }
+
+    private func preparePromptContext(_ promptTokens: [llama_token], context: OpaquePointer) throws {
+        let memory = llama_get_memory(context)
+        let plan = Self.promptPrefillPlan(
+            cachedPromptTokens: cachedPromptTokens,
+            newPromptTokens: promptTokens
+        )
+        cachedPromptTokens = nil
+
+        if plan.shouldClearMemory {
+            llama_memory_clear(memory, false)
+            try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+            return
+        }
+
+        if let removeStartPosition = plan.removeStartPosition {
+            let removed = llama_memory_seq_rm(memory, 0, Int32(removeStartPosition), -1)
+            if !removed {
+                llamaRuntimeLog.info(
+                    "Prompt prefix cache removal failed; falling back to full prompt prefill."
+                )
+                llama_memory_clear(memory, false)
+                try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+                return
+            }
+        }
+
+        do {
+            try decodePromptTokens(promptTokens, startingAt: plan.decodeStartIndex, context: context)
+        } catch {
+            llamaRuntimeLog.info(
+                "Prompt prefix cache decode failed; falling back to full prompt prefill."
+            )
+            llama_memory_clear(memory, false)
+            try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+        }
+    }
+
+    private func decodePromptTokens(
+        _ tokens: [llama_token],
+        startingAt startIndex: Int,
+        context: OpaquePointer
+    ) throws {
+        guard startIndex < tokens.count else { return }
+
+        let maxBatchSize = max(1, Int(llama_n_batch(context)))
+        for range in Self.prefillRanges(tokenCount: tokens.count - startIndex, maxBatchSize: maxBatchSize) {
+            let lower = startIndex + range.lowerBound
+            let upper = startIndex + range.upperBound
+            var chunk = Array(tokens[lower..<upper])
+            try chunk.withUnsafeMutableBufferPointer { buffer in
+                let batch = llama_batch_get_one(buffer.baseAddress, Int32(buffer.count))
+                if llama_decode(context, batch) != 0 {
+                    throw LLMEngineError.decodeFailed
+                }
+            }
+        }
     }
 
     private func tokenize(vocab: OpaquePointer, text: String, addSpecial: Bool) throws -> [llama_token] {
@@ -1056,16 +1162,175 @@ public actor LlamaEngine: LLMEngine {
         _ text: String,
         stopSequences: [String]
     ) -> String? {
-        let matches = stopSequences
+        guard let earliest = firstStopSequenceRange(in: text, stopSequences: stopSequences) else {
+            return nil
+        }
+        return String(text[..<earliest.lowerBound])
+    }
+
+    static func firstStopSequenceRange(
+        in text: String,
+        stopSequences: [String]
+    ) -> Range<String.Index>? {
+        stopSequences
             .filter { !$0.isEmpty }
             .compactMap { sequence -> Range<String.Index>? in
                 text.range(of: sequence)
             }
+            .min(by: { $0.lowerBound < $1.lowerBound })
+    }
 
-        guard let earliest = matches.min(by: { $0.lowerBound < $1.lowerBound }) else {
+    struct GenerationBoundary: Equatable {
+        var text: String
+        var reason: String
+    }
+
+    static func firstGenerationBoundary(
+        in text: String,
+        stopSequences: [String],
+        stopAtBalancedJSON: Bool
+    ) -> GenerationBoundary? {
+        var boundaryIndex: String.Index?
+        var boundaryText: String?
+        var reason: String?
+
+        if let stopRange = firstStopSequenceRange(in: text, stopSequences: stopSequences) {
+            boundaryIndex = stopRange.lowerBound
+            boundaryText = String(text[..<stopRange.lowerBound])
+            reason = "stop-sequence"
+        }
+
+        if stopAtBalancedJSON,
+           let jsonRange = balancedJSONValueRange(in: text),
+           boundaryIndex.map({ jsonRange.upperBound < $0 }) ?? true {
+            boundaryIndex = jsonRange.upperBound
+            boundaryText = String(text[jsonRange])
+            reason = "json-complete"
+        }
+
+        guard boundaryIndex != nil, let boundaryText, let reason else {
             return nil
         }
-        return String(text[..<earliest.lowerBound])
+        return GenerationBoundary(text: boundaryText, reason: reason)
+    }
+
+    static func balancedJSONValueRange(in text: String) -> Range<String.Index>? {
+        var startIndex: String.Index?
+        var expectedClosers: [Character] = []
+        var inString = false
+        var escaped = false
+
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+
+            if startIndex == nil {
+                if character == "{" {
+                    startIndex = index
+                    expectedClosers = ["}"]
+                } else if character == "[" {
+                    startIndex = index
+                    expectedClosers = ["]"]
+                }
+                index = text.index(after: index)
+                continue
+            }
+
+            if escaped {
+                escaped = false
+                index = text.index(after: index)
+                continue
+            }
+
+            if character == "\\" && inString {
+                escaped = true
+                index = text.index(after: index)
+                continue
+            }
+
+            if character == "\"" {
+                inString.toggle()
+                index = text.index(after: index)
+                continue
+            }
+
+            if !inString {
+                if character == "{" {
+                    expectedClosers.append("}")
+                } else if character == "[" {
+                    expectedClosers.append("]")
+                } else if character == "}" || character == "]" {
+                    guard expectedClosers.last == character else {
+                        return nil
+                    }
+                    expectedClosers.removeLast()
+                    if expectedClosers.isEmpty, let startIndex {
+                        return startIndex..<text.index(after: index)
+                    }
+                }
+            }
+
+            index = text.index(after: index)
+        }
+
+        return nil
+    }
+
+    static func promptPrefillPlan(
+        cachedPromptTokens: [llama_token]?,
+        newPromptTokens: [llama_token]
+    ) -> PromptPrefillPlan {
+        guard let cachedPromptTokens,
+              !cachedPromptTokens.isEmpty,
+              !newPromptTokens.isEmpty
+        else {
+            return PromptPrefillPlan(
+                commonPrefixCount: 0,
+                retainedPrefixCount: 0,
+                shouldClearMemory: true,
+                removeStartPosition: nil,
+                decodeStartIndex: 0
+            )
+        }
+
+        let common = commonTokenPrefixCount(cachedPromptTokens, newPromptTokens)
+        guard common > 0 else {
+            return PromptPrefillPlan(
+                commonPrefixCount: 0,
+                retainedPrefixCount: 0,
+                shouldClearMemory: true,
+                removeStartPosition: nil,
+                decodeStartIndex: 0
+            )
+        }
+
+        let decodeStart = common == newPromptTokens.count ? max(0, common - 1) : common
+        guard decodeStart > 0 else {
+            return PromptPrefillPlan(
+                commonPrefixCount: common,
+                retainedPrefixCount: 0,
+                shouldClearMemory: true,
+                removeStartPosition: nil,
+                decodeStartIndex: 0
+            )
+        }
+
+        return PromptPrefillPlan(
+            commonPrefixCount: common,
+            retainedPrefixCount: decodeStart,
+            shouldClearMemory: false,
+            removeStartPosition: decodeStart,
+            decodeStartIndex: decodeStart
+        )
+    }
+
+    static func commonTokenPrefixCount(_ lhs: [llama_token], _ rhs: [llama_token]) -> Int {
+        let count = min(lhs.count, rhs.count)
+        var index = 0
+        while index < count, lhs[index] == rhs[index] {
+            index += 1
+        }
+        return index
     }
 
     static func prefillRanges(tokenCount: Int, maxBatchSize: Int) -> [Range<Int>] {
