@@ -53,6 +53,23 @@ public struct ModelLibraryPickerLabelPolicy: Equatable, Sendable {
         systemModelLabels[model.selection]
     }
 
+    public func systemModelLabel(
+        for model: LLMSystemModelOption,
+        recommendedCuratedModel: CuratedModel?
+    ) -> ModelLibraryPickerStatusLabel? {
+        guard let label = systemModelLabel(for: model) else {
+            return nil
+        }
+
+        if model.selection == .system(.appleIntelligence),
+           recommendedCuratedModel == nil,
+           label == Self.notRecommendedLabel {
+            return recommendedLabel
+        }
+
+        return label
+    }
+
     public func installedModelLabel(
         for model: InstalledModel,
         recommendedCuratedModel: CuratedModel?,

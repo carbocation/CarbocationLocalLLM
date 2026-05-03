@@ -617,6 +617,9 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     func testDefaultCuratedCatalogRecommendationTiers() {
+        let belowSmallestTier = CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: UInt64(8) * 1_073_741_824 - 1
+        )
         let smallTier = CuratedModelCatalog.recommendedModel(
             forPhysicalMemoryBytes: UInt64(8) * 1_073_741_824
         )
@@ -624,6 +627,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
             forPhysicalMemoryBytes: UInt64(16) * 1_073_741_824
         )
 
+        XCTAssertNil(belowSmallestTier)
         XCTAssertEqual(smallTier?.id, "gemma-4-e2b-it-q4km")
         XCTAssertEqual(smallTier?.displayName, "Gemma 4 E2B Instruct (Q4_K_M)")
         XCTAssertEqual(smallTier?.hfRepo, "bartowski/google_gemma-4-E2B-it-GGUF")

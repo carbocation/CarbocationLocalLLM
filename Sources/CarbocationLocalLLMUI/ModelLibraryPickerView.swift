@@ -117,6 +117,20 @@ public struct ModelLibraryPickerView: View {
         )
     }
 
+    private var recommendedSystemModel: LLMSystemModelOption? {
+        guard recommendedCuratedModel == nil,
+              let recommendedLabel = labelPolicy.recommendedLabel else {
+            return nil
+        }
+
+        return systemModels.first {
+            labelPolicy.systemModelLabel(
+                for: $0,
+                recommendedCuratedModel: recommendedCuratedModel
+            ) == recommendedLabel
+        }
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             header
@@ -237,7 +251,10 @@ public struct ModelLibraryPickerView: View {
 
     private func systemModelRow(_ model: LLMSystemModelOption) -> some View {
         let isSelected = model.id == selectedModelID
-        let statusLabel = labelPolicy.systemModelLabel(for: model)
+        let statusLabel = labelPolicy.systemModelLabel(
+            for: model,
+            recommendedCuratedModel: recommendedCuratedModel
+        )
         return Button {
             selectedModelID = model.id
         } label: {
@@ -700,6 +717,9 @@ public struct ModelLibraryPickerView: View {
         let memory = formatBytes(Int64(min(ProcessInfo.processInfo.physicalMemory, UInt64(Int64.max))))
         if let recommendedCuratedModel {
             return "\(memory) RAM detected. Recommended for this device: \(recommendedCuratedModel.displayName)."
+        }
+        if let recommendedSystemModel {
+            return "\(memory) RAM detected. Recommended for this device: \(recommendedSystemModel.displayName)."
         }
         return "\(memory) RAM detected."
     }

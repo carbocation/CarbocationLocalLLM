@@ -80,11 +80,31 @@ final class ModelLibraryPickerLabelPolicyTests: XCTestCase {
         XCTAssertNil(customLabel)
     }
 
-    func testDefaultSystemModelLabelMarksAppleIntelligenceNotRecommended() {
+    func testLegacySystemModelLabelMarksAppleIntelligenceNotRecommended() {
         let label = ModelLibraryPickerLabelPolicy.default.systemModelLabel(for: appleIntelligenceOption)
 
         XCTAssertEqual(label?.title, "Not Recommended")
         XCTAssertEqual(label?.tone, .warning)
+    }
+
+    func testDefaultSystemModelLabelMarksAppleIntelligenceNotRecommendedWhenCuratedModelFits() {
+        let label = ModelLibraryPickerLabelPolicy.default.systemModelLabel(
+            for: appleIntelligenceOption,
+            recommendedCuratedModel: smallModel
+        )
+
+        XCTAssertEqual(label?.title, "Not Recommended")
+        XCTAssertEqual(label?.tone, .warning)
+    }
+
+    func testDefaultSystemModelLabelRecommendsAppleIntelligenceWhenNoCuratedModelFits() {
+        let label = ModelLibraryPickerLabelPolicy.default.systemModelLabel(
+            for: appleIntelligenceOption,
+            recommendedCuratedModel: nil
+        )
+
+        XCTAssertEqual(label?.title, "Recommended")
+        XCTAssertEqual(label?.tone, .accent)
     }
 
     func testSystemModelLabelCanBeRemovedOrReplaced() {
@@ -94,8 +114,26 @@ final class ModelLibraryPickerLabelPolicyTests: XCTestCase {
             systemModelLabels: [.system(.appleIntelligence): customLabel]
         )
 
-        XCTAssertNil(noSystemLabels.systemModelLabel(for: appleIntelligenceOption))
-        XCTAssertEqual(customSystemLabels.systemModelLabel(for: appleIntelligenceOption), customLabel)
+        XCTAssertNil(noSystemLabels.systemModelLabel(
+            for: appleIntelligenceOption,
+            recommendedCuratedModel: nil
+        ))
+        XCTAssertEqual(
+            customSystemLabels.systemModelLabel(
+                for: appleIntelligenceOption,
+                recommendedCuratedModel: nil
+            ),
+            customLabel
+        )
+    }
+
+    func testRecommendedLabelNilSuppressesAppleIntelligenceFallbackLabel() {
+        let noRecommendedLabels = ModelLibraryPickerLabelPolicy(recommendedLabel: nil)
+
+        XCTAssertNil(noRecommendedLabels.systemModelLabel(
+            for: appleIntelligenceOption,
+            recommendedCuratedModel: nil
+        ))
     }
 
     private var curatedModels: [CuratedModel] {

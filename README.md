@@ -315,7 +315,7 @@ struct LocalModelSettingsView: View {
 }
 ```
 
-The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
+The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
 
 GGUF weights are not bundled. Apps either import local `.gguf` files, use the curated Hugging Face downloads, or ship their own download UI.
 
