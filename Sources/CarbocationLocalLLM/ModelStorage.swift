@@ -33,6 +33,12 @@ public enum ModelStorage {
         sharedGroupRootResolver(identifier, fileManager)
     }
 
+    public static func sharedSettingsDefaults(
+        sharedGroupIdentifier: String = defaultSharedGroupID
+    ) -> UserDefaults {
+        UserDefaults(suiteName: sharedGroupIdentifier) ?? .standard
+    }
+
     /// Returns the shared App Group `Models` directory when available, otherwise
     /// `<Application Support>/<appSupportFolderName>/Models` for unsigned/dev builds.
     public static func modelsDirectory(

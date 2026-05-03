@@ -39,6 +39,7 @@ private struct CalgacusRootView: View {
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
                     systemModels: [],
+                    calibrationAdapter: state.calibrationAdapter,
                     onConfirmSelection: { selection in
                         state.select(selection)
                     }
@@ -344,6 +345,24 @@ private final class CalgacusState {
         activeOperation == .decode
     }
 
+    var calibrationAdapter: ModelLibraryPickerCalibrationAdapter {
+        ModelLibraryPickerCalibrationAdapter(
+            runtimeFingerprint: LlamaEngine.contextCalibrationRuntimeFingerprint(),
+            calibrate: { [library] model, onProgress in
+                let engine = LlamaEngine()
+                return try await engine.calibrateContext(
+                    model: model,
+                    from: library.root,
+                    onProgress: { progress in
+                        await MainActor.run {
+                            onProgress(progress)
+                        }
+                    }
+                )
+            }
+        )
+    }
+
     var selectedModelLabel: String? {
         library.model(id: selectedModelID)?.displayName
     }
@@ -552,7 +571,16 @@ private final class CalgacusState {
             throw CalgacusAppError.installedModelNotFound(modelID)
         }
 
-        let requestedContext = LlamaContextPolicy.resolvedRequestedContext(for: model)
+        let calibratedContext = LlamaContextCalibrationStore.shared
+            .record(
+                for: model,
+                runtime: LlamaEngine.contextCalibrationRuntimeFingerprint()
+            )?
+            .maximumSupportedContext
+        let requestedContext = LlamaContextPolicy.resolvedRequestedContext(
+            for: model,
+            autoCap: calibratedContext ?? LlamaContextPolicy.defaultAutoCap
+        )
         let loaded = try await engine.load(
             model: model,
             from: library.root,

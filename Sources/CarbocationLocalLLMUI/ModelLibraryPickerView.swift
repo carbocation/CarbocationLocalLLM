@@ -19,6 +19,7 @@ public struct ModelLibraryPickerView: View {
     private let systemModels: [LLMSystemModelOption]
     private let curatedModels: [CuratedModel]
     private let labelPolicy: ModelLibraryPickerLabelPolicy
+    private let calibrationAdapter: ModelLibraryPickerCalibrationAdapter?
     private let onConfirmSelection: (@MainActor (LLMModelSelection) -> Void)?
     private let onModelDeleted: @MainActor (InstalledModel) -> Void
     private let onConfirmInstalledModel: (@MainActor (InstalledModel) -> Void)?
@@ -30,6 +31,11 @@ public struct ModelLibraryPickerView: View {
     @State private var showDeleteConfirm: InstalledModel?
     @State private var showDeletePartialConfirm: PartialDownload?
     @State private var refreshToken = UUID()
+    @State private var activeCalibrationModelID: UUID?
+    @State private var calibrationProgress: LlamaContextCalibrationProgress?
+    @State private var calibrationTask: Task<Void, Never>?
+    @State private var calibrationErrorModelID: UUID?
+    @State private var calibrationErrorMessage: String?
 
     public init(
         library: ModelLibrary,
@@ -39,6 +45,7 @@ public struct ModelLibraryPickerView: View {
         confirmDisabled: Bool = false,
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
         labelPolicy: ModelLibraryPickerLabelPolicy = .default,
+        calibrationAdapter: ModelLibraryPickerCalibrationAdapter? = nil,
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirm: @escaping @MainActor (InstalledModel) -> Void
     ) {
@@ -50,6 +57,7 @@ public struct ModelLibraryPickerView: View {
         self.systemModels = []
         self.curatedModels = curatedModels
         self.labelPolicy = labelPolicy
+        self.calibrationAdapter = calibrationAdapter
         self.onConfirmSelection = nil
         self.onModelDeleted = onModelDeleted
         self.onConfirmInstalledModel = onConfirm
@@ -64,6 +72,7 @@ public struct ModelLibraryPickerView: View {
         systemModels: [LLMSystemModelOption],
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
         labelPolicy: ModelLibraryPickerLabelPolicy = .default,
+        calibrationAdapter: ModelLibraryPickerCalibrationAdapter? = nil,
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirmSelection: @escaping @MainActor (LLMModelSelection) -> Void
     ) {
@@ -75,6 +84,7 @@ public struct ModelLibraryPickerView: View {
         self.systemModels = systemModels
         self.curatedModels = curatedModels
         self.labelPolicy = labelPolicy
+        self.calibrationAdapter = calibrationAdapter
         self.onConfirmSelection = onConfirmSelection
         self.onModelDeleted = onModelDeleted
         self.onConfirmInstalledModel = nil
@@ -181,6 +191,9 @@ public struct ModelLibraryPickerView: View {
             allowsMultipleSelection: false
         ) { result in
             importLocalGGUF(result)
+        }
+        .onDisappear {
+            cancelCalibration()
         }
         .alert(
             "Delete \(showDeleteConfirm?.displayName ?? "model")?",
@@ -348,45 +361,55 @@ public struct ModelLibraryPickerView: View {
             recommendedCuratedModel: recommendedCuratedModel,
             bestInstalledCuratedModel: bestInstalledCuratedModel
         )
-        return Button {
-            selectedModelID = model.id.uuidString
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+        let calibrationSummary = contextCalibrationSummary(for: model)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(model.displayName)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                        if let statusLabel {
-                            statusBadge(statusLabel)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Button {
+                    selectedModelID = model.id.uuidString
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(model.displayName)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                if let statusLabel {
+                                    statusBadge(statusLabel)
+                                }
+                            }
+                            HStack(spacing: 6) {
+                                if let quantization = model.quantization {
+                                    Text(quantization)
+                                        .font(.caption.monospaced())
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(.quaternary, in: .rect(cornerRadius: 3))
+                                }
+                                Text(formatBytes(model.sizeBytes))
+                                Text(calibrationSummary.displayText)
+                                if let repo = model.hfRepo {
+                                    Text(repo)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
+
+                        Spacer()
                     }
-                    HStack(spacing: 6) {
-                        if let quantization = model.quantization {
-                            Text(quantization)
-                                .font(.caption.monospaced())
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(.quaternary, in: .rect(cornerRadius: 3))
-                        }
-                        Text(formatBytes(model.sizeBytes))
-                        if model.contextLength > 0 {
-                            Text("context \(model.contextLength.formatted())")
-                        }
-                        if let repo = model.hfRepo {
-                            Text(repo)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
 
                 Spacer()
+
+                calibrationControls(for: model, summary: calibrationSummary)
 
                 Button {
                     showDeleteConfirm = model
@@ -397,9 +420,137 @@ public struct ModelLibraryPickerView: View {
                 .help("Delete this model")
             }
             .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            if calibrationErrorModelID == model.id,
+               let calibrationErrorMessage {
+                Label(calibrationErrorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.leading, 26)
+            }
         }
-        .buttonStyle(.plain)
+    }
+
+    private func contextCalibrationSummary(
+        for model: InstalledModel
+    ) -> ModelLibraryPickerContextCalibrationSummary {
+        let record: LlamaContextCalibrationRecord?
+        if let calibrationAdapter {
+            record = calibrationAdapter.store.record(
+                for: model,
+                runtime: calibrationAdapter.runtimeFingerprint
+            )
+        } else {
+            record = nil
+        }
+        return ModelLibraryPickerContextCalibrationPresentation.summary(
+            for: model,
+            record: record
+        )
+    }
+
+    @ViewBuilder
+    private func calibrationControls(
+        for model: InstalledModel,
+        summary: ModelLibraryPickerContextCalibrationSummary
+    ) -> some View {
+        if activeCalibrationModelID == model.id {
+            VStack(alignment: .trailing, spacing: 4) {
+                if let calibrationProgress {
+                    if let fraction = calibrationProgress.fractionCompleted {
+                        ProgressView(value: fraction)
+                            .frame(width: 120)
+                    } else {
+                        ProgressView()
+                            .frame(width: 120)
+                    }
+                    Text(calibrationProgressText(calibrationProgress))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                }
+                Button("Cancel", role: .destructive) {
+                    cancelCalibration()
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+            }
+        } else if calibrationAdapter != nil {
+            Button(summary.actionTitle) {
+                startCalibration(model)
+            }
+            .disabled(activeDownload != nil || activeCalibrationModelID != nil)
+            .buttonStyle(.borderless)
+            .help("\(summary.actionTitle) the maximum supported context for this model on this device")
+        }
+    }
+
+    private func calibrationProgressText(_ progress: LlamaContextCalibrationProgress) -> String {
+        var parts: [String] = []
+        if let currentContext = progress.currentContext {
+            parts.append("probing \(currentContext.formatted())")
+        } else if let message = progress.message {
+            parts.append(message)
+        } else {
+            parts.append(progress.phase.rawValue)
+        }
+        if let lastSuccessfulContext = progress.lastSuccessfulContext {
+            parts.append("best \(lastSuccessfulContext.formatted())")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func startCalibration(_ model: InstalledModel) {
+        guard let calibrationAdapter,
+              activeCalibrationModelID == nil
+        else { return }
+
+        calibrationTask?.cancel()
+        calibrationErrorModelID = nil
+        calibrationErrorMessage = nil
+        activeCalibrationModelID = model.id
+        calibrationProgress = LlamaContextCalibrationProgress(
+            phase: .loadingModel,
+            message: "Loading model"
+        )
+
+        let modelID = model.id
+        calibrationTask = Task { @MainActor in
+            do {
+                _ = try await calibrationAdapter.calibrate(model) { progress in
+                    guard activeCalibrationModelID == modelID else { return }
+                    calibrationProgress = progress
+                }
+                guard !Task.isCancelled else { return }
+                activeCalibrationModelID = nil
+                calibrationProgress = nil
+                calibrationTask = nil
+                refreshToken = UUID()
+            } catch is CancellationError {
+                calibrationErrorModelID = modelID
+                calibrationErrorMessage = "Calibration cancelled."
+                activeCalibrationModelID = nil
+                calibrationProgress = nil
+                calibrationTask = nil
+            } catch {
+                calibrationErrorModelID = modelID
+                calibrationErrorMessage = error.localizedDescription
+                activeCalibrationModelID = nil
+                calibrationProgress = nil
+                calibrationTask = nil
+            }
+        }
+    }
+
+    private func cancelCalibration() {
+        if let activeCalibrationModelID {
+            calibrationErrorModelID = activeCalibrationModelID
+            calibrationErrorMessage = "Calibration cancelled."
+        }
+        calibrationTask?.cancel()
+        calibrationTask = nil
+        activeCalibrationModelID = nil
+        calibrationProgress = nil
     }
 
     @ViewBuilder

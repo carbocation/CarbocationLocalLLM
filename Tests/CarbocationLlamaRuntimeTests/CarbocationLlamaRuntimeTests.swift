@@ -102,6 +102,24 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(params.n_threads_batch, 2)
     }
 
+    func testContextCalibrationSearchCancellationDoesNotWriteCacheRecord() async throws {
+        let suiteName = "CarbocationLlamaRuntimeCalibrationCancellationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+
+        do {
+            _ = try await LlamaContextCalibrationAlgorithm.search(candidates: [512, 1_024]) { _ in
+                throw CancellationError()
+            }
+            XCTFail("Expected cancellation to propagate.")
+        } catch is CancellationError {
+            XCTAssertTrue(store.records().isEmpty)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testGenerationBudgetMath() {
         XCTAssertEqual(
             LlamaEngine.maxGenerationTokens(contextSize: 4_096, promptTokenCount: 3_000, reserve: 1_024),
@@ -496,6 +514,57 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 return XCTFail("Expected contextBudgetExceeded, got \(error)")
             }
         }
+    }
+
+    func testPreflightLiveReportsExactCountsAndRejectsInvalidGrammarWhenModelPathProvided() async throws {
+        guard let path = ProcessInfo.processInfo.environment["LLAMA_TEST_MODEL_PATH"]
+                ?? ProcessInfo.processInfo.environment["CALGACUS_TEST_MODEL_PATH"],
+              !path.isEmpty
+        else {
+            throw XCTSkip("Set LLAMA_TEST_MODEL_PATH or CALGACUS_TEST_MODEL_PATH to run the live llama preflight test.")
+        }
+
+        let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
+            gpuLayerCount: 0,
+            useMemoryMap: true,
+            batchSizeLimit: 512,
+            threadCount: 2,
+            promptReserveTokens: 128
+        ))
+        let loaded = try await engine.load(
+            modelAt: URL(fileURLWithPath: path),
+            displayName: "Live Test Model",
+            requestedContext: 1_024
+        )
+
+        let preflight = try await engine.preflight(
+            system: "You are concise.",
+            prompt: "Say hello.",
+            options: GenerationOptions(maxOutputTokens: 64)
+        )
+
+        XCTAssertEqual(preflight.loadedContextSize, loaded.contextSize)
+        XCTAssertEqual(preflight.modelTrainingContextSize, loaded.trainingContextSize)
+        XCTAssertEqual(preflight.reservedOutputTokens, 128)
+        XCTAssertEqual(preflight.requestedMaxOutputTokens, 64)
+        XCTAssertTrue(preflight.usesExactTokenCounts)
+        XCTAssertGreaterThan(preflight.promptTokens, 0)
+        XCTAssertLessThanOrEqual(preflight.effectiveMaxOutputTokens, 64)
+
+        do {
+            _ = try await engine.preflight(
+                system: "Return JSON.",
+                prompt: #"Return {"ok": true}."#,
+                options: GenerationOptions(grammar: "root ::=")
+            )
+            XCTFail("Expected invalid grammar to fail during preflight.")
+        } catch let error as LLMEngineError {
+            guard case .grammarParseFailed = error else {
+                return XCTFail("Expected grammarParseFailed, got \(error)")
+            }
+        }
+
+        await engine.unload()
     }
 
     func testCalgacusLiveRoundTripWhenModelPathProvided() async throws {

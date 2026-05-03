@@ -136,6 +136,57 @@ final class ModelLibraryPickerLabelPolicyTests: XCTestCase {
         ))
     }
 
+    func testContextCalibrationPresentationShowsUncalibratedDefault() {
+        let model = installedModel(for: largeModel)
+
+        let summary = ModelLibraryPickerContextCalibrationPresentation.summary(
+            for: model,
+            record: nil,
+            defaultAutoCap: 16_384
+        )
+
+        XCTAssertEqual(summary.context, 16_384)
+        XCTAssertFalse(summary.isCalibrated)
+        XCTAssertEqual(summary.actionTitle, "Calibrate")
+        XCTAssertEqual(summary.statusTitle, "Uncalibrated")
+        XCTAssertTrue(summary.displayText.contains("Uncalibrated"))
+    }
+
+    func testContextCalibrationPresentationShowsCalibratedContextAndRecalibrateAction() {
+        let model = installedModel(for: largeModel)
+        let key = LlamaContextCalibrationKey(
+            deviceID: "device-a",
+            model: LlamaContextCalibrationModelFingerprint(model: model),
+            runtime: LlamaContextCalibrationRuntimeFingerprint(
+                platform: "macOS",
+                gpuLayerCount: 999,
+                useMemoryMap: true,
+                batchSizeLimit: 2_048,
+                threadCount: 4
+            )
+        )
+        let record = LlamaContextCalibrationRecord(
+            key: key,
+            maximumSupportedContext: 32_768,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 16_384, succeeded: true),
+                LlamaContextCalibrationProbe(context: 32_768, succeeded: true)
+            ]
+        )
+
+        let summary = ModelLibraryPickerContextCalibrationPresentation.summary(
+            for: model,
+            record: record,
+            defaultAutoCap: 16_384
+        )
+
+        XCTAssertEqual(summary.context, 32_768)
+        XCTAssertTrue(summary.isCalibrated)
+        XCTAssertEqual(summary.actionTitle, "Recalibrate")
+        XCTAssertEqual(summary.statusTitle, "Calibrated")
+        XCTAssertTrue(summary.displayText.contains("Calibrated"))
+    }
+
     private var curatedModels: [CuratedModel] {
         [smallModel, mediumModel, largeModel]
     }

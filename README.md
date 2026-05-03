@@ -212,6 +212,48 @@ let response = try await LocalLLMEngine.shared.generate(
 
 Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
+### Preflight a request
+
+After loading a provider, call `preflight` to answer whether a specific prompt fits the context that actually initialized:
+
+```swift
+var options = GenerationOptions(maxOutputTokens: 512)
+let preflight = try await LocalLLMEngine.shared.preflight(
+    system: "You are a helpful assistant.",
+    prompt: userPrompt,
+    options: options
+)
+
+if !preflight.canGenerate {
+    // Disable Run, trim input, or split the request before calling generate.
+    return
+}
+
+options.maxOutputTokens = preflight.effectiveMaxOutputTokens
+```
+
+`loadedContextSize` is the usable context for the currently loaded model/provider. `modelTrainingContextSize` is the model's advertised training context when known. A GGUF model may advertise 256k context but be loaded at 16k because of app policy, default caps, or device limits; preflight budgets against the loaded 16k context. Preflight does not perform calibration probing.
+
+GGUF preflight uses exact tokenization through the loaded llama vocabulary and chat template. Apple Intelligence preflight uses the same coarse token estimator as Apple Intelligence generation stats, so `usesExactTokenCounts` is `false`.
+
+### Calibrate GGUF context
+
+GGUF context calibration is explicit and user-triggered. It probes power-of-two context tiers, records the highest tier that can initialize on the current device, and saves the result in the shared App Group settings. The cache key includes a generated per-device id, the installed model fingerprint, and the llama runtime configuration, so the same user can share model files across apps while keeping separate limits for different devices and runtime knobs.
+
+```swift
+let record = try await LocalLLMEngine.calibrateContext(
+    for: installedModel,
+    in: library
+) { progress in
+    // Update a cancelable progress UI with progress.currentContext,
+    // progress.lastSuccessfulContext, and progress.fractionCompleted.
+}
+
+print(record.maximumSupportedContext)
+```
+
+`LocalLLMEngine.loadPlan(from:in:)` uses a matching calibration record in automatic context mode. Manual mode still uses the explicit user value. If there is no matching calibration, automatic mode keeps the conservative defaults: 4,096 tokens on iOS and 16,384 tokens on desktop, bounded by the model training context when known.
+
 ### Keep a session live between queries
 
 `LocalLLMEngine.shared.generate(system:prompt:options:)` is still the right default for one-shot and extraction workflows. It keeps a loaded llama model/context available internally, but the API remains stateless across requests.
@@ -231,9 +273,14 @@ let first = try await session.generate(
     options: GenerationOptions(maxOutputTokens: 512)
 ) { _ in }
 
-let followUp = try await session.generate(
+let budget = try await session.preflight(
     prompt: "Now summarize that in one sentence.",
     options: GenerationOptions(maxOutputTokens: 128)
+)
+
+let followUp = try await session.generate(
+    prompt: "Now summarize that in one sentence.",
+    options: GenerationOptions(maxOutputTokens: budget.effectiveMaxOutputTokens)
 ) { _ in }
 
 await session.unload()
@@ -300,6 +347,20 @@ struct LocalModelSettingsView: View {
             library: library,
             selectedModelID: $selectedModelID,
             systemModels: LocalLLMEngine.availableSystemModels(),
+            calibrationAdapter: ModelLibraryPickerCalibrationAdapter(
+                runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
+                calibrate: { model, onProgress in
+                    try await LocalLLMEngine.calibrateContext(
+                        for: model,
+                        in: library,
+                        onProgress: { progress in
+                            await MainActor.run {
+                                onProgress(progress)
+                            }
+                        }
+                    )
+                }
+            ),
             onModelDeleted: { deleted in
                 Task {
                     if await LocalLLMEngine.shared.currentModelID() == deleted.id {
@@ -314,6 +375,8 @@ struct LocalModelSettingsView: View {
     }
 }
 ```
+
+When a calibration adapter is supplied, installed model rows show the effective automatic context. Uncalibrated rows show labels such as `context 16,384 (Uncalibrated)` or `context 4,096 (Uncalibrated)` and a `Calibrate` action. Rows with a matching record show the calibrated value, `context 32,768 (Calibrated)`, and a `Recalibrate` action. While calibration runs, the row shows the current probed tier, last successful tier, progress, and a cancel button.
 
 The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
 

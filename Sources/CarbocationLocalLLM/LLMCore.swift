@@ -139,6 +139,43 @@ public enum LLMGenerationBudget {
     public static let promptSafetyTokens = 256
 }
 
+public struct LLMGenerationPreflight: Hashable, Sendable {
+    public var loadedContextSize: Int
+    public var modelTrainingContextSize: Int
+    public var promptTokens: Int
+    public var reservedOutputTokens: Int
+    public var requestedMaxOutputTokens: Int?
+    public var availableOutputTokens: Int
+    public var effectiveMaxOutputTokens: Int
+    public var canGenerate: Bool
+    public var usesExactTokenCounts: Bool
+    public var templateMode: LLMChatTemplateMode
+
+    public init(
+        loadedContextSize: Int,
+        modelTrainingContextSize: Int,
+        promptTokens: Int,
+        reservedOutputTokens: Int,
+        requestedMaxOutputTokens: Int?,
+        usesExactTokenCounts: Bool,
+        templateMode: LLMChatTemplateMode
+    ) {
+        self.loadedContextSize = loadedContextSize
+        self.modelTrainingContextSize = modelTrainingContextSize
+        self.promptTokens = promptTokens
+        self.reservedOutputTokens = reservedOutputTokens
+        self.requestedMaxOutputTokens = requestedMaxOutputTokens
+
+        let availableOutputTokens = max(0, loadedContextSize - promptTokens - reservedOutputTokens)
+        let positiveRequestedMax = requestedMaxOutputTokens.flatMap { $0 > 0 ? $0 : nil }
+        self.availableOutputTokens = availableOutputTokens
+        self.effectiveMaxOutputTokens = min(positiveRequestedMax ?? availableOutputTokens, availableOutputTokens)
+        self.canGenerate = promptTokens < loadedContextSize && self.effectiveMaxOutputTokens > 0
+        self.usesExactTokenCounts = usesExactTokenCounts
+        self.templateMode = templateMode
+    }
+}
+
 public enum LLMSystemModelID: String, Codable, Hashable, Sendable {
     case appleIntelligence = "system.apple-intelligence"
 }

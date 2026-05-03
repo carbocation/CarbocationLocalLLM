@@ -12,7 +12,7 @@ private let llamaRuntimeLog = Logger(
 private let platformDefaultGPULayerCount: Int32 = 0
 // Large mobile GGUFs can fit model + KV memory but fail llama.cpp's 512-token graph reservation.
 private let platformDefaultBatchSizeLimit = 64
-private let platformMaximumContextSize = 4_096
+private let platformMaximumContextSize = Int.max
 #else
 private let platformDefaultGPULayerCount: Int32 = 999
 private let platformDefaultBatchSizeLimit = 2_048
@@ -172,7 +172,7 @@ public actor LlamaEngine: LLMEngine {
         case unavailable(String)
     }
 
-    private let configuration: LlamaEngineConfiguration
+    let configuration: LlamaEngineConfiguration
 
     private var model: OpaquePointer?
     private var context: OpaquePointer?
@@ -208,6 +208,51 @@ public actor LlamaEngine: LLMEngine {
 
     public func currentLoadedModelInfo() -> LlamaLoadedModelInfo? {
         loadedInfo
+    }
+
+    public func preflight(
+        system: String,
+        prompt: String,
+        options: GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        guard context != nil, let vocabulary, let loadedInfo else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        let promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
+        let renderedPrompt = promptFormatting.text
+        let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
+            renderedPrompt,
+            vocab: vocabulary
+        )
+        let promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
+        guard !promptTokens.isEmpty else {
+            throw LLMEngineError.tokenizationFailed
+        }
+
+        let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
+            in: renderedPrompt,
+            profile: promptFormatting.outputProfile
+        )
+        let grammarMode = Self.generationGrammarMode(
+            for: options,
+            profile: promptFormatting.outputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+        )
+        if options.grammar != nil {
+            let sampler = try buildSampler(grammarMode: grammarMode, options: options, vocab: vocabulary)
+            llama_sampler_free(sampler)
+        }
+
+        return LLMGenerationPreflight(
+            loadedContextSize: loadedInfo.contextSize,
+            modelTrainingContextSize: loadedInfo.trainingContextSize,
+            promptTokens: promptTokens.count,
+            reservedOutputTokens: configuration.promptReserveTokens,
+            requestedMaxOutputTokens: options.maxOutputTokens,
+            usesExactTokenCounts: true,
+            templateMode: promptFormatting.mode
+        )
     }
 
     public static func probeTrainingContext(at url: URL) -> Int? {

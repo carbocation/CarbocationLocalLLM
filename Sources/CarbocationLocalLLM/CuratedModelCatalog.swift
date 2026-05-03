@@ -80,13 +80,13 @@ public enum CuratedModelCatalog {
             sha256: nil
         ),
         CuratedModel(
-            id: "qwen3.6-35b-a3b-it-q4km",
-            displayName: "Qwen3.6 35B A3B Instruct (Q4_K_M)",
-            subtitle: "Top-tier MoE: 35B total / about 3B active. Strongest quality; needs about 48 GB RAM.",
-            hfRepo: "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF",
-            hfFilename: "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
-            approxSizeBytes: 21_000_000_000,
-            contextLength: 32_768,
+            id: "qwen3.6-27b-dense-q4km",
+            displayName: "Qwen3.6 27B Dense (Q4_K_M)",
+            subtitle: "Dense high-memory Qwen option. Strong coding and reasoning; needs about 48 GB RAM.",
+            hfRepo: "bartowski/Qwen_Qwen3.6-27B-GGUF",
+            hfFilename: "Qwen_Qwen3.6-27B-Q4_K_M.gguf",
+            approxSizeBytes: 17_500_000_000,
+            contextLength: 262_144,
             quantization: "Q4_K_M",
             recommendedRAMGB: 48,
             sha256: nil

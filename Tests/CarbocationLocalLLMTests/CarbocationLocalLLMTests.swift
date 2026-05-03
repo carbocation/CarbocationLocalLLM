@@ -39,6 +39,65 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(modelsDirectory.standardizedFileURL.path, expected.standardizedFileURL.path)
     }
 
+    func testContextCalibrationStoreSeparatesDeviceModelAndRuntimeKeys() {
+        let suiteName = "CarbocationLocalLLMCalibrationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("device-a", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let model = InstalledModel(
+            displayName: "Calibration Model",
+            filename: "model-Q4_K_M.gguf",
+            sizeBytes: 2_000_000,
+            contextLength: 65_536,
+            quantization: "Q4_K_M",
+            source: .imported,
+            sha256: "abc123"
+        )
+        let runtime = calibrationRuntime(batchSizeLimit: 2_048)
+        let key = store.key(for: model, runtime: runtime)
+        let record = LlamaContextCalibrationRecord(
+            key: key,
+            maximumSupportedContext: 32_768,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 16_384, succeeded: true),
+                LlamaContextCalibrationProbe(context: 32_768, succeeded: true),
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: false)
+            ]
+        )
+
+        store.save(record)
+
+        XCTAssertEqual(
+            store.record(for: model, runtime: runtime)?.maximumSupportedContext,
+            32_768
+        )
+        XCTAssertNil(store.record(
+            for: model,
+            runtime: calibrationRuntime(batchSizeLimit: 1_024)
+        ))
+
+        defaults.set("device-b", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+        XCTAssertNil(store.record(for: model, runtime: runtime))
+    }
+
+    func testContextCalibrationSearchUsesCoarsePowerOfTwoBisect() async throws {
+        let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: 65_536)
+        var probed: [Int] = []
+
+        let result = try await LlamaContextCalibrationAlgorithm.search(candidates: candidates) { context in
+            probed.append(context)
+            return context <= 16_384
+        }
+
+        XCTAssertEqual(candidates, [512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536])
+        XCTAssertEqual(result.maximumSupportedContext, 16_384)
+        XCTAssertLessThan(probed.count, candidates.count)
+        XCTAssertTrue(result.probes.contains(LlamaContextCalibrationProbe(context: 16_384, succeeded: true)))
+        XCTAssertTrue(result.probes.contains { !$0.succeeded })
+    }
+
     func testInstalledModelInfersQuantization() {
         XCTAssertEqual(InstalledModel.inferQuantization(from: "Qwen2.5-7B-Instruct-Q4_K_M.gguf"), "Q4_K_M")
         XCTAssertEqual(InstalledModel.inferQuantization(from: "Phi-3.5-mini-instruct-Q5_K_M.gguf"), "Q5_K_M")
@@ -120,6 +179,96 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil((try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(GenerationOptions())
         ) as? [String: Any])?["enableThinking"])
+    }
+
+    func testGenerationPreflightComputesOutputBudget() {
+        let uncapped = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_000,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: nil,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(uncapped.loadedContextSize, 4_096)
+        XCTAssertEqual(uncapped.modelTrainingContextSize, 262_144)
+        XCTAssertEqual(uncapped.availableOutputTokens, 72)
+        XCTAssertEqual(uncapped.effectiveMaxOutputTokens, 72)
+        XCTAssertTrue(uncapped.canGenerate)
+
+        let capped = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_000,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: 64,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(capped.availableOutputTokens, 72)
+        XCTAssertEqual(capped.effectiveMaxOutputTokens, 64)
+        XCTAssertTrue(capped.canGenerate)
+
+        let overRequested = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_000,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: 256,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(overRequested.availableOutputTokens, 72)
+        XCTAssertEqual(overRequested.effectiveMaxOutputTokens, 72)
+
+        let zeroRequested = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_000,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: 0,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(zeroRequested.requestedMaxOutputTokens, 0)
+        XCTAssertEqual(zeroRequested.effectiveMaxOutputTokens, 72)
+
+        let negativeRequested = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_000,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: -1,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(negativeRequested.effectiveMaxOutputTokens, 72)
+
+        let exactFit = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 3_072,
+            reservedOutputTokens: 1_024,
+            requestedMaxOutputTokens: nil,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(exactFit.availableOutputTokens, 0)
+        XCTAssertEqual(exactFit.effectiveMaxOutputTokens, 0)
+        XCTAssertFalse(exactFit.canGenerate)
+
+        let overflow = LLMGenerationPreflight(
+            loadedContextSize: 4_096,
+            modelTrainingContextSize: 262_144,
+            promptTokens: 4_097,
+            reservedOutputTokens: 0,
+            requestedMaxOutputTokens: nil,
+            usesExactTokenCounts: true,
+            templateMode: .embedded
+        )
+        XCTAssertEqual(overflow.availableOutputTokens, 0)
+        XCTAssertFalse(overflow.canGenerate)
     }
 
     @MainActor
@@ -626,6 +775,12 @@ final class CarbocationLocalLLMTests: XCTestCase {
         let mediumTier = CuratedModelCatalog.recommendedModel(
             forPhysicalMemoryBytes: UInt64(16) * 1_073_741_824
         )
+        let largeTier = CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: UInt64(32) * 1_073_741_824
+        )
+        let topTier = CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: UInt64(48) * 1_073_741_824
+        )
 
         XCTAssertNil(belowSmallestTier)
         XCTAssertEqual(smallTier?.id, "gemma-4-e2b-it-q4km")
@@ -636,6 +791,14 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(smallTier?.contextLength, 131_072)
         XCTAssertEqual(smallTier?.recommendedRAMGB, 8)
         XCTAssertEqual(mediumTier?.id, "qwen3.5-9b-instruct-q4km")
+        XCTAssertEqual(largeTier?.id, "gemma-4-26b-a4b-it-q4km")
+        XCTAssertEqual(topTier?.id, "qwen3.6-27b-dense-q4km")
+        XCTAssertEqual(topTier?.displayName, "Qwen3.6 27B Dense (Q4_K_M)")
+        XCTAssertEqual(topTier?.hfRepo, "bartowski/Qwen_Qwen3.6-27B-GGUF")
+        XCTAssertEqual(topTier?.hfFilename, "Qwen_Qwen3.6-27B-Q4_K_M.gguf")
+        XCTAssertEqual(topTier?.approxSizeBytes, 17_500_000_000)
+        XCTAssertEqual(topTier?.contextLength, 262_144)
+        XCTAssertEqual(topTier?.recommendedRAMGB, 48)
     }
 
     private func makeTemporaryDirectory() throws -> URL {
@@ -687,6 +850,18 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
     private func appendInt64(_ value: Int64, to data: inout Data) {
         appendUInt64(UInt64(bitPattern: value), to: &data)
+    }
+
+    private func calibrationRuntime(
+        batchSizeLimit: Int
+    ) -> LlamaContextCalibrationRuntimeFingerprint {
+        LlamaContextCalibrationRuntimeFingerprint(
+            platform: "macOS",
+            gpuLayerCount: 999,
+            useMemoryMap: true,
+            batchSizeLimit: batchSizeLimit,
+            threadCount: 4
+        )
     }
 }
 

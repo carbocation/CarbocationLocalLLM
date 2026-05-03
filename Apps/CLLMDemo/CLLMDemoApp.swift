@@ -38,6 +38,7 @@ private struct DemoRootView: View {
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
                     systemModels: state.systemModels,
+                    calibrationAdapter: state.calibrationAdapter,
                     onConfirmSelection: { selection in
                         state.select(selection)
                     }
@@ -260,6 +261,23 @@ private final class DemoState {
 
     var systemModels: [LLMSystemModelOption] {
         LocalLLMEngine.availableSystemModels()
+    }
+
+    var calibrationAdapter: ModelLibraryPickerCalibrationAdapter {
+        ModelLibraryPickerCalibrationAdapter(
+            runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
+            calibrate: { [library] model, onProgress in
+                try await LocalLLMEngine.calibrateContext(
+                    for: model,
+                    in: library,
+                    onProgress: { progress in
+                        await MainActor.run {
+                            onProgress(progress)
+                        }
+                    }
+                )
+            }
+        )
     }
 
     var selectedModelLabel: String? {

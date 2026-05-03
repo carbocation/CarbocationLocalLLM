@@ -85,11 +85,14 @@ public enum AppleIntelligenceUnsupportedFeatureBehavior: String, Codable, Hashab
 
 public struct AppleIntelligenceEngineConfiguration: Hashable, Sendable {
     public var unsupportedFeatureBehavior: AppleIntelligenceUnsupportedFeatureBehavior
+    public var promptReserveTokens: Int
 
     public init(
-        unsupportedFeatureBehavior: AppleIntelligenceUnsupportedFeatureBehavior = .ignore
+        unsupportedFeatureBehavior: AppleIntelligenceUnsupportedFeatureBehavior = .ignore,
+        promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve
     ) {
         self.unsupportedFeatureBehavior = unsupportedFeatureBehavior
+        self.promptReserveTokens = promptReserveTokens
     }
 }
 
@@ -180,6 +183,50 @@ public enum AppleIntelligenceOptionsMapper {
     private static func normalizedMaximumResponseTokens(_ value: Int?) -> Int? {
         guard let value, value > 0 else { return nil }
         return value
+    }
+}
+
+fileprivate enum AppleIntelligencePromptBudget {
+    static func instructions(
+        system: String,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) -> String {
+        var parts: [String] = []
+        let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSystem.isEmpty {
+            parts.append(trimmedSystem)
+        }
+        if options.grammar != nil || options.stopAtBalancedJSON {
+            parts.append("Follow the requested output format exactly. If the prompt asks for JSON, return only valid JSON with no surrounding prose.")
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    static func estimatedPromptTokens(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) -> Int {
+        TokenEstimator.estimate(text: instructions(system: system, options: options))
+            + TokenEstimator.estimate(text: prompt)
+    }
+
+    static func preflight(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        contextSize: Int,
+        promptReserveTokens: Int
+    ) -> LLMGenerationPreflight {
+        LLMGenerationPreflight(
+            loadedContextSize: contextSize,
+            modelTrainingContextSize: contextSize,
+            promptTokens: estimatedPromptTokens(system: system, prompt: prompt, options: options),
+            reservedOutputTokens: promptReserveTokens,
+            requestedMaxOutputTokens: options.maxOutputTokens,
+            usesExactTokenCounts: false,
+            templateMode: .unavailable
+        )
     }
 }
 
@@ -357,6 +404,31 @@ public actor AppleIntelligenceEngine: LLMEngine {
         Self.availability().contextSize
     }
 
+    public func preflight(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        let availability = Self.availability()
+        guard availability.isAvailable else {
+            throw AppleIntelligenceEngineError.unavailable(availability)
+        }
+
+        let resolvedOptions = AppleIntelligenceOptionsMapper.resolve(options)
+        if configuration.unsupportedFeatureBehavior == .fail,
+           !resolvedOptions.unsupportedFeatures.isEmpty {
+            throw AppleIntelligenceEngineError.unsupportedFeatures(resolvedOptions.unsupportedFeatures)
+        }
+
+        return AppleIntelligencePromptBudget.preflight(
+            system: system,
+            prompt: prompt,
+            options: options,
+            contextSize: availability.contextSize,
+            promptReserveTokens: configuration.promptReserveTokens
+        )
+    }
+
     public func generate(
         system: String,
         prompt: String,
@@ -406,6 +478,30 @@ public actor AppleIntelligenceSession {
 
     public func currentContextSize() -> Int {
         AppleIntelligenceEngine.availability().contextSize
+    }
+
+    public func preflight(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        let availability = AppleIntelligenceEngine.availability()
+        guard availability.isAvailable else {
+            throw AppleIntelligenceEngineError.unavailable(availability)
+        }
+
+        let resolvedOptions = AppleIntelligenceOptionsMapper.resolve(options)
+        if configuration.unsupportedFeatureBehavior == .fail,
+           !resolvedOptions.unsupportedFeatures.isEmpty {
+            throw AppleIntelligenceEngineError.unsupportedFeatures(resolvedOptions.unsupportedFeatures)
+        }
+
+        return AppleIntelligencePromptBudget.preflight(
+            system: system,
+            prompt: prompt,
+            options: options,
+            contextSize: availability.contextSize,
+            promptReserveTokens: configuration.promptReserveTokens
+        )
     }
 
     public func generate(
@@ -485,7 +581,11 @@ extension AppleIntelligenceEngine {
         let processed = AppleIntelligenceResponsePostProcessor.process(response.content, options: options)
         let result = processed.text
         let duration = Date().timeIntervalSince(startedAt)
-        let promptTokens = TokenEstimator.estimate(text: system) + TokenEstimator.estimate(text: prompt)
+        let promptTokens = AppleIntelligencePromptBudget.estimatedPromptTokens(
+            system: system,
+            prompt: prompt,
+            options: options
+        )
         let generatedTokens = TokenEstimator.estimate(text: result)
         let stopReason = processed.stopReason ?? stopReasonForCompletedResponse(
             result: result,
@@ -539,15 +639,7 @@ extension AppleIntelligenceEngine {
         system: String,
         options: CarbocationLocalLLM.GenerationOptions
     ) -> String {
-        var parts: [String] = []
-        let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedSystem.isEmpty {
-            parts.append(trimmedSystem)
-        }
-        if options.grammar != nil || options.stopAtBalancedJSON {
-            parts.append("Follow the requested output format exactly. If the prompt asks for JSON, return only valid JSON with no surrounding prose.")
-        }
-        return parts.joined(separator: "\n\n")
+        AppleIntelligencePromptBudget.instructions(system: system, options: options)
     }
 
     private nonisolated func stopReasonForCompletedResponse(
@@ -583,7 +675,11 @@ extension AppleIntelligenceSession {
         let processed = AppleIntelligenceResponsePostProcessor.process(response.content, options: options)
         let result = processed.text
         let duration = Date().timeIntervalSince(startedAt)
-        let promptTokens = TokenEstimator.estimate(text: system) + TokenEstimator.estimate(text: prompt)
+        let promptTokens = AppleIntelligencePromptBudget.estimatedPromptTokens(
+            system: system,
+            prompt: prompt,
+            options: options
+        )
         let generatedTokens = TokenEstimator.estimate(text: result)
         let stopReason = processed.stopReason ?? Self.stopReasonForCompletedResponse(
             result: result,
@@ -654,15 +750,7 @@ extension AppleIntelligenceSession {
         system: String,
         options: CarbocationLocalLLM.GenerationOptions
     ) -> String {
-        var parts: [String] = []
-        let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedSystem.isEmpty {
-            parts.append(trimmedSystem)
-        }
-        if options.grammar != nil || options.stopAtBalancedJSON {
-            parts.append("Follow the requested output format exactly. If the prompt asks for JSON, return only valid JSON with no surrounding prose.")
-        }
-        return parts.joined(separator: "\n\n")
+        AppleIntelligencePromptBudget.instructions(system: system, options: options)
     }
 
     private nonisolated static func stopReasonForCompletedResponse(

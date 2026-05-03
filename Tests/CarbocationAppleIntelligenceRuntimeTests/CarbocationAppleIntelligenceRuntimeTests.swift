@@ -73,6 +73,13 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         XCTAssertEqual(resolved.temperature, 0.6)
     }
 
+    func testConfigurationDefaultsPromptReserve() {
+        XCTAssertEqual(
+            AppleIntelligenceEngineConfiguration().promptReserveTokens,
+            LLMGenerationBudget.outputTokenReserve
+        )
+    }
+
     func testPostProcessorTrimsAtEarliestStopSequence() {
         let options = GenerationOptions(stopSequences: ["END", "STOP"])
         let processed = AppleIntelligenceResponsePostProcessor.process(
@@ -168,6 +175,25 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         }
     }
 
+    func testEnginePreflightThrowsUnavailableWhenBuiltWithoutFoundationModels() async {
+        let engine = AppleIntelligenceEngine()
+
+        do {
+            _ = try await engine.preflight(
+                system: "You are concise.",
+                prompt: "Say hello.",
+                options: .extractionSafe
+            )
+            XCTFail("Expected Apple Intelligence preflight to be unavailable.")
+        } catch let error as AppleIntelligenceEngineError {
+            guard case .unavailable(.unavailable(.sdkUnavailable)) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testSessionThrowsUnavailableWhenBuiltWithoutFoundationModels() async {
         let session = AppleIntelligenceSession(system: "You are concise.")
 
@@ -177,6 +203,24 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
                 options: .extractionSafe
             ) { _ in }
             XCTFail("Expected Apple Intelligence session generation to be unavailable.")
+        } catch let error as AppleIntelligenceEngineError {
+            guard case .unavailable(.unavailable(.sdkUnavailable)) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSessionPreflightThrowsUnavailableWhenBuiltWithoutFoundationModels() async {
+        let session = AppleIntelligenceSession(system: "You are concise.")
+
+        do {
+            _ = try await session.preflight(
+                prompt: "Say hello.",
+                options: .extractionSafe
+            )
+            XCTFail("Expected Apple Intelligence session preflight to be unavailable.")
         } catch let error as AppleIntelligenceEngineError {
             guard case .unavailable(.unavailable(.sdkUnavailable)) = error else {
                 return XCTFail("Unexpected error: \(error)")

@@ -39,7 +39,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     }
 
     func makeAppleIntelligenceConfiguration() -> AppleIntelligenceEngineConfiguration {
-        AppleIntelligenceEngineConfiguration()
+        AppleIntelligenceEngineConfiguration(promptReserveTokens: promptReserveTokens)
     }
 }
 
@@ -157,6 +157,14 @@ public actor LocalLLMEngine: LLMEngine {
         LlamaRuntimeModelProbe.probeTrainingContext(atPath: path)
     }
 
+    public nonisolated static func contextCalibrationRuntimeFingerprint(
+        configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration()
+    ) -> LlamaContextCalibrationRuntimeFingerprint {
+        LlamaEngine.contextCalibrationRuntimeFingerprint(
+            configuration: configuration.makeLlamaConfiguration()
+        )
+    }
+
     @MainActor
     public static func capabilities(
         for selection: LLMModelSelection,
@@ -185,7 +193,9 @@ public actor LocalLLMEngine: LLMEngine {
         in library: ModelLibrary,
         defaults: UserDefaults = .standard,
         contextKeys: LlamaContextPreferenceKeys = .init(),
-        refreshingLibrary: Bool = true
+        refreshingLibrary: Bool = true,
+        calibrationStore: LlamaContextCalibrationStore? = .shared,
+        configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration()
     ) async -> LocalLLMLoadPlan? {
         if refreshingLibrary {
             await library.refresh()
@@ -201,13 +211,18 @@ public actor LocalLLMEngine: LLMEngine {
                 return nil
             }
             let capabilities = capabilities(for: selection, in: library)
+            let runtimeFingerprint = contextCalibrationRuntimeFingerprint(configuration: configuration)
+            let calibratedContext = calibrationStore?
+                .record(for: model, runtime: runtimeFingerprint)?
+                .maximumSupportedContext
             return LocalLLMLoadPlan(
                 selection: selection,
                 displayName: model.displayName,
                 requestedContext: LlamaContextPolicy.resolvedRequestedContext(
                     for: model,
                     defaults: defaults,
-                    keys: contextKeys
+                    keys: contextKeys,
+                    autoCap: calibratedContext ?? LlamaContextPolicy.defaultAutoCap
                 ),
                 capabilities: capabilities
             )
@@ -276,6 +291,23 @@ public actor LocalLLMEngine: LLMEngine {
         }
     }
 
+    public static func calibrateContext(
+        for model: InstalledModel,
+        in library: ModelLibrary,
+        store: LlamaContextCalibrationStore = .shared,
+        configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration(),
+        onProgress: @escaping @Sendable (LlamaContextCalibrationProgress) async -> Void = { _ in }
+    ) async throws -> LlamaContextCalibrationRecord {
+        let root = await MainActor.run { library.root }
+        let engine = LlamaEngine(configuration: configuration.makeLlamaConfiguration())
+        return try await engine.calibrateContext(
+            model: model,
+            from: root,
+            store: store,
+            onProgress: onProgress
+        )
+    }
+
     public func unload() async {
         loadedInfo = nil
         await llamaEngine.unload()
@@ -296,6 +328,35 @@ public actor LocalLLMEngine: LLMEngine {
 
     public func currentLoadedModelInfo() -> LocalLLMLoadedModelInfo? {
         loadedInfo
+    }
+
+    public func preflight(
+        system: String,
+        prompt: String,
+        options: GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.preflight(
+                system: system,
+                prompt: prompt,
+                options: options
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.preflight(
+                    system: system,
+                    prompt: prompt,
+                    options: options
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
     }
 
     public func generate(
@@ -410,6 +471,39 @@ public actor LocalLLMSession {
 
     public func currentContextSize() -> Int {
         loadedInfo?.contextSize ?? 0
+    }
+
+    public func preflight(
+        prompt: String,
+        options: GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            guard let llamaEngine else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            return try await llamaEngine.preflight(
+                system: system,
+                prompt: prompt,
+                options: options
+            )
+        case .system(.appleIntelligence):
+            guard let appleIntelligenceSession else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            do {
+                return try await appleIntelligenceSession.preflight(
+                    prompt: prompt,
+                    options: options
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
     }
 
     public func generate(

@@ -140,6 +140,7 @@ private struct SmokeRootView: View {
             confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
             confirmDisabled: smoke.isRunning,
             systemModels: Self.systemModels,
+            calibrationAdapter: Self.calibrationAdapter(for: library),
             onConfirmSelection: { selection in
                 smoke.run(selection: selection, library: library)
             }
@@ -173,6 +174,25 @@ private struct SmokeRootView: View {
 
     private static var systemModels: [LLMSystemModelOption] {
         LocalLLMEngine.availableSystemModels()
+    }
+
+    private static func calibrationAdapter(
+        for library: ModelLibrary
+    ) -> ModelLibraryPickerCalibrationAdapter {
+        ModelLibraryPickerCalibrationAdapter(
+            runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
+            calibrate: { model, onProgress in
+                try await LocalLLMEngine.calibrateContext(
+                    for: model,
+                    in: library,
+                    onProgress: { progress in
+                        await MainActor.run {
+                            onProgress(progress)
+                        }
+                    }
+                )
+            }
+        )
     }
 
     private static func makeLibrary() -> ModelLibrary {
@@ -221,10 +241,16 @@ private final class SmokeState {
             let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
                 heartbeatInterval: 0.5
             ))
+            let plan = await LocalLLMEngine.loadPlan(
+                from: selection.storageValue,
+                in: library,
+                refreshingLibrary: false
+            )
+            let requestedContext = plan?.requestedContext ?? 4_096
             let loaded = try await engine.load(
                 selection: selection,
                 from: library,
-                requestedContext: 4_096
+                requestedContext: requestedContext
             )
 
             append("model: \(loaded.displayName)")
@@ -233,7 +259,7 @@ private final class SmokeState {
                let model = library.model(id: id) {
                 append("path: \(model.weightsURL(in: library.root).path)")
             }
-            append("requestedContext: 4096")
+            append("requestedContext: \(requestedContext)")
             append("loadedContext: \(loaded.contextSize)")
             append("trainingContext: \(loaded.trainingContextSize)")
             append("supportsGrammar: \(loaded.supportsGrammar)")

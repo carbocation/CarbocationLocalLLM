@@ -121,6 +121,53 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadPlanUsesCalibratedContextOnlyInAutoMode() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let model = try installFixtureModel(
+            displayName: "Calibrated Context Model",
+            contextLength: 131_072,
+            in: root
+        )
+        let suiteName = "CarbocationLocalLLMRuntimeCalibrationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("device-a", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let runtime = LocalLLMEngine.contextCalibrationRuntimeFingerprint()
+        store.save(LlamaContextCalibrationRecord(
+            key: store.key(for: model, runtime: runtime),
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 32_768, succeeded: true),
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true),
+                LlamaContextCalibrationProbe(context: 131_072, succeeded: false)
+            ]
+        ))
+
+        let autoPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: true,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(autoPlan).requestedContext, 65_536)
+
+        defaults.set(LlamaContextMode.manual.rawValue, forKey: "llama.contextMode")
+        defaults.set(32_768, forKey: "llama.numCtx")
+
+        let manualPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(manualPlan).requestedContext, 32_768)
+    }
+
+    @MainActor
     func testLoadPlanHandlesSystemModelAvailability() async throws {
         let root = try makeTemporaryDirectory()
         let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
@@ -160,6 +207,55 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testPreflightRequiresLoadedSelection() async {
+        let engine = LocalLLMEngine()
+
+        do {
+            _ = try await engine.preflight(
+                system: "You are concise.",
+                prompt: "Say hello.",
+                options: GenerationOptions(maxOutputTokens: 16)
+            )
+            XCTFail("Expected preflight to require a loaded selection.")
+        } catch let error as LocalLLMEngineError {
+            XCTAssertEqual(error.errorDescription, LocalLLMEngineError.noSelectionLoaded.errorDescription)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    @MainActor
+    func testSystemModelPreflightUsesEstimatedTokenCountsWhenAvailable() async throws {
+        guard let option = LocalLLMEngine.availableSystemModels().first(where: {
+            $0.selection == .system(.appleIntelligence)
+        }) else {
+            return
+        }
+
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let engine = LocalLLMEngine()
+        _ = try await engine.load(
+            selection: option.selection,
+            from: library,
+            requestedContext: option.contextLength
+        )
+
+        let preflight = try await engine.preflight(
+            system: "Return only JSON.",
+            prompt: #"Return {"ok": true}."#,
+            options: GenerationOptions(maxOutputTokens: 96, stopAtBalancedJSON: true)
+        )
+
+        XCTAssertEqual(preflight.loadedContextSize, option.contextLength)
+        XCTAssertEqual(preflight.modelTrainingContextSize, option.contextLength)
+        XCTAssertFalse(preflight.usesExactTokenCounts)
+        XCTAssertEqual(preflight.requestedMaxOutputTokens, 96)
+        XCTAssertEqual(preflight.templateMode, .unavailable)
+        XCTAssertGreaterThan(preflight.promptTokens, 0)
+        XCTAssertGreaterThanOrEqual(preflight.effectiveMaxOutputTokens, 0)
     }
 
     @MainActor
