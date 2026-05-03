@@ -616,6 +616,24 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(recommendation?.id, "small")
     }
 
+    func testDefaultCuratedCatalogRecommendationTiers() {
+        let smallTier = CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: UInt64(8) * 1_073_741_824
+        )
+        let mediumTier = CuratedModelCatalog.recommendedModel(
+            forPhysicalMemoryBytes: UInt64(16) * 1_073_741_824
+        )
+
+        XCTAssertEqual(smallTier?.id, "gemma-4-e2b-it-q4km")
+        XCTAssertEqual(smallTier?.displayName, "Gemma 4 E2B Instruct (Q4_K_M)")
+        XCTAssertEqual(smallTier?.hfRepo, "bartowski/google_gemma-4-E2B-it-GGUF")
+        XCTAssertEqual(smallTier?.hfFilename, "google_gemma-4-E2B-it-Q4_K_M.gguf")
+        XCTAssertEqual(smallTier?.approxSizeBytes, 3_500_000_000)
+        XCTAssertEqual(smallTier?.contextLength, 131_072)
+        XCTAssertEqual(smallTier?.recommendedRAMGB, 8)
+        XCTAssertEqual(mediumTier?.id, "qwen3.5-9b-instruct-q4km")
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("CarbocationLocalLLMTests-\(UUID().uuidString)", isDirectory: true)

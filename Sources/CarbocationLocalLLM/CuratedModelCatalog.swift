@@ -44,13 +44,13 @@ public struct CuratedModel: Identifiable, Hashable, Sendable {
 public enum CuratedModelCatalog {
     public static let all: [CuratedModel] = [
         CuratedModel(
-            id: "gemma-4-e4b-it-q4km",
-            displayName: "Gemma 4 E4B Instruct (Q4_K_M)",
-            subtitle: "Small and fast. Edge-tuned with 256K context; best for <=16 GB unified memory.",
-            hfRepo: "bartowski/google_gemma-4-E4B-it-GGUF",
-            hfFilename: "google_gemma-4-E4B-it-Q4_K_M.gguf",
-            approxSizeBytes: 3_000_000_000,
-            contextLength: 262_144,
+            id: "gemma-4-e2b-it-q4km",
+            displayName: "Gemma 4 E2B Instruct (Q4_K_M)",
+            subtitle: "Smallest practical on-device option. Fast local fallback for low-memory devices.",
+            hfRepo: "bartowski/google_gemma-4-E2B-it-GGUF",
+            hfFilename: "google_gemma-4-E2B-it-Q4_K_M.gguf",
+            approxSizeBytes: 3_500_000_000,
+            contextLength: 131_072,
             quantization: "Q4_K_M",
             recommendedRAMGB: 8,
             sha256: nil
@@ -58,7 +58,7 @@ public enum CuratedModelCatalog {
         CuratedModel(
             id: "qwen3.5-9b-instruct-q4km",
             displayName: "Qwen3.5 9B Instruct (Q4_K_M)",
-            subtitle: "Balanced default. Strong extraction and reasoning at about 5 GB.",
+            subtitle: "Balanced quality jump. Strong extraction and reasoning for 16 GB devices.",
             hfRepo: "bartowski/Qwen_Qwen3.5-9B-GGUF",
             hfFilename: "Qwen_Qwen3.5-9B-Q4_K_M.gguf",
             approxSizeBytes: 5_300_000_000,
@@ -112,4 +112,3 @@ public enum CuratedModelCatalog {
         return bestFit
     }
 }
-
