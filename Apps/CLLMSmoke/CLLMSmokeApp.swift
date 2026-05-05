@@ -1,6 +1,6 @@
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
-import CarbocationLocalLLMUI
+import CarbocationLocalLLMRuntimeUI
 import Foundation
 import Observation
 import SwiftUI
@@ -133,14 +133,12 @@ private struct SmokeRootView: View {
     }
 
     private var modelPicker: some View {
-        ModelLibraryPickerView(
+        LocalLLMModelConfigurationView(
             library: library,
             selectedModelID: $selectedModelID,
             title: CLLMSmokeMetadata.displayName,
             confirmTitle: smoke.isRunning ? "Running" : "Run Smoke Test",
             confirmDisabled: smoke.isRunning,
-            systemModels: Self.systemModels,
-            calibrationAdapter: Self.calibrationAdapter(for: library),
             onConfirmSelection: { selection in
                 smoke.run(selection: selection, library: library)
             }
@@ -170,29 +168,6 @@ private struct SmokeRootView: View {
             .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 6))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private static var systemModels: [LLMSystemModelOption] {
-        LocalLLMEngine.availableSystemModels()
-    }
-
-    private static func calibrationAdapter(
-        for library: ModelLibrary
-    ) -> ModelLibraryPickerCalibrationAdapter {
-        ModelLibraryPickerCalibrationAdapter(
-            runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
-            calibrate: { model, onProgress in
-                try await LocalLLMEngine.calibrateContext(
-                    for: model,
-                    in: library,
-                    onProgress: { progress in
-                        await MainActor.run {
-                            onProgress(progress)
-                        }
-                    }
-                )
-            }
-        )
     }
 
     private static func makeLibrary() -> ModelLibrary {

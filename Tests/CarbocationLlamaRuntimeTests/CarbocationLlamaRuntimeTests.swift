@@ -628,6 +628,44 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(rendered.outputProfile.extraStopStrings, ["<end_of_turn>", "<start_of_turn>"])
     }
 
+    func testFallbackPromptDetectsGemma4EmbeddedTemplate() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+
+        let rendered = try LlamaEngine.fallbackPrompt(
+            system: "System",
+            user: "User",
+            embeddedTemplate: template,
+            descriptor: nil
+        )
+
+        XCTAssertEqual(rendered.mode, .gemmaFallback)
+        XCTAssertTrue(rendered.text.contains("<|turn>system\nSystem<turn|>"))
+        XCTAssertTrue(rendered.text.contains("<|turn>user\nUser<turn|>"))
+        XCTAssertTrue(rendered.text.hasSuffix("<|turn>model\n<|channel>thought\n<channel|>"))
+        XCTAssertFalse(rendered.text.contains("<start_of_turn>"))
+        XCTAssertEqual(rendered.outputProfile.extraStopStrings, ["<turn|>", "<|turn>"])
+    }
+
+    func testFallbackPromptDetectsGemma4DescriptorWithoutEmbeddedTemplate() throws {
+        let descriptor = LlamaModelDescriptor(
+            url: URL(fileURLWithPath: "/tmp/google_gemma-4-26B-A4B-it-Q4_K_M.gguf"),
+            displayName: "Gemma 4 26B A4B Instruct",
+            filename: "google_gemma-4-26B-A4B-it-Q4_K_M.gguf"
+        )
+
+        let rendered = try LlamaEngine.fallbackPrompt(
+            system: "System",
+            user: "User",
+            embeddedTemplate: nil,
+            descriptor: descriptor
+        )
+
+        XCTAssertEqual(rendered.mode, .gemmaFallback)
+        XCTAssertTrue(rendered.text.contains("<|turn>system"))
+        XCTAssertTrue(rendered.text.contains("<|turn>model"))
+        XCTAssertFalse(rendered.text.contains("<start_of_turn>"))
+    }
+
     func testFallbackPromptDetectsChatMLWithoutAppConcepts() throws {
         let descriptor = LlamaModelDescriptor(
             url: URL(fileURLWithPath: "/tmp/qwen.gguf"),

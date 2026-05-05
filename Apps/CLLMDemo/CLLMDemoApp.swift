@@ -1,6 +1,6 @@
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
-import CarbocationLocalLLMUI
+import CarbocationLocalLLMRuntimeUI
 import Observation
 import SwiftUI
 
@@ -31,14 +31,12 @@ private struct DemoRootView: View {
     var body: some View {
         TabView {
             NavigationStack {
-                ModelLibraryPickerView(
+                LocalLLMModelConfigurationView(
                     library: state.library,
                     selectedModelID: $state.selectedModelID,
                     title: CLLMDemoMetadata.displayName,
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
-                    systemModels: state.systemModels,
-                    calibrationAdapter: state.calibrationAdapter,
                     onConfirmSelection: { selection in
                         state.select(selection)
                     }
@@ -261,23 +259,6 @@ private final class DemoState {
 
     var systemModels: [LLMSystemModelOption] {
         LocalLLMEngine.availableSystemModels()
-    }
-
-    var calibrationAdapter: ModelLibraryPickerCalibrationAdapter {
-        ModelLibraryPickerCalibrationAdapter(
-            runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
-            calibrate: { [library] model, onProgress in
-                try await LocalLLMEngine.calibrateContext(
-                    for: model,
-                    in: library,
-                    onProgress: { progress in
-                        await MainActor.run {
-                            onProgress(progress)
-                        }
-                    }
-                )
-            }
-        )
     }
 
     var selectedModelLabel: String? {

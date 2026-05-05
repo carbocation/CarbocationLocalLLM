@@ -41,7 +41,8 @@ public struct ModelLibraryPickerContextCalibrationSummary: Hashable, Sendable {
     }
 
     public var displayText: String {
-        "context \(context.formatted()) (\(statusTitle))"
+        let prefix = isCalibrated ? "max context" : "auto context"
+        return "\(prefix) \(context.formatted()) (\(statusTitle))"
     }
 }
 

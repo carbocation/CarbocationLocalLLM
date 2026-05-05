@@ -1,6 +1,6 @@
 # CarbocationLocalLLM
 
-CarbocationLocalLLM gives macOS and iOS apps local, on-device text generation — llama.cpp or Apple Intelligence, behind one Swift API. It handles model storage, downloads, model probing, provider selection, and ships a SwiftUI model-management pane. You bring the prompts, generation policy, and product UX.
+CarbocationLocalLLM gives macOS and iOS apps local, on-device text generation — llama.cpp or Apple Intelligence, behind one Swift API. It handles model storage, downloads, model probing, provider selection, context-window preferences, calibration, and ships a SwiftUI model-configuration pane. You bring the prompts, generation policy, and product UX.
 
 The package owns shared LLM infrastructure: neutral model storage, GGUF model management, llama.cpp runtime access, Apple Intelligence integration, a unified runtime facade, generation options, JSON helpers, and SwiftUI surfaces. Host apps own product behavior: app-specific prompts, grammars, settings policy, onboarding, command parsing, and post-generation cleanup.
 
@@ -53,7 +53,7 @@ targets: [
         dependencies: [
             .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
             .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
-            .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM")
+            .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
         ]
     )
 ]
@@ -66,16 +66,30 @@ Most apps add these three package products to the app target:
 ```swift
 import CarbocationLocalLLM         // core types
 import CarbocationLocalLLMRuntime  // unified llama.cpp + Apple Intelligence engine
-import CarbocationLocalLLMUI       // built-in model library picker
+import CarbocationLocalLLMRuntimeUI // batteries-included model configuration UI
 ```
 
 See [Products](#products) for the full list.
 
-### Minimal working integration
+### Preferred app integration
 
-Build a model library once at startup, refresh its cached state, then load a saved selection and generate:
+The default integration is intentionally one settings view plus one load path:
+
+1. Create one `ModelLibrary`.
+2. Persist `selectedModelID` with `@AppStorage` or `UserDefaults`.
+3. Show `LocalLLMModelConfigurationView` in your settings UI.
+4. Later call `LocalLLMEngine.loadPlan(from:in:)` and pass `plan.requestedContext` to `load`.
+
+You do not need to wire system model discovery, context calibration, context sliders, or context preference keys yourself unless you are building a custom settings UI. The batteries-included view owns those pieces and writes the same preferences that `loadPlan` reads.
+
+Minimal example:
 
 ```swift
+import CarbocationLocalLLM
+import CarbocationLocalLLMRuntime
+import CarbocationLocalLLMRuntimeUI
+import SwiftUI
+
 @MainActor
 func makeLibrary() -> ModelLibrary {
     ModelLibrary(
@@ -84,6 +98,18 @@ func makeLibrary() -> ModelLibrary {
             LocalLLMEngine.probeTrainingContext(at: url)
         }
     )
+}
+
+struct ModelSettingsView: View {
+    @AppStorage("llama.selectedModelID") private var selectedModelID = ""
+    let library: ModelLibrary
+
+    var body: some View {
+        LocalLLMModelConfigurationView(
+            library: library,
+            selectedModelID: $selectedModelID
+        )
+    }
 }
 
 func generate(
@@ -111,7 +137,9 @@ func generate(
 }
 ```
 
-`storedSelection` is whatever you persisted in `@AppStorage` or `UserDefaults`. See [Pick and persist a provider](#pick-and-persist-a-provider) for how to produce that value.
+`LocalLLMModelConfigurationView` is the preferred app-facing model configuration surface. It wires installed GGUF models, system models, curated downloads, imports, context calibration, automatic context-window limits, and manual fixed-context preferences. `storedSelection` is whatever you persisted in `@AppStorage` or `UserDefaults`.
+
+This is additive, not a rename of `ModelLibraryPickerView`. Existing apps that import `CarbocationLocalLLMUI` and use `ModelLibraryPickerView` can keep doing that. Apps adopting the batteries-included settings surface should add `CarbocationLocalLLMRuntimeUI` and switch the settings view to `LocalLLMModelConfigurationView`.
 
 ## Integration Guide
 
@@ -252,7 +280,7 @@ let record = try await LocalLLMEngine.calibrateContext(
 print(record.maximumSupportedContext)
 ```
 
-`LocalLLMEngine.loadPlan(from:in:)` uses a matching calibration record in automatic context mode. Manual mode still uses the explicit user value. If there is no matching calibration, automatic mode keeps the conservative defaults: 4,096 tokens on iOS and 16,384 tokens on desktop, bounded by the model training context when known.
+`LocalLLMEngine.loadPlan(from:in:)` uses a matching calibration record as an upper bound in automatic context mode. Calibration does not automatically promote auto mode to the largest context that initialized. Manual mode still uses the explicit user value. If there is no matching calibration or `llama.autoContextLimit` preference, automatic mode keeps the conservative defaults: 4,096 tokens on iOS and 16,384 tokens on desktop, bounded by the model training context when known.
 
 ### Keep a session live between queries
 
@@ -329,56 +357,32 @@ GGUF models use grammar-constrained generation. Apple Intelligence omits the gra
 
 ### Install a GGUF model
 
-The bundled SwiftUI picker handles `.gguf` imports, curated downloads, Hugging Face URL downloads, resume, and deletion. Drop it into a settings pane:
+The bundled SwiftUI configuration view handles `.gguf` imports, curated downloads, Hugging Face URL downloads, resume, deletion, system models, context calibration, automatic context-window limits, and manual fixed-context preferences. Drop it into a settings pane:
 
 ```swift
 import CarbocationLocalLLM
-import CarbocationLocalLLMRuntime
-import CarbocationLocalLLMUI
+import CarbocationLocalLLMRuntimeUI
 import SwiftUI
 
 @MainActor
 struct LocalModelSettingsView: View {
     let library: ModelLibrary
-    @AppStorage("SelectedLocalModelID") private var selectedModelID = ""
+    @AppStorage("llama.selectedModelID") private var selectedModelID = ""
 
     var body: some View {
-        ModelLibraryPickerView(
+        LocalLLMModelConfigurationView(
             library: library,
-            selectedModelID: $selectedModelID,
-            systemModels: LocalLLMEngine.availableSystemModels(),
-            calibrationAdapter: ModelLibraryPickerCalibrationAdapter(
-                runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(),
-                calibrate: { model, onProgress in
-                    try await LocalLLMEngine.calibrateContext(
-                        for: model,
-                        in: library,
-                        onProgress: { progress in
-                            await MainActor.run {
-                                onProgress(progress)
-                            }
-                        }
-                    )
-                }
-            ),
-            onModelDeleted: { deleted in
-                Task {
-                    if await LocalLLMEngine.shared.currentModelID() == deleted.id {
-                        await LocalLLMEngine.shared.unload()
-                    }
-                }
-            },
-            onConfirmSelection: { selection in
-                selectedModelID = selection.storageValue
-            }
+            selectedModelID: $selectedModelID
         )
     }
 }
 ```
 
-When a calibration adapter is supplied, installed model rows show the effective automatic context. Uncalibrated rows show labels such as `context 16,384 (Uncalibrated)` or `context 4,096 (Uncalibrated)` and a `Calibrate` action. Rows with a matching record show the calibrated value, `context 32,768 (Calibrated)`, and a `Recalibrate` action. While calibration runs, the row shows the current probed tier, last successful tier, progress, and a cancel button.
+The configuration view injects `LocalLLMEngine.availableSystemModels()`, `LocalLLMEngine.contextCalibrationRuntimeFingerprint()`, and `LocalLLMEngine.calibrateContext(...)` for you. It writes context preferences to the standard keys used by `LocalLLMEngine.loadPlan(from:in:)`, including `llama.contextMode`, `llama.numCtx`, and `llama.autoContextLimit`.
 
-The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
+Uncalibrated automatic context stays conservative, such as 16,384 tokens on macOS or 4,096 tokens on iOS. After calibration, the context section offers discrete sub-maximum choices such as 16k, 32k, 64k, and 128k when the model and device support them. Calibration records still mean "maximum supported context"; they do not force default auto loads to use the largest possible context.
+
+The lower-level `CarbocationLocalLLMUI.ModelLibraryPickerView` remains available when an app wants to build its own settings UI and wire system models, calibration, and context controls manually. The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
 
 GGUF weights are not bundled. Apps either import local `.gguf` files, use the curated Hugging Face downloads, or ship their own download UI.
 
@@ -439,7 +443,8 @@ Model weights are not distributed by this package. Downloaded or imported GGUF f
 | --- | --- | --- |
 | `CarbocationLocalLLM` | Core model library, selection, context policy, generation options, JSON helpers, download/import support, fake-engine testing helpers. | App code imports core types directly, or you only need shared model storage. |
 | `CarbocationLocalLLMRuntime` | Unified facade that routes selections to llama.cpp or Apple Intelligence. | Most apps. This is the entry point. |
-| `CarbocationLocalLLMUI` | SwiftUI model library picker, curated downloads, Hugging Face URL downloads, local import, delete, refresh. | You want the bundled UI surfaces. |
+| `CarbocationLocalLLMRuntimeUI` | Batteries-included SwiftUI model configuration view with runtime wiring, system models, calibration, and context controls. | Most apps that want a complete settings surface. |
+| `CarbocationLocalLLMUI` | Lower-level SwiftUI model library picker, curated downloads, Hugging Face URL downloads, local import, delete, refresh. | You want to build custom runtime/context settings around the picker. |
 | `CarbocationLlamaRuntime` | Lower-level llama.cpp runtime — model probing, chat-template fallback, grammar-aware generation, streaming, cancellation. | You need provider-specific control the unified runtime does not expose. |
 
 `CarbocationAppleIntelligenceRuntime` is an internal implementation target used by the unified runtime; consume Apple Intelligence through `CarbocationLocalLLMRuntime`.
@@ -517,7 +522,7 @@ There are two entry points and they show different schemes — pick the one that
   ```sh
   xed Package.swift
   ```
-  You get the SwiftPM library schemes (`CarbocationLocalLLM`, `CarbocationLocalLLMRuntime`, `CarbocationLocalLLMUI`, `CarbocationLlamaRuntime`, and the `CarbocationLocalLLM-Package` umbrella). Use these for editing library code and running the test targets.
+  You get the SwiftPM library schemes (`CarbocationLocalLLM`, `CarbocationLocalLLMRuntime`, `CarbocationLocalLLMRuntimeUI`, `CarbocationLocalLLMUI`, `CarbocationLlamaRuntime`, and the `CarbocationLocalLLM-Package` umbrella). Use these for editing library code and running the test targets.
 
 - **Running the smoke and demo apps** (`CLLMSmokeMac`, `CLLMSmokeIOS`, `CLLMDemoMac`, `CLLMDemoIOS`): open the apps project.
   ```sh
@@ -724,9 +729,10 @@ Apps/
 Sources/
   CarbocationLocalLLM/                    Core models, selection, context policy, generation options, JSON helpers
   CarbocationLocalLLMRuntime/             Unified facade over llama.cpp and Apple Intelligence
+  CarbocationLocalLLMRuntimeUI/           Runtime-aware SwiftUI model configuration
   CarbocationLlamaRuntime/                llama.cpp-backed runtime
   CarbocationAppleIntelligenceRuntime/    Foundation Models-backed runtime (consumed via the unified facade)
-  CarbocationLocalLLMUI/                  SwiftUI model library picker
+  CarbocationLocalLLMUI/                  Lower-level SwiftUI model library picker
   llama/                                  module map for the llama.cpp build
 Tests/
 Scripts/

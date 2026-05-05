@@ -124,11 +124,106 @@ final class CarbocationLocalLLMTests: XCTestCase {
         )
         XCTAssertEqual(
             LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                mode: .auto,
+                manualContext: 8_192,
+                autoCap: 131_072,
+                maximumSupportedContext: 65_536
+            ),
+            65_536
+        )
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
                 trainingContext: 4_096,
                 mode: .manual,
-                manualContext: 32_768
+                manualContext: 32_768,
+                maximumSupportedContext: 16_384
             ),
             32_768
+        )
+    }
+
+    func testContextPolicyReadsAutoContextLimitPreference() {
+        let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let keys = LlamaContextPreferenceKeys()
+
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys
+            ),
+            LlamaContextPolicy.defaultAutoCap
+        )
+
+        defaults.set(65_536, forKey: keys.autoContextLimit)
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys
+            ),
+            65_536
+        )
+
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys,
+                maximumSupportedContext: 32_768
+            ),
+            32_768
+        )
+    }
+
+    func testContextPolicyCanTrackSelectedModelMaximumInAutoMode() {
+        let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let keys = LlamaContextPreferenceKeys()
+
+        defaults.set(65_536, forKey: keys.autoContextLimit)
+        defaults.set(true, forKey: keys.autoContextLimitUsesMaximum)
+
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys,
+                maximumSupportedContext: 65_536
+            ),
+            65_536
+        )
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys,
+                maximumSupportedContext: 131_072
+            ),
+            131_072
+        )
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys
+            ),
+            LlamaContextPolicy.defaultAutoCap
+        )
+
+        defaults.set(false, forKey: keys.autoContextLimitUsesMaximum)
+        XCTAssertEqual(
+            LlamaContextPolicy.resolvedRequestedContext(
+                trainingContext: 262_144,
+                defaults: defaults,
+                keys: keys,
+                maximumSupportedContext: 131_072
+            ),
+            65_536
         )
     }
 

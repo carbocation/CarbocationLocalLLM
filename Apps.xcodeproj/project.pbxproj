@@ -9,27 +9,27 @@
 /* Begin PBXBuildFile section */
 		CLLM100000000000000000001002 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001003 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001004 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001004 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001005 /* CLLMSmokeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002003 /* CLLMSmokeApp.swift */; };
 		CLLM100000000000000000001006 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001007 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001008 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001008 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001009 /* CLLMSmokeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002003 /* CLLMSmokeApp.swift */; };
 		CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001012 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
 		CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
-		CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001016 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
 		CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001019 /* CarbocationLlamaRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007004 /* CarbocationLlamaRuntime */; };
-		CLLM100000000000000000001020 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001020 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001021 /* CLLMCalgacusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */; };
 		CLLM100000000000000000001022 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001023 /* CarbocationLlamaRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007004 /* CarbocationLlamaRuntime */; };
-		CLLM100000000000000000001024 /* CarbocationLocalLLMUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMUI */; };
+		CLLM100000000000000000001024 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001025 /* CLLMCalgacusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -58,7 +58,7 @@
 			files = (
 				CLLM100000000000000000001002 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001003 /* CarbocationLocalLLMRuntime in Frameworks */,
-				CLLM100000000000000000001004 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001004 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -68,7 +68,7 @@
 			files = (
 				CLLM100000000000000000001006 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001007 /* CarbocationLocalLLMRuntime in Frameworks */,
-				CLLM100000000000000000001008 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001008 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,7 +78,7 @@
 			files = (
 				CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks */,
-				CLLM100000000000000000001012 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001012 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,7 +88,7 @@
 			files = (
 				CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */,
-				CLLM100000000000000000001016 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001016 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -98,7 +98,7 @@
 			files = (
 				CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001019 /* CarbocationLlamaRuntime in Frameworks */,
-				CLLM100000000000000000001020 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001020 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -108,7 +108,7 @@
 			files = (
 				CLLM100000000000000000001022 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001023 /* CarbocationLlamaRuntime in Frameworks */,
-				CLLM100000000000000000001024 /* CarbocationLocalLLMUI in Frameworks */,
+				CLLM100000000000000000001024 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -186,7 +186,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMSmokeIOS;
 			productReference = CLLM100000000000000000002002 /* CLLMSmokeIOS.app */;
@@ -207,7 +207,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMSmokeMac;
 			productReference = CLLM100000000000000000002004 /* CLLMSmokeMac.app */;
@@ -228,7 +228,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMDemoIOS;
 			productReference = CLLM100000000000000000002005 /* CLLMDemoIOS.app */;
@@ -249,7 +249,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMDemoMac;
 			productReference = CLLM100000000000000000002007 /* CLLMDemoMac.app */;
@@ -270,7 +270,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007004 /* CarbocationLlamaRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMCalgacusIOS;
 			productReference = CLLM100000000000000000002008 /* CLLMCalgacusIOS.app */;
@@ -291,7 +291,7 @@
 			packageProductDependencies = (
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007004 /* CarbocationLlamaRuntime */,
-				CLLM100000000000000000007003 /* CarbocationLocalLLMUI */,
+				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
 			);
 			productName = CLLMCalgacusMac;
 			productReference = CLLM100000000000000000002010 /* CLLMCalgacusMac.app */;
@@ -994,10 +994,10 @@
 			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
 			productName = CarbocationLocalLLMRuntime;
 		};
-		CLLM100000000000000000007003 /* CarbocationLocalLLMUI */ = {
+		CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
-			productName = CarbocationLocalLLMUI;
+			productName = CarbocationLocalLLMRuntimeUI;
 		};
 		CLLM100000000000000000007004 /* CarbocationLlamaRuntime */ = {
 			isa = XCSwiftPackageProductDependency;

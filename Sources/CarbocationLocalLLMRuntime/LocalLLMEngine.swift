@@ -222,7 +222,7 @@ public actor LocalLLMEngine: LLMEngine {
                     for: model,
                     defaults: defaults,
                     keys: contextKeys,
-                    autoCap: calibratedContext ?? LlamaContextPolicy.defaultAutoCap
+                    maximumSupportedContext: calibratedContext
                 ),
                 capabilities: capabilities
             )

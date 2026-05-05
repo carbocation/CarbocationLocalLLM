@@ -809,12 +809,13 @@ public actor LlamaEngine: LLMEngine {
     }
 
     private enum KnownTemplateFamily {
-        case gemma
+        case gemmaLegacy
+        case gemma4
         case chatML
 
         var mode: LLMChatTemplateMode {
             switch self {
-            case .gemma:
+            case .gemmaLegacy, .gemma4:
                 return .gemmaFallback
             case .chatML:
                 return .chatMLFallback
@@ -876,6 +877,27 @@ public actor LlamaEngine: LLMEngine {
                     text: formatted,
                     mode: .embedded,
                     outputProfile: outputSanitizationProfile
+                )
+            }
+
+            if let fallback = try? Self.fallbackPrompt(
+                system: system,
+                user: user,
+                embeddedTemplate: chatTemplate,
+                descriptor: loadedDescriptor
+            ) {
+                Self.logChatTemplateSelection(
+                    mode: fallback.mode,
+                    descriptor: loadedDescriptor,
+                    hasEmbeddedTemplate: true,
+                    formatter: "family-fallback"
+                )
+                return PromptFormattingResult(
+                    text: fallback.text,
+                    mode: fallback.mode,
+                    outputProfile: outputSanitizationProfile.isEmpty
+                        ? fallback.outputProfile
+                        : outputSanitizationProfile
                 )
             }
 
@@ -943,8 +965,11 @@ public actor LlamaEngine: LLMEngine {
         ]
         .compactMap { $0?.lowercased() }
 
+        if probes.contains(where: { $0.contains("gemma-4") || $0.contains("gemma4") }) {
+            return .gemma4
+        }
         if probes.contains(where: { $0.contains("gemma") }) {
-            return .gemma
+            return .gemmaLegacy
         }
         if probes.contains(where: { $0.contains("qwen") || $0.contains("chatml") }) {
             return .chatML
@@ -954,8 +979,11 @@ public actor LlamaEngine: LLMEngine {
 
     private static func templateFamily(from template: String) -> KnownTemplateFamily? {
         let lowered = template.lowercased()
+        if lowered.contains("<|turn>") && lowered.contains("<turn|>") {
+            return .gemma4
+        }
         if lowered.contains("start_of_turn") {
-            return .gemma
+            return .gemmaLegacy
         }
         if lowered.contains("im_start") {
             return .chatML
@@ -1048,8 +1076,10 @@ public actor LlamaEngine: LLMEngine {
         family: KnownTemplateFamily
     ) -> String {
         switch family {
-        case .gemma:
+        case .gemmaLegacy:
             return "<start_of_turn>user\n\(system)\n\n\(user)<end_of_turn>\n<start_of_turn>think\n<end_of_turn>\n<start_of_turn>model\n"
+        case .gemma4:
+            return "<|turn>system\n\(system.trimmingCharacters(in: .whitespacesAndNewlines))<turn|>\n<|turn>user\n\(user.trimmingCharacters(in: .whitespacesAndNewlines))<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         case .chatML:
             return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
         }
@@ -1057,8 +1087,10 @@ public actor LlamaEngine: LLMEngine {
 
     private static func fallbackOutputProfile(for family: KnownTemplateFamily) -> OutputSanitizationProfile {
         switch family {
-        case .gemma:
+        case .gemmaLegacy:
             return OutputSanitizationProfile.derived(fromChatTemplate: "<start_of_turn><end_of_turn>")
+        case .gemma4:
+            return OutputSanitizationProfile.derived(fromChatTemplate: "<|turn><turn|><|channel>thought<channel|>")
         case .chatML:
             return OutputSanitizationProfile.derived(fromChatTemplate: "<|im_start|><|im_end|>")
         }

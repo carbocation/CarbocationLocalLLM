@@ -121,7 +121,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadPlanUsesCalibratedContextOnlyInAutoMode() async throws {
+    func testLoadPlanUsesCalibrationAsAutomaticUpperBound() async throws {
         let root = try makeTemporaryDirectory()
         let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(
@@ -152,7 +152,17 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
             refreshingLibrary: true,
             calibrationStore: store
         )
-        XCTAssertEqual(try XCTUnwrap(autoPlan).requestedContext, 65_536)
+        XCTAssertEqual(try XCTUnwrap(autoPlan).requestedContext, LlamaContextPolicy.defaultAutoCap)
+
+        defaults.set(262_144, forKey: LlamaContextPreferenceKeys().autoContextLimit)
+        let boundedAutoPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(boundedAutoPlan).requestedContext, 65_536)
 
         defaults.set(LlamaContextMode.manual.rawValue, forKey: "llama.contextMode")
         defaults.set(32_768, forKey: "llama.numCtx")
@@ -165,6 +175,120 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
             calibrationStore: store
         )
         XCTAssertEqual(try XCTUnwrap(manualPlan).requestedContext, 32_768)
+    }
+
+    @MainActor
+    func testLoadPlanAutoMaximumTracksSelectedModelCalibration() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let smallerModel = try installFixtureModel(
+            displayName: "65K Calibrated Model",
+            contextLength: 131_072,
+            in: root
+        )
+        let largerModel = try installFixtureModel(
+            displayName: "128K Calibrated Model",
+            contextLength: 262_144,
+            in: root
+        )
+        let suiteName = "CarbocationLocalLLMRuntimeCalibrationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("device-a", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+        let keys = LlamaContextPreferenceKeys()
+        defaults.set(65_536, forKey: keys.autoContextLimit)
+        defaults.set(true, forKey: keys.autoContextLimitUsesMaximum)
+
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let runtime = LocalLLMEngine.contextCalibrationRuntimeFingerprint()
+        store.save(LlamaContextCalibrationRecord(
+            key: store.key(for: smallerModel, runtime: runtime),
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true),
+                LlamaContextCalibrationProbe(context: 131_072, succeeded: false)
+            ]
+        ))
+        store.save(LlamaContextCalibrationRecord(
+            key: store.key(for: largerModel, runtime: runtime),
+            maximumSupportedContext: 131_072,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true),
+                LlamaContextCalibrationProbe(context: 131_072, succeeded: true),
+                LlamaContextCalibrationProbe(context: 262_144, succeeded: false)
+            ]
+        ))
+
+        let smallerPlan = await LocalLLMEngine.loadPlan(
+            from: smallerModel.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: true,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(smallerPlan).requestedContext, 65_536)
+
+        let largerPlan = await LocalLLMEngine.loadPlan(
+            from: largerModel.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(largerPlan).requestedContext, 131_072)
+
+        defaults.set(false, forKey: keys.autoContextLimitUsesMaximum)
+        let fixedPlan = await LocalLLMEngine.loadPlan(
+            from: largerModel.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(fixedPlan).requestedContext, 65_536)
+    }
+
+    @MainActor
+    func testLoadPlanDoesNotPromoteAutoModeToMaximumCalibratedContext() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let model = try installFixtureModel(
+            displayName: "Very Long Context Model",
+            contextLength: 262_144,
+            in: root
+        )
+        let suiteName = "CarbocationLocalLLMRuntimeCalibrationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("device-a", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let runtime = LocalLLMEngine.contextCalibrationRuntimeFingerprint()
+        store.save(LlamaContextCalibrationRecord(
+            key: store.key(for: model, runtime: runtime),
+            maximumSupportedContext: 262_144,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 131_072, succeeded: true),
+                LlamaContextCalibrationProbe(context: 262_144, succeeded: true)
+            ]
+        ))
+
+        let balancedPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(balancedPlan).requestedContext, LlamaContextPolicy.defaultAutoCap)
+
+        defaults.set(32_768, forKey: LlamaContextPreferenceKeys().autoContextLimit)
+        let limitedPlan = await LocalLLMEngine.loadPlan(
+            from: model.id.uuidString,
+            in: library,
+            defaults: defaults,
+            refreshingLibrary: false,
+            calibrationStore: store
+        )
+        XCTAssertEqual(try XCTUnwrap(limitedPlan).requestedContext, 32_768)
     }
 
     @MainActor

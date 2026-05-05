@@ -256,13 +256,19 @@ public enum LlamaContextMode: String, CaseIterable, Codable, Sendable {
 public struct LlamaContextPreferenceKeys: Sendable {
     public var contextMode: String
     public var numCtx: String
+    public var autoContextLimit: String
+    public var autoContextLimitUsesMaximum: String
 
     public init(
         contextMode: String = "llama.contextMode",
-        numCtx: String = "llama.numCtx"
+        numCtx: String = "llama.numCtx",
+        autoContextLimit: String = "llama.autoContextLimit",
+        autoContextLimitUsesMaximum: String = "llama.autoContextLimitUsesMaximum"
     ) {
         self.contextMode = contextMode
         self.numCtx = numCtx
+        self.autoContextLimit = autoContextLimit
+        self.autoContextLimitUsesMaximum = autoContextLimitUsesMaximum
     }
 }
 
@@ -301,23 +307,57 @@ public enum LlamaContextPolicy {
         sanitizedContext(defaults.integer(forKey: keys.numCtx))
     }
 
+    public static func autoContextLimit(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
+        defaultLimit: Int = defaultAutoCap
+    ) -> Int {
+        guard defaults.object(forKey: keys.autoContextLimit) != nil else {
+            return max(minimumContext, defaultLimit)
+        }
+        let value = defaults.integer(forKey: keys.autoContextLimit)
+        guard value > 0 else {
+            return max(minimumContext, defaultLimit)
+        }
+        return sanitizedContext(value)
+    }
+
+    public static func autoContextLimitUsesMaximum(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys()
+    ) -> Bool {
+        defaults.bool(forKey: keys.autoContextLimitUsesMaximum)
+    }
+
     public static func autoContext(
         for trainingContext: Int,
-        autoCap: Int = defaultAutoCap
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
     ) -> Int {
-        guard trainingContext > 0 else { return unknownTrainingFallback }
-        return max(minimumContext, min(trainingContext, max(minimumContext, autoCap)))
+        let contextCap = boundedAutoContextLimit(
+            autoCap,
+            maximumSupportedContext: maximumSupportedContext
+        )
+        guard trainingContext > 0 else {
+            return max(minimumContext, min(unknownTrainingFallback, contextCap))
+        }
+        return max(minimumContext, min(trainingContext, contextCap))
     }
 
     public static func resolvedRequestedContext(
         trainingContext: Int,
         mode: LlamaContextMode,
         manualContext: Int,
-        autoCap: Int = defaultAutoCap
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
     ) -> Int {
         switch mode {
         case .auto:
-            return autoContext(for: trainingContext, autoCap: autoCap)
+            return autoContext(
+                for: trainingContext,
+                autoCap: autoCap,
+                maximumSupportedContext: maximumSupportedContext
+            )
         case .manual:
             return sanitizedContext(manualContext)
         }
@@ -327,13 +367,21 @@ public enum LlamaContextPolicy {
         trainingContext: Int,
         defaults: UserDefaults = .standard,
         keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
-        autoCap: Int = defaultAutoCap
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
     ) -> Int {
         resolvedRequestedContext(
             trainingContext: trainingContext,
             mode: currentMode(defaults: defaults, keys: keys),
             manualContext: manualContext(defaults: defaults, keys: keys),
-            autoCap: autoCap
+            autoCap: resolvedAutoCap(
+                trainingContext: trainingContext,
+                defaults: defaults,
+                keys: keys,
+                defaultLimit: autoCap,
+                maximumSupportedContext: maximumSupportedContext
+            ),
+            maximumSupportedContext: maximumSupportedContext
         )
     }
 
@@ -341,18 +389,55 @@ public enum LlamaContextPolicy {
         for model: InstalledModel,
         defaults: UserDefaults = .standard,
         keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
-        autoCap: Int = defaultAutoCap
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
     ) -> Int {
         resolvedRequestedContext(
             trainingContext: model.contextLength,
             defaults: defaults,
             keys: keys,
-            autoCap: autoCap
+            autoCap: autoCap,
+            maximumSupportedContext: maximumSupportedContext
         )
     }
 
     public static func sanitizedContext(_ value: Int) -> Int {
         max(minimumContext, value > 0 ? value : legacyDefaultNumCtx)
+    }
+
+    private static func boundedAutoContextLimit(
+        _ value: Int,
+        maximumSupportedContext: Int?
+    ) -> Int {
+        let requested = max(minimumContext, value)
+        guard let maximumSupportedContext, maximumSupportedContext > 0 else {
+            return requested
+        }
+        return min(requested, max(minimumContext, maximumSupportedContext))
+    }
+
+    private static func resolvedAutoCap(
+        trainingContext: Int,
+        defaults: UserDefaults,
+        keys: LlamaContextPreferenceKeys,
+        defaultLimit: Int,
+        maximumSupportedContext: Int?
+    ) -> Int {
+        guard autoContextLimitUsesMaximum(defaults: defaults, keys: keys) else {
+            return autoContextLimit(
+                defaults: defaults,
+                keys: keys,
+                defaultLimit: defaultLimit
+            )
+        }
+
+        if let maximumSupportedContext, maximumSupportedContext > 0 {
+            return max(minimumContext, maximumSupportedContext)
+        }
+        if trainingContext > 0, trainingContext < defaultLimit {
+            return max(minimumContext, trainingContext)
+        }
+        return max(minimumContext, defaultLimit)
     }
 }
 

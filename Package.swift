@@ -72,6 +72,10 @@ let package = Package(
         .library(
             name: "CarbocationLocalLLMUI",
             targets: ["CarbocationLocalLLMUI"]
+        ),
+        .library(
+            name: "CarbocationLocalLLMRuntimeUI",
+            targets: ["CarbocationLocalLLMRuntimeUI"]
         )
     ],
     dependencies: [
@@ -112,6 +116,14 @@ let package = Package(
             name: "CarbocationLocalLLMUI",
             dependencies: ["CarbocationLocalLLM"]
         ),
+        .target(
+            name: "CarbocationLocalLLMRuntimeUI",
+            dependencies: [
+                "CarbocationLocalLLM",
+                "CarbocationLocalLLMRuntime",
+                "CarbocationLocalLLMUI"
+            ]
+        ),
         .testTarget(
             name: "CarbocationLocalLLMTests",
             dependencies: [
@@ -133,6 +145,10 @@ let package = Package(
         .testTarget(
             name: "CarbocationLocalLLMUITests",
             dependencies: ["CarbocationLocalLLMUI"]
+        ),
+        .testTarget(
+            name: "CarbocationLocalLLMRuntimeUITests",
+            dependencies: ["CarbocationLocalLLMRuntimeUI"]
         )
     ]
 )
