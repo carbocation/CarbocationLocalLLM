@@ -77,6 +77,7 @@ private struct PromptPane: View {
             VStack(alignment: .leading, spacing: 16) {
                 selectedModelStatus
                 promptEditor
+                generationOptionsEditor
                 controls
                 outputSection
                 eventsSection
@@ -162,6 +163,59 @@ private struct PromptPane: View {
         }
     }
 
+    private var generationOptionsEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Generation")
+                .font(.headline)
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text("Max output")
+                    .frame(width: 84, alignment: .leading)
+
+                TextField("Context cap", text: $state.maxOutputTokensText)
+                    .textFieldStyle(.roundedBorder)
+                    .demoNumericInput()
+                    .disabled(state.isRunning)
+                    .frame(maxWidth: 180)
+
+                Text("tokens")
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle("Thinking", isOn: $state.enableThinking)
+                .disabled(state.isRunning)
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text("Budget")
+                    .foregroundStyle(state.enableThinking ? .primary : .secondary)
+                    .frame(width: 84, alignment: .leading)
+
+                TextField("No cap", text: $state.thinkingBudgetText)
+                    .textFieldStyle(.roundedBorder)
+                    .demoNumericInput()
+                    .disabled(!state.enableThinking || state.isRunning)
+                    .frame(maxWidth: 180)
+
+                Text("tokens")
+                    .foregroundStyle(.secondary)
+            }
+
+            if let message = state.thinkingBudgetValidationMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if let message = state.maxOutputTokensValidationMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+    }
+
     private var controls: some View {
         HStack {
             Button {
@@ -234,6 +288,9 @@ private final class DemoState {
     var selectedModelID: String
     var systemPrompt = "You are concise and helpful."
     var prompt = "Write one sentence about local on-device language models."
+    var maxOutputTokensText = "256"
+    var enableThinking = false
+    var thinkingBudgetText = ""
     var output = ""
     var events = ""
     var errorMessage: String?
@@ -271,6 +328,50 @@ private final class DemoState {
     var canRun: Bool {
         LLMModelSelection(storageValue: selectedModelID) != nil
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && generationOptionsValidationMessage == nil
+    }
+
+    var generationOptionsValidationMessage: String? {
+        maxOutputTokensValidationMessage ?? thinkingBudgetValidationMessage
+    }
+
+    var maxOutputTokensValidationMessage: String? {
+        let trimmed = maxOutputTokensText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        guard let value = Int(trimmed), value > 0 else {
+            return "Max output must be blank or a positive integer."
+        }
+        return nil
+    }
+
+    var thinkingBudgetValidationMessage: String? {
+        guard enableThinking else { return nil }
+
+        let trimmed = thinkingBudgetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        guard let value = Int(trimmed), value >= 0 else {
+            return "Thinking budget must be blank, zero, or a positive integer."
+        }
+        guard value <= Int(Int32.max) else {
+            return "Thinking budget is too large."
+        }
+        return nil
+    }
+
+    private var parsedMaxOutputTokens: Int? {
+        let trimmed = maxOutputTokensText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Int(trimmed)
+    }
+
+    private var parsedThinkingBudgetTokens: Int? {
+        guard enableThinking else { return nil }
+
+        let trimmed = thinkingBudgetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Int(trimmed)
     }
 
     func select(_ selection: LLMModelSelection) {
@@ -294,6 +395,10 @@ private final class DemoState {
 
     func run() {
         guard !isRunning, !selectedModelID.isEmpty else { return }
+        guard canRun else {
+            errorMessage = generationOptionsValidationMessage ?? "Select a model and enter a prompt before running."
+            return
+        }
 
         isRunning = true
         output = ""
@@ -350,14 +455,13 @@ private final class DemoState {
             appendEvent("context: \(loaded.contextSize)")
             appendEvent("grammar: \(loaded.supportsGrammar ? "yes" : "no")")
 
+            let options = generationOptions(for: loaded)
+            appendGenerationOptionsEvent(options: options, loaded: loaded)
+
             let response = try await engine.generate(
                 system: systemPrompt,
                 prompt: prompt,
-                options: GenerationOptions(
-                    temperature: loaded.supportsGrammar ? 0 : nil,
-                    maxOutputTokens: 256,
-                    stopAtBalancedJSON: false
-                )
+                options: options
             ) { [weak self] event in
                 Task { @MainActor [weak self] in
                     self?.appendEvent(Self.format(event: event))
@@ -366,16 +470,53 @@ private final class DemoState {
 
             output = response
             appendEvent("done")
+            await releaseLoadedModel()
         } catch is CancellationError {
             appendEvent("cancelled")
-            loadedInfo = nil
-            await engine.unload()
+            await releaseLoadedModel()
         } catch {
             errorMessage = error.localizedDescription
             appendEvent("failed: \(error.localizedDescription)")
-            loadedInfo = nil
-            await engine.unload()
+            await releaseLoadedModel()
         }
+    }
+
+    private func releaseLoadedModel() async {
+        let hadLoadedModel = loadedInfo != nil
+        loadedInfo = nil
+        await engine.unload()
+        if hadLoadedModel {
+            appendEvent("model released")
+        }
+    }
+
+    private func generationOptions(for loaded: LocalLLMLoadedModelInfo) -> GenerationOptions {
+        GenerationOptions(
+            temperature: loaded.supportsGrammar ? 0 : nil,
+            maxOutputTokens: parsedMaxOutputTokens,
+            stopAtBalancedJSON: false,
+            enableThinking: enableThinking,
+            thinkingBudgetTokens: parsedThinkingBudgetTokens,
+            thinkingBudgetMessage: "Thinking budget reached."
+        )
+    }
+
+    private func appendGenerationOptionsEvent(
+        options: GenerationOptions,
+        loaded: LocalLLMLoadedModelInfo
+    ) {
+        let maxOutput = options.maxOutputTokens.map(String.init) ?? "context"
+        appendEvent("max-output: \(maxOutput)")
+
+        var line = "thinking: \(options.enableThinking ? "enabled" : "disabled")"
+        if options.enableThinking {
+            let budget = options.thinkingBudgetTokens.map(String.init) ?? "none"
+            line += " budget=\(budget)"
+            if case .system = loaded.selection {
+                line += " ignored-by-provider"
+            }
+        }
+        appendEvent(line)
     }
 
     private func normalizeSelection() {
@@ -440,6 +581,17 @@ private extension View {
             .keyboardType(.asciiCapable)
             .textContentType(nil)
             .submitLabel(.done)
+#else
+        self
+#endif
+    }
+
+    @ViewBuilder
+    func demoNumericInput() -> some View {
+#if os(iOS)
+        keyboardType(.numberPad)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
 #else
         self
 #endif

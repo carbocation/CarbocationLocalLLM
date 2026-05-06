@@ -12,6 +12,47 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
     public var grammar: String?
     /// Enables model-native thinking/reasoning channels when the chat template supports them.
     public var enableThinking: Bool
+    /// Optional token budget for generated thinking/reasoning content.
+    public var thinkingBudgetTokens: Int? {
+        didSet {
+            precondition(
+                thinkingBudgetTokens.map { $0 >= 0 } ?? true,
+                "thinkingBudgetTokens must be nil or nonnegative."
+            )
+        }
+    }
+    /// Optional text inserted before the model-native end-of-thinking tag when the thinking budget is exhausted.
+    public var thinkingBudgetMessage: String
+
+    public init(
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        maxOutputTokens: Int? = nil,
+        seed: UInt32? = nil,
+        stopSequences: [String] = [],
+        stopAtBalancedJSON: Bool = false,
+        grammar: String? = nil,
+        enableThinking: Bool = false,
+        thinkingBudgetTokens: Int? = nil,
+        thinkingBudgetMessage: String = ""
+    ) {
+        precondition(
+            thinkingBudgetTokens.map { $0 >= 0 } ?? true,
+            "thinkingBudgetTokens must be nil or nonnegative."
+        )
+        self.temperature = temperature
+        self.topP = topP
+        self.topK = topK
+        self.maxOutputTokens = maxOutputTokens
+        self.seed = seed
+        self.stopSequences = stopSequences
+        self.stopAtBalancedJSON = stopAtBalancedJSON
+        self.grammar = grammar
+        self.enableThinking = enableThinking
+        self.thinkingBudgetTokens = thinkingBudgetTokens
+        self.thinkingBudgetMessage = thinkingBudgetMessage
+    }
 
     public init(
         temperature: Double? = nil,
@@ -24,15 +65,19 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         grammar: String? = nil,
         enableThinking: Bool = false
     ) {
-        self.temperature = temperature
-        self.topP = topP
-        self.topK = topK
-        self.maxOutputTokens = maxOutputTokens
-        self.seed = seed
-        self.stopSequences = stopSequences
-        self.stopAtBalancedJSON = stopAtBalancedJSON
-        self.grammar = grammar
-        self.enableThinking = enableThinking
+        self.init(
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            maxOutputTokens: maxOutputTokens,
+            seed: seed,
+            stopSequences: stopSequences,
+            stopAtBalancedJSON: stopAtBalancedJSON,
+            grammar: grammar,
+            enableThinking: enableThinking,
+            thinkingBudgetTokens: nil,
+            thinkingBudgetMessage: ""
+        )
     }
 
     public static var extractionSafe: GenerationOptions {
@@ -55,6 +100,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         case stopAtBalancedJSON
         case grammar
         case enableThinking
+        case thinkingBudgetTokens
+        case thinkingBudgetMessage
     }
 
     public init(from decoder: Decoder) throws {
@@ -68,6 +115,16 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopAtBalancedJSON = try container.decodeIfPresent(Bool.self, forKey: .stopAtBalancedJSON) ?? false
         grammar = try container.decodeIfPresent(String.self, forKey: .grammar)
         enableThinking = try container.decodeIfPresent(Bool.self, forKey: .enableThinking) ?? false
+        let decodedThinkingBudgetTokens = try container.decodeIfPresent(Int.self, forKey: .thinkingBudgetTokens)
+        if let decodedThinkingBudgetTokens, decodedThinkingBudgetTokens < 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .thinkingBudgetTokens,
+                in: container,
+                debugDescription: "thinkingBudgetTokens must be nil or nonnegative."
+            )
+        }
+        thinkingBudgetTokens = decodedThinkingBudgetTokens
+        thinkingBudgetMessage = try container.decodeIfPresent(String.self, forKey: .thinkingBudgetMessage) ?? ""
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -86,6 +143,10 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         try container.encodeIfPresent(grammar, forKey: .grammar)
         if enableThinking {
             try container.encode(enableThinking, forKey: .enableThinking)
+        }
+        try container.encodeIfPresent(thinkingBudgetTokens, forKey: .thinkingBudgetTokens)
+        if !thinkingBudgetMessage.isEmpty {
+            try container.encode(thinkingBudgetMessage, forKey: .thinkingBudgetMessage)
         }
     }
 }

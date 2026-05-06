@@ -203,6 +203,52 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
     }
 
+    func testReasoningBudgetPlanRequiresEnabledThinkingAndDelimiters() {
+        let profile = OutputSanitizationProfile(thinkingPairs: [
+            OutputDelimiterPair(open: "<think>", close: "</think>")
+        ])
+
+        XCTAssertNil(LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(thinkingBudgetTokens: 8),
+            profile: profile,
+            continuingOpenThinkingPairs: []
+        ))
+
+        XCTAssertNil(LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true, thinkingBudgetTokens: 8),
+            profile: .empty,
+            continuingOpenThinkingPairs: []
+        ))
+
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true, thinkingBudgetTokens: 8),
+            profile: profile,
+            continuingOpenThinkingPairs: []
+        )
+        XCTAssertEqual(plan?.pair, OutputDelimiterPair(open: "<think>", close: "</think>"))
+        XCTAssertEqual(plan?.budgetTokens, 8)
+        XCTAssertEqual(plan?.initialState, .idle)
+    }
+
+    func testReasoningBudgetPlanStartsCountingForContinuingThinkingPrompt() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(
+                enableThinking: true,
+                thinkingBudgetTokens: 0,
+                thinkingBudgetMessage: "Budget reached."
+            ),
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [pair]
+        )
+
+        XCTAssertEqual(plan?.pair, pair)
+        XCTAssertEqual(plan?.budgetTokens, 0)
+        XCTAssertEqual(plan?.message, "Budget reached.")
+        XCTAssertEqual(plan?.initialState, .counting)
+    }
+
     func testContinuingOpenThinkingPairsIgnoresLiteralUserThinkingTagBeforeAssistantPrompt() {
         let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
         let profile = OutputSanitizationProfile(thinkingPairs: [pair])

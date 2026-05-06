@@ -1,4 +1,5 @@
 import CarbocationLocalLLM
+import CarbocationLlamaCommonBridge
 import Foundation
 import OSLog
 import llama
@@ -161,6 +162,18 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
+    enum ReasoningBudgetInitialState: Equatable {
+        case idle
+        case counting
+    }
+
+    struct ReasoningBudgetPlan: Equatable {
+        var pair: OutputDelimiterPair
+        var budgetTokens: Int
+        var message: String
+        var initialState: ReasoningBudgetInitialState
+    }
+
     private struct PromptFormattingResult {
         var text: String
         var mode: LLMChatTemplateMode
@@ -239,9 +252,19 @@ public actor LlamaEngine: LLMEngine {
             profile: promptFormatting.outputProfile,
             continuingOpenThinkingPairs: continuingOpenThinkingPairs
         )
+        let reasoningBudgetPlan = Self.reasoningBudgetPlan(
+            for: options,
+            profile: promptFormatting.outputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+        )
         if options.grammar != nil {
-            let sampler = try buildSampler(grammarMode: grammarMode, options: options, vocab: vocabulary)
-            llama_sampler_free(sampler)
+            let samplerRuntime = try buildSampler(
+                grammarMode: grammarMode,
+                options: options,
+                vocab: vocabulary,
+                reasoningBudgetPlan: reasoningBudgetPlan
+            )
+            llama_sampler_free(samplerRuntime.chain)
         }
 
         return LLMGenerationPreflight(
@@ -517,11 +540,22 @@ public actor LlamaEngine: LLMEngine {
                 grammarMode: grammarMode
             )
             : nil
+        let reasoningBudgetPlan = Self.reasoningBudgetPlan(
+            for: options,
+            profile: activeOutputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+        )
         llamaRuntimeLog.info(
-            "Generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public)"
+            "Generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public) thinkingBudgetActive=\(reasoningBudgetPlan != nil, privacy: .public)"
         )
 
-        let sampler = try buildSampler(grammarMode: grammarMode, options: options, vocab: vocabulary)
+        let samplerRuntime = try buildSampler(
+            grammarMode: grammarMode,
+            options: options,
+            vocab: vocabulary,
+            reasoningBudgetPlan: reasoningBudgetPlan
+        )
+        let sampler = samplerRuntime.chain
         defer { llama_sampler_free(sampler) }
 
         try preparePromptContext(promptTokens, context: context)
@@ -529,6 +563,29 @@ public actor LlamaEngine: LLMEngine {
 
         var accumulatedData = Data()
         var accumulatedText = ""
+        var reasoningBudgetExhaustionLogged = false
+        func logReasoningBudgetExhaustionIfNeeded(
+            state: carbocation_llama_reasoning_budget_state,
+            generatedTokens: Int
+        ) {
+            guard !reasoningBudgetExhaustionLogged,
+                  Self.reasoningBudgetStateIsExhausted(state),
+                  let budgetTokens = reasoningBudgetPlan?.budgetTokens else {
+                return
+            }
+
+            reasoningBudgetExhaustionLogged = true
+            llamaRuntimeLog.info(
+                "Reasoning budget exhausted: budgetTokens=\(budgetTokens, privacy: .public) generatedTokens=\(generatedTokens, privacy: .public) rawBytes=\(accumulatedData.count, privacy: .public) state=\(Self.reasoningBudgetStateLogLabel(state), privacy: .public)"
+            )
+        }
+
+        if let reasoningBudgetSampler = samplerRuntime.reasoningBudgetSampler {
+            logReasoningBudgetExhaustionIfNeeded(
+                state: carbocation_llama_reasoning_budget_sampler_state(reasoningBudgetSampler),
+                generatedTokens: generatedTokenCount
+            )
+        }
         var sawFirstToken = false
         var lastHeartbeat = Date()
         var structuredPhase = structuredOutputPlan.map {
@@ -563,7 +620,16 @@ public actor LlamaEngine: LLMEngine {
             try Task.checkCancellation()
 
             let next = llama_sampler_sample(sampler, context, -1)
+            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                carbocation_llama_reasoning_budget_sampler_state($0)
+            }
             if llama_vocab_is_eog(vocabulary, next) {
+                if let reasoningBudgetState {
+                    logReasoningBudgetExhaustionIfNeeded(
+                        state: reasoningBudgetState,
+                        generatedTokens: generatedTokenCount
+                    )
+                }
                 stopReason = "eog"
                 break
             }
@@ -577,7 +643,16 @@ public actor LlamaEngine: LLMEngine {
                 if let decoded = String(data: accumulatedData, encoding: .utf8) {
                     accumulatedText = decoded
                 }
+            }
 
+            if let reasoningBudgetState {
+                logReasoningBudgetExhaustionIfNeeded(
+                    state: reasoningBudgetState,
+                    generatedTokens: generatedTokenCount + 1
+                )
+            }
+
+            if !piece.isEmpty {
                 if let plan = structuredOutputPlan {
                     let nextPhase = Self.structuredOutputPhase(in: accumulatedText, plan: plan)
                     if nextPhase != structuredPhase {
@@ -1305,14 +1380,30 @@ public actor LlamaEngine: LLMEngine {
     private static let penaltyLastN: Int32 = 16
     private static let penaltyRepeat: Float = 1.3
 
+    private struct SamplerRuntime {
+        var chain: UnsafeMutablePointer<llama_sampler>
+        var reasoningBudgetSampler: UnsafeMutablePointer<llama_sampler>?
+    }
+
     private func buildSampler(
         grammarMode: GenerationGrammarMode,
         options: GenerationOptions,
-        vocab: OpaquePointer
-    ) throws -> UnsafeMutablePointer<llama_sampler> {
+        vocab: OpaquePointer,
+        reasoningBudgetPlan: ReasoningBudgetPlan? = nil
+    ) throws -> SamplerRuntime {
         let params = llama_sampler_chain_default_params()
         guard let chain = llama_sampler_chain_init(params) else {
             throw LLMEngineError.samplerInitFailed
+        }
+
+        var activeReasoningBudgetSampler: UnsafeMutablePointer<llama_sampler>?
+        if let reasoningBudgetPlan,
+           let reasoningBudgetSampler = makeReasoningBudgetSampler(
+            plan: reasoningBudgetPlan,
+            vocab: vocab
+           ) {
+            llama_sampler_chain_add(chain, reasoningBudgetSampler)
+            activeReasoningBudgetSampler = reasoningBudgetSampler
         }
 
         llama_sampler_chain_add(
@@ -1364,7 +1455,95 @@ public actor LlamaEngine: LLMEngine {
             llama_sampler_chain_add(chain, llama_sampler_init_dist(seed))
         }
 
-        return chain
+        return SamplerRuntime(
+            chain: chain,
+            reasoningBudgetSampler: activeReasoningBudgetSampler
+        )
+    }
+
+    private static func reasoningBudgetStateIsExhausted(
+        _ state: carbocation_llama_reasoning_budget_state
+    ) -> Bool {
+        state == CARBOCATION_LLAMA_REASONING_BUDGET_FORCING
+            || state == CARBOCATION_LLAMA_REASONING_BUDGET_WAITING_UTF8
+    }
+
+    private static func reasoningBudgetStateLogLabel(
+        _ state: carbocation_llama_reasoning_budget_state
+    ) -> String {
+        switch state {
+        case CARBOCATION_LLAMA_REASONING_BUDGET_IDLE:
+            return "idle"
+        case CARBOCATION_LLAMA_REASONING_BUDGET_COUNTING:
+            return "counting"
+        case CARBOCATION_LLAMA_REASONING_BUDGET_FORCING:
+            return "forcing"
+        case CARBOCATION_LLAMA_REASONING_BUDGET_WAITING_UTF8:
+            return "waiting-utf8"
+        case CARBOCATION_LLAMA_REASONING_BUDGET_DONE:
+            return "done"
+        default:
+            return "unknown"
+        }
+    }
+
+    private func makeReasoningBudgetSampler(
+        plan: ReasoningBudgetPlan,
+        vocab: OpaquePointer
+    ) -> UnsafeMutablePointer<llama_sampler>? {
+        do {
+            let startTokens = try tokenize(vocab: vocab, text: plan.pair.open, addSpecial: false)
+            let endTokens = try tokenize(vocab: vocab, text: plan.pair.close, addSpecial: false)
+            let forcedTokens = try tokenize(
+                vocab: vocab,
+                text: plan.message + plan.pair.close,
+                addSpecial: false
+            )
+
+            guard !endTokens.isEmpty, !forcedTokens.isEmpty else {
+                return nil
+            }
+            guard plan.initialState == .counting || !startTokens.isEmpty else {
+                return nil
+            }
+            guard let budget = Int32(exactly: plan.budgetTokens) else {
+                return nil
+            }
+
+            let initialState: carbocation_llama_reasoning_budget_state = plan.initialState == .counting
+                ? CARBOCATION_LLAMA_REASONING_BUDGET_COUNTING
+                : CARBOCATION_LLAMA_REASONING_BUDGET_IDLE
+
+            let sampler = startTokens.withUnsafeBufferPointer { startBuffer in
+                endTokens.withUnsafeBufferPointer { endBuffer in
+                    forcedTokens.withUnsafeBufferPointer { forcedBuffer in
+                        carbocation_llama_reasoning_budget_sampler_init(
+                            vocab,
+                            startBuffer.baseAddress,
+                            startBuffer.count,
+                            endBuffer.baseAddress,
+                            endBuffer.count,
+                            forcedBuffer.baseAddress,
+                            forcedBuffer.count,
+                            budget,
+                            initialState
+                        )
+                    }
+                }
+            }
+
+            if sampler != nil {
+                llamaRuntimeLog.info(
+                    "Reasoning budget sampler initialized: budgetTokens=\(plan.budgetTokens, privacy: .public) initialState=\(String(describing: plan.initialState), privacy: .public)"
+                )
+            }
+            return sampler
+        } catch {
+            llamaRuntimeLog.error(
+                "Reasoning budget sampler skipped after tokenization failure: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     private static func makeEagerGrammarSampler(
@@ -1436,6 +1615,41 @@ public actor LlamaEngine: LLMEngine {
             return .eager(grammar: grammar)
         }
         return .lazy(grammar: grammar, triggerPatterns: triggerPatterns)
+    }
+
+    static func reasoningBudgetPlan(
+        for options: GenerationOptions,
+        profile: OutputSanitizationProfile,
+        continuingOpenThinkingPairs: [OutputDelimiterPair]
+    ) -> ReasoningBudgetPlan? {
+        guard options.enableThinking,
+              let budgetTokens = options.thinkingBudgetTokens,
+              budgetTokens >= 0 else {
+            return nil
+        }
+
+        if let continuingPair = continuingOpenThinkingPairs.first,
+           !continuingPair.close.isEmpty {
+            return ReasoningBudgetPlan(
+                pair: continuingPair,
+                budgetTokens: budgetTokens,
+                message: options.thinkingBudgetMessage,
+                initialState: .counting
+            )
+        }
+
+        guard let pair = profile.thinkingPairs.first,
+              !pair.open.isEmpty,
+              !pair.close.isEmpty else {
+            return nil
+        }
+
+        return ReasoningBudgetPlan(
+            pair: pair,
+            budgetTokens: budgetTokens,
+            message: options.thinkingBudgetMessage,
+            initialState: .idle
+        )
     }
 
     static func lazyGrammarTriggerPatterns(

@@ -330,6 +330,23 @@ let response = try await LocalLLMEngine.shared.generate(
 
 The option is passed through to embedded Jinja chat templates as `enable_thinking`. Templates that do not use that variable ignore it.
 
+For local GGUF models that expose thinking start/end delimiters, callers can also cap generated thinking tokens:
+
+```swift
+let response = try await LocalLLMEngine.shared.generate(
+    system: "Solve carefully, then return the final answer.",
+    prompt: userPrompt,
+    options: GenerationOptions(
+        maxOutputTokens: 1024,
+        enableThinking: true,
+        thinkingBudgetTokens: 128,
+        thinkingBudgetMessage: "Thinking budget reached."
+    )
+) { _ in }
+```
+
+`thinkingBudgetTokens` is library-facing and per request. It does not add or write any app setting by itself. Use `nil` for no cap, `0` to close a thinking block as soon as it starts, or a positive value to allow that many generated tokens inside thinking before forcing `thinkingBudgetMessage` plus the model's end-of-thinking tag. Negative values are invalid. The budget only applies when `enableThinking` is also `true`; it does not implicitly enable thinking. Apple Intelligence ignores the option, and GGUF templates with no detectable thinking end tag ignore it.
+
 ### Constrain JSON output
 
 For JSON extraction, branch on `loaded.supportsGrammar`:
@@ -707,7 +724,7 @@ smoke: ok
 
 For iOS, select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it. Both the `CLLMSmokeMac` and `CLLMSmokeIOS` schemes compile from the unified source at `Apps/CLLMSmoke/CLLMSmokeApp.swift`, so the iOS smoke runs the same automated JSON flow as the macOS smoke and ends with `smoke: ok`.
 
-For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, run/cancel controls, output, and a streaming event log.
+For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, generation controls for max output and thinking budget, run/cancel controls, output, and a streaming event log.
 
 On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
 
