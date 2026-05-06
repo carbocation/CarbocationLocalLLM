@@ -87,9 +87,24 @@ let package = Package(
         ),
         llamaTarget,
         .target(
+            name: "CarbocationLlamaCommonBridge",
+            dependencies: [
+                "llama"
+            ],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../Vendor/llama.cpp/include")
+            ],
+            cxxSettings: [
+                .headerSearchPath("../../Vendor/llama.cpp/include"),
+                .headerSearchPath("../../Vendor/llama.cpp/ggml/include")
+            ]
+        ),
+        .target(
             name: "CarbocationLlamaRuntime",
             dependencies: [
                 "CarbocationLocalLLM",
+                "CarbocationLlamaCommonBridge",
                 "llama",
                 .product(name: "Jinja", package: "swift-jinja")
             ],
@@ -133,6 +148,13 @@ let package = Package(
         .testTarget(
             name: "CarbocationLlamaRuntimeTests",
             dependencies: ["CarbocationLlamaRuntime"]
+        ),
+        .testTarget(
+            name: "CarbocationLlamaCommonBridgeTests",
+            dependencies: [
+                "CarbocationLlamaCommonBridge",
+                "llama"
+            ]
         ),
         .testTarget(
             name: "CarbocationAppleIntelligenceRuntimeTests",

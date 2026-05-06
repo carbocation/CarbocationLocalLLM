@@ -264,6 +264,8 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(options.stopSequences, [])
         XCTAssertFalse(options.stopAtBalancedJSON)
         XCTAssertFalse(options.enableThinking)
+        XCTAssertNil(options.thinkingBudgetTokens)
+        XCTAssertEqual(options.thinkingBudgetMessage, "")
     }
 
     func testGenerationOptionsOnlyEncodesEnableThinkingWhenTrue() throws {
@@ -274,6 +276,38 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil((try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(GenerationOptions())
         ) as? [String: Any])?["enableThinking"])
+    }
+
+    func testGenerationOptionsThinkingBudgetRoundTrips() throws {
+        let options = GenerationOptions(
+            enableThinking: true,
+            thinkingBudgetTokens: 0,
+            thinkingBudgetMessage: "Budget reached."
+        )
+
+        let data = try JSONEncoder().encode(options)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(object?["thinkingBudgetTokens"] as? Int, 0)
+        XCTAssertEqual(object?["thinkingBudgetMessage"] as? String, "Budget reached.")
+
+        let decoded = try JSONDecoder().decode(GenerationOptions.self, from: data)
+        XCTAssertEqual(decoded.thinkingBudgetTokens, 0)
+        XCTAssertEqual(decoded.thinkingBudgetMessage, "Budget reached.")
+    }
+
+    func testGenerationOptionsDefaultOmitsThinkingBudgetFields() throws {
+        let object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(GenerationOptions())
+        ) as? [String: Any]
+
+        XCTAssertNil(object?["thinkingBudgetTokens"])
+        XCTAssertNil(object?["thinkingBudgetMessage"])
+    }
+
+    func testGenerationOptionsRejectsNegativeThinkingBudgetPayload() {
+        let data = Data(#"{"thinkingBudgetTokens":-1}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(GenerationOptions.self, from: data))
     }
 
     func testGenerationPreflightComputesOutputBudget() {
