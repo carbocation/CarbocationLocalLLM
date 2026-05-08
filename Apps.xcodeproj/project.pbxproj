@@ -23,6 +23,8 @@
 		CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001016 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
+		CLLM100000000000000000001026 /* CarbocationLocalLLMTools in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007005 /* CarbocationLocalLLMTools */; };
+		CLLM100000000000000000001027 /* CarbocationLocalLLMTools in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007005 /* CarbocationLocalLLMTools */; };
 		CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
 		CLLM100000000000000000001019 /* CarbocationLlamaRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007004 /* CarbocationLlamaRuntime */; };
 		CLLM100000000000000000001020 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
@@ -79,6 +81,7 @@
 				CLLM100000000000000000001010 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001011 /* CarbocationLocalLLMRuntime in Frameworks */,
 				CLLM100000000000000000001012 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
+				CLLM100000000000000000001026 /* CarbocationLocalLLMTools in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -89,6 +92,7 @@
 				CLLM100000000000000000001014 /* CarbocationLocalLLM in Frameworks */,
 				CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */,
 				CLLM100000000000000000001016 /* CarbocationLocalLLMRuntimeUI in Frameworks */,
+				CLLM100000000000000000001027 /* CarbocationLocalLLMTools in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -229,6 +233,7 @@
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
 				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
+				CLLM100000000000000000007005 /* CarbocationLocalLLMTools */,
 			);
 			productName = CLLMDemoIOS;
 			productReference = CLLM100000000000000000002005 /* CLLMDemoIOS.app */;
@@ -250,6 +255,7 @@
 				CLLM100000000000000000007001 /* CarbocationLocalLLM */,
 				CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */,
 				CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */,
+				CLLM100000000000000000007005 /* CarbocationLocalLLMTools */,
 			);
 			productName = CLLMDemoMac;
 			productReference = CLLM100000000000000000002007 /* CLLMDemoMac.app */;
@@ -1003,6 +1009,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
 			productName = CarbocationLlamaRuntime;
+		};
+		CLLM100000000000000000007005 /* CarbocationLocalLLMTools */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CLLM100000000000000000009001 /* XCLocalSwiftPackageReference "." */;
+			productName = CarbocationLocalLLMTools;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

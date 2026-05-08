@@ -1,6 +1,8 @@
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMRuntimeUI
+import CarbocationLocalLLMTools
+import Foundation
 import Observation
 import SwiftUI
 
@@ -23,6 +25,109 @@ private enum CLLMDemoMetadata {
 #endif
     static let appSupportFolderName = "CLLMDemo"
     static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
+}
+
+private enum DemoRunMode: String, CaseIterable, Identifiable {
+    case plain
+    case tools
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .plain:
+            return "Plain"
+        case .tools:
+            return "Tools"
+        }
+    }
+}
+
+private enum DemoToolSamplePrompt: String, CaseIterable, Identifiable {
+    case calculate
+    case convertUnits
+    case loadWebpage
+    case unsupportedCurrency
+    case blockedURL
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .calculate:
+            return "Math"
+        case .convertUnits:
+            return "Units"
+        case .loadWebpage:
+            return "Webpage"
+        case .unsupportedCurrency:
+            return "Currency Error"
+        case .blockedURL:
+            return "Bad URL"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .calculate:
+            return "function"
+        case .convertUnits:
+            return "ruler"
+        case .loadWebpage:
+            return "globe"
+        case .unsupportedCurrency:
+            return "dollarsign.arrow.circlepath"
+        case .blockedURL:
+            return "lock.slash"
+        }
+    }
+
+    var prompt: String {
+        switch self {
+        case .calculate:
+            return "Use calculate to compute 17.5 * 23 + 8, then give the result in one sentence."
+        case .convertUnits:
+            return "Use convert_units to convert 12 miles to kilometers and 72 Fahrenheit to Celsius."
+        case .loadWebpage:
+            return "Use load_webpage to load https://example.com, then summarize the page in one sentence."
+        case .unsupportedCurrency:
+            return "Try to use convert_units to convert 10 USD to EUR, then explain the tool result."
+        case .blockedURL:
+            return "Try to use load_webpage to load file:///etc/passwd, then explain the tool result."
+        }
+    }
+}
+
+private struct DemoFixtureWebpageFetcher: LLMWebpageFetching {
+    func fetch(_ request: URLRequest) async throws -> LLMWebpageFetchResponse {
+        guard let url = request.url else {
+            throw URLError(.badURL)
+        }
+
+        let html = """
+        <!doctype html>
+        <html>
+          <head>
+            <title>Fixture Tool Page</title>
+            <style>body { font-family: system-ui; }</style>
+          </head>
+          <body>
+            <main>
+              <h1>Fixture Tool Page</h1>
+              <p>This deterministic page exists for manual tool-calling tests.</p>
+              <p>It lets the demo exercise webpage loading without relying on live network access.</p>
+            </main>
+          </body>
+        </html>
+        """
+
+        return LLMWebpageFetchResponse(
+            data: Data(html.utf8),
+            finalURL: url,
+            statusCode: 200,
+            mimeType: "text/html"
+        )
+    }
 }
 
 private struct DemoRootView: View {
@@ -78,9 +183,11 @@ private struct PromptPane: View {
                 selectedModelStatus
                 promptEditor
                 generationOptionsEditor
+                toolLabSection
                 controls
                 streamSection
                 outputSection
+                toolTranscriptSection
                 eventsSection
             }
             .padding()
@@ -217,6 +324,57 @@ private struct PromptPane: View {
         .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
     }
 
+    private var toolLabSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Tool Lab")
+                .font(.headline)
+
+            Picker("Run mode", selection: $state.runMode) {
+                ForEach(DemoRunMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(state.isRunning)
+
+            if state.runMode == .tools {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("load_webpage", isOn: $state.enableLoadWebpageTool)
+                    Toggle("calculate", isOn: $state.enableCalculateTool)
+                    Toggle("convert_units", isOn: $state.enableConvertUnitsTool)
+                    Toggle("Fixture webpage", isOn: $state.useFixtureWebpageTool)
+                        .disabled(!state.enableLoadWebpageTool)
+                }
+                .disabled(state.isRunning)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 132), spacing: 8)],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    ForEach(DemoToolSamplePrompt.allCases) { sample in
+                        Button {
+                            state.applyToolSample(sample)
+                        } label: {
+                            Label(sample.title, systemImage: sample.systemImage)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(state.isRunning)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                if let message = state.toolValidationMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+    }
+
     private var controls: some View {
         HStack {
             Button {
@@ -243,7 +401,7 @@ private struct PromptPane: View {
                 Label("Clear", systemImage: "xmark.circle")
             }
             .buttonStyle(.bordered)
-            .disabled(state.isRunning || (state.output.isEmpty && state.events.isEmpty))
+            .disabled(state.isRunning || (state.output.isEmpty && state.events.isEmpty && state.toolTranscript.isEmpty))
         }
     }
 
@@ -286,6 +444,22 @@ private struct PromptPane: View {
         }
     }
 
+    @ViewBuilder
+    private var toolTranscriptSection: some View {
+        if state.runMode == .tools || !state.toolTranscript.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tool Transcript")
+                    .font(.headline)
+                Text(state.toolTranscript.isEmpty ? "No tool calls yet." : state.toolTranscript)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+                    .padding(12)
+                    .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+            }
+        }
+    }
+
     private var eventsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Events")
@@ -318,8 +492,14 @@ private final class DemoState {
     var maxOutputTokensText = "256"
     var enableThinking = false
     var thinkingBudgetText = ""
+    var runMode: DemoRunMode = .plain
+    var enableLoadWebpageTool = true
+    var enableCalculateTool = true
+    var enableConvertUnitsTool = true
+    var useFixtureWebpageTool = false
     var output = ""
     var events = ""
+    var toolTranscript = ""
     var streamPhase: LLMStreamContentPhase = .unknown
     var streamBytesSoFar = 0
     var errorMessage: String?
@@ -358,10 +538,19 @@ private final class DemoState {
         LLMModelSelection(storageValue: selectedModelID) != nil
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && generationOptionsValidationMessage == nil
+            && toolValidationMessage == nil
     }
 
     var generationOptionsValidationMessage: String? {
         maxOutputTokensValidationMessage ?? thinkingBudgetValidationMessage
+    }
+
+    var toolValidationMessage: String? {
+        guard runMode == .tools else { return nil }
+        guard selectedToolCount > 0 else {
+            return "Enable at least one tool before running in Tools mode."
+        }
+        return nil
     }
 
     var streamPhaseTitle: String {
@@ -436,6 +625,14 @@ private final class DemoState {
         return Int(trimmed)
     }
 
+    private var selectedToolCount: Int {
+        [
+            enableLoadWebpageTool,
+            enableCalculateTool,
+            enableConvertUnitsTool
+        ].filter { $0 }.count
+    }
+
     func select(_ selection: LLMModelSelection) {
         selectedModelID = selection.storageValue
         loadedInfo = nil
@@ -455,16 +652,34 @@ private final class DemoState {
         normalizeSelection()
     }
 
+    func applyToolSample(_ sample: DemoToolSamplePrompt) {
+        runMode = .tools
+        prompt = sample.prompt
+
+        switch sample {
+        case .calculate:
+            enableCalculateTool = true
+        case .convertUnits, .unsupportedCurrency:
+            enableConvertUnitsTool = true
+        case .loadWebpage, .blockedURL:
+            enableLoadWebpageTool = true
+            useFixtureWebpageTool = false
+        }
+    }
+
     func run() {
         guard !isRunning, !selectedModelID.isEmpty else { return }
         guard canRun else {
-            errorMessage = generationOptionsValidationMessage ?? "Select a model and enter a prompt before running."
+            errorMessage = generationOptionsValidationMessage
+                ?? toolValidationMessage
+                ?? "Select a model and enter a prompt before running."
             return
         }
 
         isRunning = true
         output = ""
         events = ""
+        toolTranscript = ""
         resetStreamState()
         errorMessage = nil
 
@@ -489,6 +704,7 @@ private final class DemoState {
     func clear() {
         output = ""
         events = ""
+        toolTranscript = ""
         resetStreamState()
         errorMessage = nil
     }
@@ -522,19 +738,55 @@ private final class DemoState {
             let options = generationOptions(for: loaded)
             appendGenerationOptionsEvent(options: options, loaded: loaded)
 
-            let response = try await engine.generate(
-                system: systemPrompt,
-                prompt: prompt,
-                options: options,
-                onPhaseAwareEvent: { [weak self] event in
-                    Task { @MainActor [weak self] in
-                        self?.handle(event: event)
+            switch runMode {
+            case .plain:
+                appendEvent("mode: plain")
+                let response = try await engine.generate(
+                    system: systemPrompt,
+                    prompt: prompt,
+                    options: options,
+                    onPhaseAwareEvent: { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.handle(event: event)
+                        }
                     }
-                }
-            )
+                )
 
-            if output != response {
-                output = response
+                if output != response {
+                    output = response
+                }
+
+            case .tools:
+                let tools = selectedTools()
+                appendEvent("mode: tools")
+                appendEvent("tools: \(tools.map(\.definition.name).joined(separator: ", "))")
+                appendEvent("max-tool-rounds: 4")
+                appendToolTranscript("tools: \(tools.map(\.definition.name).joined(separator: ", "))")
+
+                let request = LLMToolGenerationRequest(
+                    system: systemPrompt,
+                    prompt: prompt,
+                    options: options,
+                    tools: tools,
+                    toolChoice: .auto,
+                    maxToolRounds: 4
+                )
+                let result = try await engine.generateWithTools(
+                    request,
+                    onEvent: { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.handle(event: event)
+                        }
+                    }
+                )
+
+                output = result.finalText
+                appendEvent(
+                    "tool-result: stop=\(result.stopReason) rounds=\(result.roundsCompleted) calls=\(result.toolCalls.count)"
+                )
+                appendToolTranscript(
+                    "final: stop=\(result.stopReason) rounds=\(result.roundsCompleted) calls=\(result.toolCalls.count)"
+                )
             }
             appendEvent("done")
             await releaseLoadedModel()
@@ -566,6 +818,38 @@ private final class DemoState {
             thinkingBudgetTokens: parsedThinkingBudgetTokens,
             thinkingBudgetMessage: "Thinking budget reached."
         )
+    }
+
+    private func selectedTools() -> [LLMTool] {
+        var tools: [LLMTool] = []
+
+        if enableLoadWebpageTool {
+            let fetcher: any LLMWebpageFetching
+            if useFixtureWebpageTool {
+                fetcher = DemoFixtureWebpageFetcher()
+            } else {
+                fetcher = URLSessionWebpageFetcher()
+            }
+
+            tools.append(LLMStandardTools.loadWebpage(
+                configuration: LLMLoadWebpageTool.Configuration(
+                    timeout: 10,
+                    maximumBytes: 500_000,
+                    maximumOutputCharacters: 8_000
+                ),
+                fetcher: fetcher
+            ))
+        }
+
+        if enableCalculateTool {
+            tools.append(LLMStandardTools.calculate())
+        }
+
+        if enableConvertUnitsTool {
+            tools.append(LLMStandardTools.convertUnits())
+        }
+
+        return tools
     }
 
     private func appendGenerationOptionsEvent(
@@ -616,6 +900,49 @@ private final class DemoState {
         appendEvent(Self.format(event: event))
     }
 
+    private func handle(event: LLMToolStreamEvent) {
+        switch event {
+        case .modelEvent(let event):
+            handle(event: event)
+        case .toolRoundStarted(let round):
+            appendEvent("tool-round: \(round)")
+            appendToolTranscript("round \(round)")
+        case .toolCallStarted(let call):
+            appendEvent("tool-call: \(call.name) id=\(call.id)")
+            appendToolTranscript(
+                "call \(call.id) \(call.name) arguments=\(Self.compactJSON(call.arguments))"
+            )
+        case .toolCallCompleted(let output):
+            appendEvent("tool-output: \(output.name) id=\(output.callID) error=false")
+            appendToolTranscript(
+                "result \(output.callID) \(output.name) content=\(Self.compactJSON(output.content))"
+            )
+        case .toolCallFailed(let output):
+            appendEvent("tool-output: \(output.name) id=\(output.callID) error=true")
+            appendToolTranscript(
+                "error \(output.callID) \(output.name) content=\(Self.compactJSON(output.content))"
+            )
+        }
+    }
+
+    private func handle(event: LLMStreamEvent) {
+        switch event {
+        case .requestSent:
+            streamPhase = .unknown
+        case .firstByteReceived:
+            streamPhase = .final
+        case .tokenChunk(_, let bytesSoFar):
+            streamPhase = .final
+            streamBytesSoFar = bytesSoFar
+        case .generationStats:
+            streamPhase = .final
+        case .done:
+            streamPhase = .final
+        }
+
+        appendEvent(Self.format(event: event))
+    }
+
     private func resetStreamState() {
         streamPhase = .unknown
         streamBytesSoFar = 0
@@ -640,6 +967,18 @@ private final class DemoState {
         }
     }
 
+    private func appendToolTranscript(_ line: String) {
+        if toolTranscript.isEmpty {
+            toolTranscript = line
+        } else {
+            toolTranscript += "\n\(line)"
+        }
+    }
+
+    private static func compactJSON(_ value: LLMJSONValue) -> String {
+        (try? value.jsonString(prettyPrinted: false)) ?? "\(value)"
+    }
+
     private static func format(event: LLMPhaseAwareStreamEvent) -> String {
         switch event {
         case .requestSent(let phase):
@@ -658,6 +997,21 @@ private final class DemoState {
             return "event: stats phase=\(phase.rawValue) promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
         case .done(let totalBytes, let duration, let phase):
             return String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
+        }
+    }
+
+    private static func format(event: LLMStreamEvent) -> String {
+        switch event {
+        case .requestSent:
+            return "event: request-sent"
+        case .firstByteReceived(let seconds):
+            return String(format: "event: first-byte %.3fs", seconds)
+        case .tokenChunk(let preview, let bytesSoFar):
+            return "event: token-chunk bytes=\(bytesSoFar) preview=\(preview)"
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode):
+            return "event: stats promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
+        case .done(let totalBytes, let duration):
+            return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
         }
     }
 }

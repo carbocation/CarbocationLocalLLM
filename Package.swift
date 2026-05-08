@@ -70,6 +70,10 @@ let package = Package(
             targets: ["CarbocationLocalLLMRuntime"]
         ),
         .library(
+            name: "CarbocationLocalLLMTools",
+            targets: ["CarbocationLocalLLMTools"]
+        ),
+        .library(
             name: "CarbocationLocalLLMUI",
             targets: ["CarbocationLocalLLMUI"]
         ),
@@ -79,7 +83,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0")
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", exact: "2.9.6")
     ],
     targets: [
         .target(
@@ -128,6 +133,13 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CarbocationLocalLLMTools",
+            dependencies: [
+                "CarbocationLocalLLM",
+                "SwiftSoup"
+            ]
+        ),
+        .target(
             name: "CarbocationLocalLLMUI",
             dependencies: ["CarbocationLocalLLM"]
         ),
@@ -163,6 +175,13 @@ let package = Package(
         .testTarget(
             name: "CarbocationLocalLLMRuntimeTests",
             dependencies: ["CarbocationLocalLLMRuntime"]
+        ),
+        .testTarget(
+            name: "CarbocationLocalLLMToolsTests",
+            dependencies: [
+                "CarbocationLocalLLM",
+                "CarbocationLocalLLMTools"
+            ]
         ),
         .testTarget(
             name: "CarbocationLocalLLMUITests",
