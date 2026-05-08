@@ -435,6 +435,25 @@ public actor AppleIntelligenceEngine: LLMEngine {
         options: CarbocationLocalLLM.GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            onPhaseAwareEvent: { event in
+                if let streamEvent = event.streamEvent {
+                    onEvent(streamEvent)
+                }
+            }
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
         let availability = Self.availability()
         guard availability.isAvailable else {
             throw AppleIntelligenceEngineError.unavailable(availability)
@@ -455,7 +474,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
             prompt: prompt,
             options: options,
             resolvedOptions: resolvedOptions,
-            onEvent: onEvent
+            onPhaseAwareEvent: onPhaseAwareEvent
         )
         #else
         throw AppleIntelligenceEngineError.unavailable(.unavailable(.sdkUnavailable))
@@ -509,6 +528,23 @@ public actor AppleIntelligenceSession {
         options: CarbocationLocalLLM.GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            options: options,
+            onPhaseAwareEvent: { event in
+                if let streamEvent = event.streamEvent {
+                    onEvent(streamEvent)
+                }
+            }
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
         let availability = AppleIntelligenceEngine.availability()
         guard availability.isAvailable else {
             throw AppleIntelligenceEngineError.unavailable(availability)
@@ -528,7 +564,7 @@ public actor AppleIntelligenceSession {
             prompt: prompt,
             options: options,
             resolvedOptions: resolvedOptions,
-            onEvent: onEvent
+            onPhaseAwareEvent: onPhaseAwareEvent
         )
         #else
         throw AppleIntelligenceEngineError.unavailable(.unavailable(.sdkUnavailable))
@@ -561,9 +597,10 @@ extension AppleIntelligenceEngine {
         prompt: String,
         options: CarbocationLocalLLM.GenerationOptions,
         resolvedOptions: AppleIntelligenceResolvedOptions,
-        onEvent: @Sendable (LLMStreamEvent) -> Void
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
     ) async throws -> String {
-        onEvent(.requestSent)
+        let phase = LLMStreamContentPhase.final
+        onPhaseAwareEvent(.requestSent(phase: phase))
         let startedAt = Date()
 
         let instructions = Self.instructions(system: system, options: options)
@@ -593,17 +630,26 @@ extension AppleIntelligenceEngine {
             options: options
         )
 
-        onEvent(.firstByteReceived(after: duration))
+        onPhaseAwareEvent(.firstByteReceived(after: duration, phase: phase))
         if !result.isEmpty {
-            onEvent(.tokenChunk(preview: String(result.suffix(60)), bytesSoFar: result.utf8.count))
+            onPhaseAwareEvent(.finalAnswerDelta(
+                text: result,
+                bytesSoFar: result.utf8.count
+            ))
+            onPhaseAwareEvent(.tokenChunk(
+                preview: String(result.suffix(60)),
+                bytesSoFar: result.utf8.count,
+                phase: phase
+            ))
         }
-        onEvent(.generationStats(
+        onPhaseAwareEvent(.generationStats(
             promptTokens: promptTokens,
             generatedTokens: generatedTokens,
             stopReason: stopReason,
-            templateMode: .unavailable
+            templateMode: .unavailable,
+            phase: phase
         ))
-        onEvent(.done(totalBytes: result.utf8.count, duration: duration))
+        onPhaseAwareEvent(.done(totalBytes: result.utf8.count, duration: duration, phase: phase))
 
         return result
     }
@@ -662,9 +708,10 @@ extension AppleIntelligenceSession {
         prompt: String,
         options: CarbocationLocalLLM.GenerationOptions,
         resolvedOptions: AppleIntelligenceResolvedOptions,
-        onEvent: @Sendable (LLMStreamEvent) -> Void
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
     ) async throws -> String {
-        onEvent(.requestSent)
+        let phase = LLMStreamContentPhase.final
+        onPhaseAwareEvent(.requestSent(phase: phase))
         let startedAt = Date()
         let session = foundationModelsSession(options: options)
 
@@ -687,17 +734,26 @@ extension AppleIntelligenceSession {
             options: options
         )
 
-        onEvent(.firstByteReceived(after: duration))
+        onPhaseAwareEvent(.firstByteReceived(after: duration, phase: phase))
         if !result.isEmpty {
-            onEvent(.tokenChunk(preview: String(result.suffix(60)), bytesSoFar: result.utf8.count))
+            onPhaseAwareEvent(.finalAnswerDelta(
+                text: result,
+                bytesSoFar: result.utf8.count
+            ))
+            onPhaseAwareEvent(.tokenChunk(
+                preview: String(result.suffix(60)),
+                bytesSoFar: result.utf8.count,
+                phase: phase
+            ))
         }
-        onEvent(.generationStats(
+        onPhaseAwareEvent(.generationStats(
             promptTokens: promptTokens,
             generatedTokens: generatedTokens,
             stopReason: stopReason,
-            templateMode: .unavailable
+            templateMode: .unavailable,
+            phase: phase
         ))
-        onEvent(.done(totalBytes: result.utf8.count, duration: duration))
+        onPhaseAwareEvent(.done(totalBytes: result.utf8.count, duration: duration, phase: phase))
 
         return result
     }

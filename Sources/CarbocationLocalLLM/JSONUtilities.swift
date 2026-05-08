@@ -112,8 +112,7 @@ public enum LLMResponseSanitizer {
 
         var output = stripThinkingBlocks(from: thinkingPrefixStripped, pairs: profile.thinkingPairs)
 
-        if let marker = profile.sliceAfterMarker,
-           let range = output.range(of: marker, options: .backwards) {
+        if let range = latestMarkerRange(in: output, markers: profile.allFinalMarkers) {
             output = String(output[range.upperBound...])
         }
 
@@ -164,6 +163,16 @@ public enum LLMResponseSanitizer {
             }
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func latestMarkerRange(
+        in text: String,
+        markers: [String]
+    ) -> Range<String.Index>? {
+        markers.compactMap { marker in
+            text.range(of: marker, options: .backwards)
+        }
+        .max { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
     }
 
     private static func replacingMatches(in text: String, pattern: String, with template: String) -> String {

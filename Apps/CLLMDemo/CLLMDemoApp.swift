@@ -79,6 +79,7 @@ private struct PromptPane: View {
                 promptEditor
                 generationOptionsEditor
                 controls
+                streamSection
                 outputSection
                 eventsSection
             }
@@ -246,6 +247,32 @@ private struct PromptPane: View {
         }
     }
 
+    private var streamSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Stream")
+                .font(.headline)
+
+            HStack(spacing: 12) {
+                Label(
+                    state.streamPhaseTitle,
+                    systemImage: state.streamPhaseSystemImage
+                )
+                .font(.headline)
+                .foregroundStyle(state.streamPhaseColor)
+
+                Spacer()
+
+                if state.streamBytesSoFar > 0 {
+                    Text("\(state.streamBytesSoFar) bytes")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+        }
+    }
+
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Output")
@@ -293,6 +320,8 @@ private final class DemoState {
     var thinkingBudgetText = ""
     var output = ""
     var events = ""
+    var streamPhase: LLMStreamContentPhase = .unknown
+    var streamBytesSoFar = 0
     var errorMessage: String?
     var loadedInfo: LocalLLMLoadedModelInfo?
     var isRunning = false
@@ -333,6 +362,39 @@ private final class DemoState {
 
     var generationOptionsValidationMessage: String? {
         maxOutputTokensValidationMessage ?? thinkingBudgetValidationMessage
+    }
+
+    var streamPhaseTitle: String {
+        switch streamPhase {
+        case .unknown:
+            return isRunning ? "Detecting phase..." : "Idle"
+        case .thinking:
+            return isRunning ? "Thinking..." : "Thinking"
+        case .final:
+            return isRunning ? "Final answer" : "Final"
+        }
+    }
+
+    var streamPhaseSystemImage: String {
+        switch streamPhase {
+        case .unknown:
+            return isRunning ? "questionmark.circle" : "circle"
+        case .thinking:
+            return "brain.head.profile"
+        case .final:
+            return "text.bubble"
+        }
+    }
+
+    var streamPhaseColor: Color {
+        switch streamPhase {
+        case .unknown:
+            return .secondary
+        case .thinking:
+            return .orange
+        case .final:
+            return .green
+        }
     }
 
     var maxOutputTokensValidationMessage: String? {
@@ -403,6 +465,7 @@ private final class DemoState {
         isRunning = true
         output = ""
         events = ""
+        resetStreamState()
         errorMessage = nil
 
         let storedSelection = selectedModelID
@@ -426,6 +489,7 @@ private final class DemoState {
     func clear() {
         output = ""
         events = ""
+        resetStreamState()
         errorMessage = nil
     }
 
@@ -461,14 +525,17 @@ private final class DemoState {
             let response = try await engine.generate(
                 system: systemPrompt,
                 prompt: prompt,
-                options: options
-            ) { [weak self] event in
-                Task { @MainActor [weak self] in
-                    self?.appendEvent(Self.format(event: event))
+                options: options,
+                onPhaseAwareEvent: { [weak self] event in
+                    Task { @MainActor [weak self] in
+                        self?.handle(event: event)
+                    }
                 }
-            }
+            )
 
-            output = response
+            if output != response {
+                output = response
+            }
             appendEvent("done")
             await releaseLoadedModel()
         } catch is CancellationError {
@@ -519,6 +586,41 @@ private final class DemoState {
         appendEvent(line)
     }
 
+    private func handle(event: LLMPhaseAwareStreamEvent) {
+        switch event {
+        case .requestSent(let phase):
+            streamPhase = phase
+        case .firstByteReceived(_, let phase):
+            streamPhase = phase
+        case .phaseChanged(_, let phase):
+            streamPhase = phase
+        case .tokenChunk(_, let bytesSoFar, let phase):
+            streamPhase = phase
+            streamBytesSoFar = bytesSoFar
+        case .finalAnswerDelta(let text, let bytesSoFar):
+            streamPhase = .final
+            streamBytesSoFar = bytesSoFar
+            output += text
+        case .finalAnswerSnapshot(let text, let bytesSoFar, _):
+            streamPhase = .final
+            streamBytesSoFar = bytesSoFar
+            if output != text {
+                output = text
+            }
+        case .generationStats(_, _, _, _, let phase):
+            streamPhase = phase
+        case .done(_, _, let phase):
+            streamPhase = phase
+        }
+
+        appendEvent(Self.format(event: event))
+    }
+
+    private func resetStreamState() {
+        streamPhase = .unknown
+        streamBytesSoFar = 0
+    }
+
     private func normalizeSelection() {
         if selectedModelID.isEmpty {
             selectedModelID = systemModels.first?.id ?? library.models.first?.id.uuidString ?? ""
@@ -538,18 +640,24 @@ private final class DemoState {
         }
     }
 
-    private static func format(event: LLMStreamEvent) -> String {
+    private static func format(event: LLMPhaseAwareStreamEvent) -> String {
         switch event {
-        case .requestSent:
-            return "event: request-sent"
-        case .firstByteReceived(let seconds):
-            return String(format: "event: first-byte %.3fs", seconds)
-        case .tokenChunk(let preview, let bytesSoFar):
-            return "event: token-chunk bytes=\(bytesSoFar) preview=\(preview)"
-        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode):
-            return "event: stats promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
-        case .done(let totalBytes, let duration):
-            return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
+        case .requestSent(let phase):
+            return "event: request-sent phase=\(phase.rawValue)"
+        case .firstByteReceived(let seconds, let phase):
+            return String(format: "event: first-byte %.3fs phase=%@", seconds, phase.rawValue)
+        case .phaseChanged(let previousPhase, let phase):
+            return "event: phase \(previousPhase.rawValue) -> \(phase.rawValue)"
+        case .tokenChunk(let preview, let bytesSoFar, let phase):
+            return "event: token-chunk phase=\(phase.rawValue) bytes=\(bytesSoFar) preview=\(preview)"
+        case .finalAnswerDelta(let text, let bytesSoFar):
+            return "event: final-answer-delta bytes=\(bytesSoFar) text=\(text)"
+        case .finalAnswerSnapshot(let text, let bytesSoFar, let reason):
+            return "event: final-answer-snapshot reason=\(reason.rawValue) bytes=\(bytesSoFar) text=\(text)"
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
+            return "event: stats phase=\(phase.rawValue) promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
+        case .done(let totalBytes, let duration, let phase):
+            return String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
         }
     }
 }

@@ -347,6 +347,49 @@ let response = try await LocalLLMEngine.shared.generate(
 
 `thinkingBudgetTokens` is library-facing and per request. It does not add or write any app setting by itself. Use `nil` for no cap, `0` to close a thinking block as soon as it starts, or a positive value to allow that many generated tokens inside thinking before forcing `thinkingBudgetMessage` plus the model's end-of-thinking tag. Negative values are invalid. The budget only applies when `enableThinking` is also `true`; it does not implicitly enable thinking. Apple Intelligence ignores the option, and GGUF templates with no detectable thinking end tag ignore it.
 
+Apps that need to hide or style thinking content while generation is running can opt in to phase-aware stream events without changing the returned sanitized response:
+
+```swift
+let response = try await LocalLLMEngine.shared.generate(
+    system: "Solve carefully, then return the final answer.",
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 1024, enableThinking: true),
+    onPhaseAwareEvent: { event in
+        switch event {
+        case .finalAnswerDelta(let text, _):
+            // Append user-visible final-answer text.
+            _ = text
+        case .finalAnswerSnapshot(let text, _, _):
+            // Replace the streamed answer if sanitization corrected it.
+            _ = text
+        case .phaseChanged(_, let phase):
+            // Update UI state for thinking/final/unknown.
+            _ = phase
+        case .tokenChunk(let preview, _, let phase):
+            // Diagnostic/raw stream preview, including thinking chunks.
+            _ = (preview, phase)
+        default:
+            break
+        }
+    }
+)
+```
+
+`finalAnswerDelta` is appendable user-visible text. `finalAnswerSnapshot` is a correction event for the rare case where incremental sanitization changes previously streamed text; apps can replace their visible answer with the snapshot. `tokenChunk` remains diagnostic stream telemetry and may include thinking content.
+
+Template-derived markers are used automatically for known local GGUF formats. If an app manually puts a thinking channel in the prompt for a model with no discoverable template metadata, declare the request markers explicitly:
+
+```swift
+let options = GenerationOptions(
+    maxOutputTokens: 1024,
+    enableThinking: true,
+    streamPhaseConfiguration: LLMStreamPhaseConfiguration(
+        thinkingPairs: [OutputDelimiterPair(open: "<think>", close: "</think>")],
+        startsInThinking: true
+    )
+)
+```
+
 ### Constrain JSON output
 
 For JSON extraction, branch on `loaded.supportsGrammar`:

@@ -1,4 +1,4 @@
-public struct OutputDelimiterPair: Equatable, Hashable, Sendable {
+public struct OutputDelimiterPair: Codable, Equatable, Hashable, Sendable {
     public var open: String
     public var close: String
 
@@ -14,17 +14,20 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
     public var sliceAfterMarker: String?
     public var extraStopStrings: [String]
     public var scrubTokens: [String]
+    public var finalMarkers: [String]
 
     public init(
         thinkingPairs: [OutputDelimiterPair] = [],
         sliceAfterMarker: String? = nil,
         extraStopStrings: [String] = [],
-        scrubTokens: [String] = []
+        scrubTokens: [String] = [],
+        finalMarkers: [String] = []
     ) {
         self.thinkingPairs = thinkingPairs
         self.sliceAfterMarker = sliceAfterMarker
         self.extraStopStrings = extraStopStrings
         self.scrubTokens = scrubTokens
+        self.finalMarkers = finalMarkers
     }
 
     public static let empty = OutputSanitizationProfile()
@@ -34,6 +37,29 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
             && sliceAfterMarker == nil
             && extraStopStrings.isEmpty
             && scrubTokens.isEmpty
+            && finalMarkers.isEmpty
+    }
+
+    public var allFinalMarkers: [String] {
+        var markers: [String] = []
+        if let sliceAfterMarker, !sliceAfterMarker.isEmpty {
+            markers.append(sliceAfterMarker)
+        }
+        for marker in finalMarkers where !marker.isEmpty && !markers.contains(marker) {
+            markers.append(marker)
+        }
+        return markers
+    }
+
+    public func merging(_ configuration: LLMStreamPhaseConfiguration) -> OutputSanitizationProfile {
+        var profile = self
+        for pair in configuration.thinkingPairs {
+            profile.appendThinkingPair(pair)
+        }
+        for marker in configuration.finalMarkers {
+            profile.appendFinalMarker(marker)
+        }
+        return profile
     }
 
     public static func derived(fromChatTemplate template: String?) -> OutputSanitizationProfile {
@@ -52,6 +78,7 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
 
         if template.contains("<|channel|>final<|message|>") {
             profile.sliceAfterMarker = "<|channel|>final<|message|>"
+            profile.appendFinalMarker("<|channel|>final<|message|>")
         }
 
         for token in ["<|return|>", "<|end|>"] where template.contains(token) {
@@ -79,5 +106,10 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
     private mutating func appendScrubToken(_ token: String) {
         guard !scrubTokens.contains(token) else { return }
         scrubTokens.append(token)
+    }
+
+    private mutating func appendFinalMarker(_ marker: String) {
+        guard !marker.isEmpty, !finalMarkers.contains(marker) else { return }
+        finalMarkers.append(marker)
     }
 }

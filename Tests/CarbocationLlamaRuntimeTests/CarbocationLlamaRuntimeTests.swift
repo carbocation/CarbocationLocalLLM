@@ -249,6 +249,20 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(plan?.initialState, .counting)
     }
 
+    func testReasoningBudgetPlanStartsCountingForExplicitPromptThinkingPhase() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true, thinkingBudgetTokens: 4),
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: true
+        )
+
+        XCTAssertEqual(plan?.pair, pair)
+        XCTAssertEqual(plan?.initialState, .counting)
+    }
+
     func testContinuingOpenThinkingPairsIgnoresLiteralUserThinkingTagBeforeAssistantPrompt() {
         let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
         let profile = OutputSanitizationProfile(thinkingPairs: [pair])
@@ -293,6 +307,113 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         XCTAssertEqual(mode, .eager(grammar: "root ::= object"))
+    }
+
+    func testStreamContentPhaseDetectsGeneratedThinkingBlock() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "", plan: plan), .unknown)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "<thi", plan: plan), .unknown)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "<think>draft", plan: plan), .thinking)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "<think>draft</think>", plan: plan), .final)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "final answer", plan: plan), .final)
+    }
+
+    func testStreamContentPhaseStartsThinkingForPromptPrefilledThinking() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [pair],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "", plan: plan), .thinking)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "draft notes", plan: plan), .thinking)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "draft notes</think>", plan: plan), .final)
+    }
+
+    func testStreamContentPhaseSupportsExplicitPromptDrivenThinking() {
+        let pair = OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: true
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "", plan: plan), .thinking)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "private notes", plan: plan), .thinking)
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(in: "private notes<channel|>final answer", plan: plan),
+            .final
+        )
+    }
+
+    func testStreamContentPhaseUsesFinalMarkersForAnalysisChannels() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(finalMarkers: ["<|channel|>final<|message|>"]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "", plan: plan), .unknown)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "analysis", plan: plan), .thinking)
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(
+                in: "analysis<|channel|>final<|message|>answer",
+                plan: plan
+            ),
+            .final
+        )
+    }
+
+    func testStreamContentPhaseDoesNotTreatLiteralFinalTextAsThinking() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(
+                in: "The literal <think> tag can be discussed safely.",
+                plan: plan
+            ),
+            .final
+        )
+    }
+
+    func testSanitizedGeneratedTextCanDriveFinalAnswerStreamingAfterThinking() throws {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [pair],
+            finalMarkers: ["<final>"]
+        )
+
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                "<think>private</think><final>visible",
+                profile: profile,
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "visible"
+        )
+
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                "private</think> visible",
+                profile: profile,
+                continuingOpenThinkingPairs: [pair],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "visible"
+        )
     }
 
     func testStructuredBoundaryWaitsForPromptOpenThinkingCloseBeforeJSON() {

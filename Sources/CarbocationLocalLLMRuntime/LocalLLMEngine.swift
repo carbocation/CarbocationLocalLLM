@@ -390,6 +390,39 @@ public actor LocalLLMEngine: LLMEngine {
             }
         }
     }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.generate(
+                system: system,
+                prompt: prompt,
+                options: options,
+                onPhaseAwareEvent: onPhaseAwareEvent
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.generate(
+                    system: system,
+                    prompt: prompt,
+                    options: options,
+                    onPhaseAwareEvent: onPhaseAwareEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
 }
 
 public actor LocalLLMSession {
@@ -535,6 +568,43 @@ public actor LocalLLMSession {
                     prompt: prompt,
                     options: options,
                     onEvent: onEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func generate(
+        prompt: String,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            guard let llamaEngine else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            return try await llamaEngine.generate(
+                system: system,
+                prompt: prompt,
+                options: options,
+                onPhaseAwareEvent: onPhaseAwareEvent
+            )
+        case .system(.appleIntelligence):
+            guard let appleIntelligenceSession else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            do {
+                return try await appleIntelligenceSession.generate(
+                    prompt: prompt,
+                    options: options,
+                    onPhaseAwareEvent: onPhaseAwareEvent
                 )
             } catch {
                 throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)

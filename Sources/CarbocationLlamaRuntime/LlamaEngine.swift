@@ -162,6 +162,19 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
+    struct StreamPhasePlan: Equatable {
+        var profile: OutputSanitizationProfile
+        var continuingOpenThinkingPairs: [OutputDelimiterPair]
+        var startsInThinking: Bool?
+
+        var hasPhaseMarkers: Bool {
+            startsInThinking != nil
+                || !continuingOpenThinkingPairs.isEmpty
+                || !profile.thinkingPairs.isEmpty
+                || !profile.allFinalMarkers.isEmpty
+        }
+    }
+
     enum ReasoningBudgetInitialState: Equatable {
         case idle
         case counting
@@ -243,19 +256,21 @@ public actor LlamaEngine: LLMEngine {
             throw LLMEngineError.tokenizationFailed
         }
 
+        let activeOutputProfile = promptFormatting.outputProfile.merging(options.streamPhaseConfiguration)
         let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
             in: renderedPrompt,
-            profile: promptFormatting.outputProfile
+            profile: activeOutputProfile
         )
         let grammarMode = Self.generationGrammarMode(
             for: options,
-            profile: promptFormatting.outputProfile,
+            profile: activeOutputProfile,
             continuingOpenThinkingPairs: continuingOpenThinkingPairs
         )
         let reasoningBudgetPlan = Self.reasoningBudgetPlan(
             for: options,
-            profile: promptFormatting.outputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            profile: activeOutputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            startsInThinking: options.streamPhaseConfiguration.startsInThinking == true
         )
         if options.grammar != nil {
             let samplerRuntime = try buildSampler(
@@ -464,11 +479,38 @@ public actor LlamaEngine: LLMEngine {
         options: GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            onPhaseAwareEvent: { event in
+                if let streamEvent = event.streamEvent {
+                    onEvent(streamEvent)
+                }
+            }
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
 
-        onEvent(.requestSent)
+        var currentPhase = LLMStreamContentPhase.unknown
+        func updatePhase(_ nextPhase: LLMStreamContentPhase) {
+            guard nextPhase != currentPhase else { return }
+            let previousPhase = currentPhase
+            currentPhase = nextPhase
+            onPhaseAwareEvent(.phaseChanged(from: previousPhase, to: nextPhase))
+        }
+
+        onPhaseAwareEvent(.requestSent(phase: currentPhase))
         let startedAt = Date()
 
         var templateMode: LLMChatTemplateMode = .unavailable
@@ -484,11 +526,12 @@ public actor LlamaEngine: LLMEngine {
                 cachedPromptTokens = nil
             }
             if !emittedStats {
-                onEvent(.generationStats(
+                onPhaseAwareEvent(.generationStats(
                     promptTokens: promptTokenCount,
                     generatedTokens: generatedTokenCount,
                     stopReason: stopReason,
-                    templateMode: templateMode
+                    templateMode: templateMode,
+                    phase: currentPhase
                 ))
             }
         }
@@ -523,11 +566,17 @@ public actor LlamaEngine: LLMEngine {
             )
         }
 
-        let activeOutputProfile = promptFormatting.outputProfile
+        let activeOutputProfile = promptFormatting.outputProfile.merging(options.streamPhaseConfiguration)
         let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
             in: renderedPrompt,
             profile: activeOutputProfile
         )
+        let streamPhasePlan = StreamPhasePlan(
+            profile: activeOutputProfile,
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            startsInThinking: options.streamPhaseConfiguration.startsInThinking
+        )
+        updatePhase(Self.streamContentPhase(in: "", plan: streamPhasePlan))
         let grammarMode = Self.generationGrammarMode(
             for: options,
             profile: activeOutputProfile,
@@ -543,7 +592,8 @@ public actor LlamaEngine: LLMEngine {
         let reasoningBudgetPlan = Self.reasoningBudgetPlan(
             for: options,
             profile: activeOutputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            startsInThinking: streamPhasePlan.startsInThinking == true
         )
         llamaRuntimeLog.info(
             "Generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public) thinkingBudgetActive=\(reasoningBudgetPlan != nil, privacy: .public)"
@@ -587,7 +637,52 @@ public actor LlamaEngine: LLMEngine {
             )
         }
         var sawFirstToken = false
+        func emitFirstByteIfNeeded() {
+            guard !sawFirstToken else { return }
+            sawFirstToken = true
+            onPhaseAwareEvent(.firstByteReceived(
+                after: Date().timeIntervalSince(startedAt),
+                phase: currentPhase
+            ))
+        }
+
         var lastHeartbeat = Date()
+        var streamedFinalAnswer = ""
+        func emitFinalAnswer(_ nextFinalAnswer: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
+            guard nextFinalAnswer != streamedFinalAnswer else { return }
+
+            if nextFinalAnswer.hasPrefix(streamedFinalAnswer) {
+                let delta = String(nextFinalAnswer.dropFirst(streamedFinalAnswer.count))
+                if !delta.isEmpty {
+                    onPhaseAwareEvent(.finalAnswerDelta(
+                        text: delta,
+                        bytesSoFar: nextFinalAnswer.utf8.count
+                    ))
+                }
+            } else {
+                onPhaseAwareEvent(.finalAnswerSnapshot(
+                    text: nextFinalAnswer,
+                    bytesSoFar: nextFinalAnswer.utf8.count,
+                    reason: snapshotReason
+                ))
+            }
+
+            streamedFinalAnswer = nextFinalAnswer
+        }
+
+        func emitFinalAnswerProgressIfNeeded() {
+            guard currentPhase == .final,
+                  let nextFinalAnswer = try? Self.sanitizedGeneratedText(
+                    accumulatedText,
+                    profile: activeOutputProfile,
+                    continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+                    requiresNonEmptyStructuredOutput: false
+                  )
+            else { return }
+
+            emitFinalAnswer(nextFinalAnswer, snapshotReason: .streamCorrection)
+        }
+
         var structuredPhase = structuredOutputPlan.map {
             Self.structuredOutputPhase(in: accumulatedText, plan: $0)
         }
@@ -683,7 +778,11 @@ public actor LlamaEngine: LLMEngine {
                     stopReason = boundary.reason
                 }
 
+                updatePhase(Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
+
                 if stopReason == "json-complete" || stopReason == "stop-sequence" {
+                    emitFirstByteIfNeeded()
+                    emitFinalAnswerProgressIfNeeded()
                     if stopReason == "json-complete", structuredOutputPlan != nil {
                         structuredPhase = .complete
                     }
@@ -691,17 +790,16 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            if !sawFirstToken {
-                sawFirstToken = true
-                onEvent(.firstByteReceived(after: Date().timeIntervalSince(startedAt)))
-            }
+            emitFirstByteIfNeeded()
 
             let now = Date()
             if now.timeIntervalSince(lastHeartbeat) >= configuration.heartbeatInterval {
                 lastHeartbeat = now
-                onEvent(.tokenChunk(
+                emitFinalAnswerProgressIfNeeded()
+                onPhaseAwareEvent(.tokenChunk(
                     preview: String(accumulatedText.suffix(60)),
-                    bytesSoFar: accumulatedData.count
+                    bytesSoFar: accumulatedData.count,
+                    phase: currentPhase
                 ))
             }
 
@@ -759,6 +857,8 @@ public actor LlamaEngine: LLMEngine {
             throw error
         }
 
+        emitFinalAnswer(returnedText, snapshotReason: .completed)
+
         llamaRuntimeLog.info(
             "Generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
@@ -766,13 +866,18 @@ public actor LlamaEngine: LLMEngine {
         cachedPromptTokens = promptTokens
         promptCacheCommitted = true
         emittedStats = true
-        onEvent(.generationStats(
+        onPhaseAwareEvent(.generationStats(
             promptTokens: promptTokens.count,
             generatedTokens: generatedTokenCount,
             stopReason: stopReason,
-            templateMode: templateMode
+            templateMode: templateMode,
+            phase: currentPhase
         ))
-        onEvent(.done(totalBytes: returnedText.utf8.count, duration: Date().timeIntervalSince(startedAt)))
+        onPhaseAwareEvent(.done(
+            totalBytes: returnedText.utf8.count,
+            duration: Date().timeIntervalSince(startedAt),
+            phase: currentPhase
+        ))
         return returnedText
     }
 
@@ -1601,7 +1706,7 @@ public actor LlamaEngine: LLMEngine {
         guard let grammar = options.grammar else { return .none }
 
         let canStageStructuredOutput = !profile.thinkingPairs.isEmpty
-            || profile.sliceAfterMarker != nil
+            || !profile.allFinalMarkers.isEmpty
             || !continuingOpenThinkingPairs.isEmpty
         guard options.enableThinking, canStageStructuredOutput else {
             return .eager(grammar: grammar)
@@ -1620,7 +1725,8 @@ public actor LlamaEngine: LLMEngine {
     static func reasoningBudgetPlan(
         for options: GenerationOptions,
         profile: OutputSanitizationProfile,
-        continuingOpenThinkingPairs: [OutputDelimiterPair]
+        continuingOpenThinkingPairs: [OutputDelimiterPair],
+        startsInThinking: Bool = false
     ) -> ReasoningBudgetPlan? {
         guard options.enableThinking,
               let budgetTokens = options.thinkingBudgetTokens,
@@ -1642,6 +1748,15 @@ public actor LlamaEngine: LLMEngine {
               !pair.open.isEmpty,
               !pair.close.isEmpty else {
             return nil
+        }
+
+        if startsInThinking {
+            return ReasoningBudgetPlan(
+                pair: pair,
+                budgetTokens: budgetTokens,
+                message: options.thinkingBudgetMessage,
+                initialState: .counting
+            )
         }
 
         return ReasoningBudgetPlan(
@@ -1667,7 +1782,7 @@ public actor LlamaEngine: LLMEngine {
             patterns.append(regexEscaped(pair.close) + jsonStartCapture)
         }
 
-        if let marker = profile.sliceAfterMarker {
+        for marker in profile.allFinalMarkers {
             patterns.append(regexEscaped(marker) + jsonStartCapture)
         }
 
@@ -1716,6 +1831,102 @@ public actor LlamaEngine: LLMEngine {
                 && renderedPrompt[openRange.upperBound...]
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .isEmpty
+        }
+    }
+
+    static func streamContentPhase(
+        in text: String,
+        plan: StreamPhasePlan
+    ) -> LLMStreamContentPhase {
+        guard plan.hasPhaseMarkers else {
+            return .final
+        }
+
+        if text.isEmpty {
+            if plan.startsInThinking == true || !plan.continuingOpenThinkingPairs.isEmpty {
+                return .thinking
+            }
+            if plan.startsInThinking == false {
+                return .final
+            }
+            return .unknown
+        }
+
+        var lowerBound = text.startIndex
+        let initialThinkingCloseMarkers: [String]
+        if !plan.continuingOpenThinkingPairs.isEmpty {
+            initialThinkingCloseMarkers = plan.continuingOpenThinkingPairs.map(\.close)
+        } else if plan.startsInThinking == true,
+                  let close = plan.profile.thinkingPairs.first?.close,
+                  !close.isEmpty {
+            initialThinkingCloseMarkers = [close]
+        } else {
+            initialThinkingCloseMarkers = []
+        }
+
+        for close in initialThinkingCloseMarkers where !close.isEmpty {
+            guard let closeRange = text.range(of: close, range: lowerBound..<text.endIndex) else {
+                return .thinking
+            }
+            lowerBound = closeRange.upperBound
+        }
+
+        return streamContentPhaseAfterInitialThinking(in: text, from: lowerBound, plan: plan)
+    }
+
+    private static func streamContentPhaseAfterInitialThinking(
+        in text: String,
+        from start: String.Index,
+        plan: StreamPhasePlan
+    ) -> LLMStreamContentPhase {
+        let lowerBound = indexAfterWhitespace(in: text, from: start)
+        guard lowerBound < text.endIndex else {
+            return plan.profile.allFinalMarkers.isEmpty ? .final : .unknown
+        }
+
+        for pair in plan.profile.thinkingPairs where !pair.open.isEmpty {
+            if text[lowerBound...].hasPrefix(pair.open) {
+                guard !pair.close.isEmpty,
+                      let closeRange = text.range(
+                        of: pair.close,
+                        range: lowerBound..<text.endIndex
+                      ) else {
+                    return .thinking
+                }
+                return streamContentPhaseAfterInitialThinking(
+                    in: text,
+                    from: closeRange.upperBound,
+                    plan: plan
+                )
+            }
+        }
+
+        let markers = plan.profile.thinkingPairs.map(\.open) + plan.profile.allFinalMarkers
+        if isPossibleMarkerPrefix(in: text, from: lowerBound, markers: markers) {
+            return .unknown
+        }
+
+        if firstFinalMarkerRange(
+            in: text,
+            markers: plan.profile.allFinalMarkers,
+            range: lowerBound..<text.endIndex
+        ) != nil {
+            return .final
+        }
+
+        return plan.profile.allFinalMarkers.isEmpty ? .final : .thinking
+    }
+
+    private static func isPossibleMarkerPrefix(
+        in text: String,
+        from start: String.Index,
+        markers: [String]
+    ) -> Bool {
+        let suffix = String(text[start...])
+        return markers.contains { marker in
+            !suffix.isEmpty
+                && suffix.count < marker.count
+                && marker.hasPrefix(suffix)
         }
     }
 
@@ -1799,7 +2010,7 @@ public actor LlamaEngine: LLMEngine {
         let structuralStops = Set(
             plan.profile.thinkingPairs.map(\.close)
                 + plan.continuingOpenThinkingPairs.map(\.close)
-                + [plan.profile.sliceAfterMarker].compactMap { $0 }
+                + plan.profile.allFinalMarkers
         )
         return stopSequences.filter { !structuralStops.contains($0) }
     }
@@ -1831,8 +2042,11 @@ public actor LlamaEngine: LLMEngine {
             return jsonStart..<text.endIndex
         }
 
-        if let marker = plan.profile.sliceAfterMarker,
-           let markerRange = text.range(of: marker, range: lowerBound..<text.endIndex) {
+        if let markerRange = firstFinalMarkerRange(
+            in: text,
+            markers: plan.profile.allFinalMarkers,
+            range: lowerBound..<text.endIndex
+        ) {
             lowerBound = markerRange.upperBound
             guard let afterMarkerThinkingBlocks = indexAfterGeneratedThinkingPrefix(
                 in: text,
@@ -1849,6 +2063,17 @@ public actor LlamaEngine: LLMEngine {
         }
 
         return nil
+    }
+
+    private static func firstFinalMarkerRange(
+        in text: String,
+        markers: [String],
+        range: Range<String.Index>
+    ) -> Range<String.Index>? {
+        markers.compactMap { marker in
+            text.range(of: marker, range: range)
+        }
+        .min { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
     }
 
     private static func indexAfterGeneratedThinkingPrefix(

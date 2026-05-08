@@ -1,5 +1,36 @@
 import Foundation
 
+public enum LLMStreamContentPhase: String, Codable, Hashable, Sendable {
+    case unknown
+    case thinking
+    case final
+}
+
+public struct LLMStreamPhaseConfiguration: Codable, Hashable, Sendable {
+    public var thinkingPairs: [OutputDelimiterPair]
+    public var finalMarkers: [String]
+    /// nil keeps automatic model/template behavior, true starts generated content in thinking, false starts in final.
+    public var startsInThinking: Bool?
+
+    public init(
+        thinkingPairs: [OutputDelimiterPair] = [],
+        finalMarkers: [String] = [],
+        startsInThinking: Bool? = nil
+    ) {
+        self.thinkingPairs = thinkingPairs
+        self.finalMarkers = finalMarkers
+        self.startsInThinking = startsInThinking
+    }
+
+    public static let automatic = LLMStreamPhaseConfiguration()
+
+    public var isEmpty: Bool {
+        thinkingPairs.isEmpty
+            && finalMarkers.isEmpty
+            && startsInThinking == nil
+    }
+}
+
 public struct GenerationOptions: Codable, Hashable, Sendable {
     public var temperature: Double?
     public var topP: Double?
@@ -23,6 +54,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
     }
     /// Optional text inserted before the model-native end-of-thinking tag when the thinking budget is exhausted.
     public var thinkingBudgetMessage: String
+    /// Optional per-request hints for phase-aware streaming when prompt markers are not discoverable from the model template.
+    public var streamPhaseConfiguration: LLMStreamPhaseConfiguration
 
     public init(
         temperature: Double? = nil,
@@ -35,7 +68,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         grammar: String? = nil,
         enableThinking: Bool = false,
         thinkingBudgetTokens: Int? = nil,
-        thinkingBudgetMessage: String = ""
+        thinkingBudgetMessage: String = "",
+        streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
     ) {
         precondition(
             thinkingBudgetTokens.map { $0 >= 0 } ?? true,
@@ -52,6 +86,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         self.enableThinking = enableThinking
         self.thinkingBudgetTokens = thinkingBudgetTokens
         self.thinkingBudgetMessage = thinkingBudgetMessage
+        self.streamPhaseConfiguration = streamPhaseConfiguration
     }
 
     public init(
@@ -63,7 +98,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopSequences: [String] = [],
         stopAtBalancedJSON: Bool = false,
         grammar: String? = nil,
-        enableThinking: Bool = false
+        enableThinking: Bool = false,
+        streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
     ) {
         self.init(
             temperature: temperature,
@@ -76,7 +112,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
             grammar: grammar,
             enableThinking: enableThinking,
             thinkingBudgetTokens: nil,
-            thinkingBudgetMessage: ""
+            thinkingBudgetMessage: "",
+            streamPhaseConfiguration: streamPhaseConfiguration
         )
     }
 
@@ -102,6 +139,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         case enableThinking
         case thinkingBudgetTokens
         case thinkingBudgetMessage
+        case streamPhaseConfiguration
     }
 
     public init(from decoder: Decoder) throws {
@@ -125,6 +163,10 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         }
         thinkingBudgetTokens = decodedThinkingBudgetTokens
         thinkingBudgetMessage = try container.decodeIfPresent(String.self, forKey: .thinkingBudgetMessage) ?? ""
+        streamPhaseConfiguration = try container.decodeIfPresent(
+            LLMStreamPhaseConfiguration.self,
+            forKey: .streamPhaseConfiguration
+        ) ?? .automatic
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -147,6 +189,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         try container.encodeIfPresent(thinkingBudgetTokens, forKey: .thinkingBudgetTokens)
         if !thinkingBudgetMessage.isEmpty {
             try container.encode(thinkingBudgetMessage, forKey: .thinkingBudgetMessage)
+        }
+        if !streamPhaseConfiguration.isEmpty {
+            try container.encode(streamPhaseConfiguration, forKey: .streamPhaseConfiguration)
         }
     }
 }
@@ -566,6 +611,56 @@ public enum LLMStreamEvent: Sendable {
     case tokenChunk(preview: String, bytesSoFar: Int)
     case generationStats(promptTokens: Int, generatedTokens: Int, stopReason: String, templateMode: LLMChatTemplateMode)
     case done(totalBytes: Int, duration: TimeInterval)
+}
+
+public enum LLMFinalAnswerSnapshotReason: String, Codable, Sendable {
+    case streamCorrection = "stream-correction"
+    case completed
+}
+
+public enum LLMPhaseAwareStreamEvent: Sendable {
+    case requestSent(phase: LLMStreamContentPhase)
+    case firstByteReceived(after: TimeInterval, phase: LLMStreamContentPhase)
+    case phaseChanged(from: LLMStreamContentPhase, to: LLMStreamContentPhase)
+    case tokenChunk(preview: String, bytesSoFar: Int, phase: LLMStreamContentPhase)
+    case finalAnswerDelta(text: String, bytesSoFar: Int)
+    case finalAnswerSnapshot(
+        text: String,
+        bytesSoFar: Int,
+        reason: LLMFinalAnswerSnapshotReason
+    )
+    case generationStats(
+        promptTokens: Int,
+        generatedTokens: Int,
+        stopReason: String,
+        templateMode: LLMChatTemplateMode,
+        phase: LLMStreamContentPhase
+    )
+    case done(totalBytes: Int, duration: TimeInterval, phase: LLMStreamContentPhase)
+
+    public var streamEvent: LLMStreamEvent? {
+        switch self {
+        case .requestSent:
+            return .requestSent
+        case .firstByteReceived(let seconds, _):
+            return .firstByteReceived(after: seconds)
+        case .phaseChanged:
+            return nil
+        case .tokenChunk(let preview, let bytesSoFar, _):
+            return .tokenChunk(preview: preview, bytesSoFar: bytesSoFar)
+        case .finalAnswerDelta, .finalAnswerSnapshot:
+            return nil
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, _):
+            return .generationStats(
+                promptTokens: promptTokens,
+                generatedTokens: generatedTokens,
+                stopReason: stopReason,
+                templateMode: templateMode
+            )
+        case .done(let totalBytes, let duration, _):
+            return .done(totalBytes: totalBytes, duration: duration)
+        }
+    }
 }
 
 public func shouldRethrowLLMError(_ error: Error) -> Bool {

@@ -266,6 +266,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertFalse(options.enableThinking)
         XCTAssertNil(options.thinkingBudgetTokens)
         XCTAssertEqual(options.thinkingBudgetMessage, "")
+        XCTAssertEqual(options.streamPhaseConfiguration, .automatic)
     }
 
     func testGenerationOptionsOnlyEncodesEnableThinkingWhenTrue() throws {
@@ -302,6 +303,29 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
         XCTAssertNil(object?["thinkingBudgetTokens"])
         XCTAssertNil(object?["thinkingBudgetMessage"])
+        XCTAssertNil(object?["streamPhaseConfiguration"])
+    }
+
+    func testGenerationOptionsStreamPhaseConfigurationRoundTrips() throws {
+        let options = GenerationOptions(
+            enableThinking: true,
+            streamPhaseConfiguration: LLMStreamPhaseConfiguration(
+                thinkingPairs: [OutputDelimiterPair(open: "<reason>", close: "</reason>")],
+                finalMarkers: ["<final>"],
+                startsInThinking: true
+            )
+        )
+
+        let data = try JSONEncoder().encode(options)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let configuration = object?["streamPhaseConfiguration"] as? [String: Any]
+
+        XCTAssertNotNil(configuration?["thinkingPairs"])
+        XCTAssertEqual(configuration?["finalMarkers"] as? [String], ["<final>"])
+        XCTAssertEqual(configuration?["startsInThinking"] as? Bool, true)
+
+        let decoded = try JSONDecoder().decode(GenerationOptions.self, from: data)
+        XCTAssertEqual(decoded.streamPhaseConfiguration, options.streamPhaseConfiguration)
     }
 
     func testGenerationOptionsRejectsNegativeThinkingBudgetPayload() {
@@ -736,7 +760,54 @@ final class CarbocationLocalLLMTests: XCTestCase {
         """)
 
         XCTAssertEqual(profile.sliceAfterMarker, "<|channel|>final<|message|>")
+        XCTAssertEqual(profile.allFinalMarkers, ["<|channel|>final<|message|>"])
         XCTAssertEqual(profile.scrubTokens, ["<|return|>", "<|end|>"])
+    }
+
+    func testOutputProfileMergesExplicitStreamPhaseConfiguration() {
+        let profile = OutputSanitizationProfile(thinkingPairs: [
+            OutputDelimiterPair(open: "<think>", close: "</think>")
+        ])
+        let merged = profile.merging(LLMStreamPhaseConfiguration(
+            thinkingPairs: [
+                OutputDelimiterPair(open: "<reason>", close: "</reason>"),
+                OutputDelimiterPair(open: "<think>", close: "</think>")
+            ],
+            finalMarkers: ["<final>"]
+        ))
+
+        XCTAssertEqual(merged.thinkingPairs, [
+            OutputDelimiterPair(open: "<think>", close: "</think>"),
+            OutputDelimiterPair(open: "<reason>", close: "</reason>")
+        ])
+        XCTAssertEqual(merged.allFinalMarkers, ["<final>"])
+    }
+
+    func testPhaseAwareStreamEventMapsToLegacyStreamEvents() {
+        let phaseAwareEvents: [LLMPhaseAwareStreamEvent] = [
+            .requestSent(phase: .thinking),
+            .phaseChanged(from: .thinking, to: .final),
+            .finalAnswerDelta(text: "answer", bytesSoFar: 6),
+            .finalAnswerSnapshot(text: "answer", bytesSoFar: 6, reason: .completed),
+            .tokenChunk(preview: "answer", bytesSoFar: 6, phase: .final),
+            .done(totalBytes: 6, duration: 1, phase: .final)
+        ]
+
+        let mapped = phaseAwareEvents.compactMap(\.streamEvent)
+
+        XCTAssertEqual(mapped.count, 3)
+        guard case .requestSent = mapped[0] else {
+            return XCTFail("Expected requestSent.")
+        }
+        guard case .tokenChunk(let preview, let bytesSoFar) = mapped[1] else {
+            return XCTFail("Expected tokenChunk.")
+        }
+        XCTAssertEqual(preview, "answer")
+        XCTAssertEqual(bytesSoFar, 6)
+        guard case .done(let totalBytes, _) = mapped[2] else {
+            return XCTFail("Expected done.")
+        }
+        XCTAssertEqual(totalBytes, 6)
     }
 
     func testOutputProfileDerivationStartEndThinkingPair() {
