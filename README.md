@@ -53,7 +53,9 @@ targets: [
         dependencies: [
             .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
             .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
-            .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
+            .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM"),
+            // Optional: bundled tool implementations.
+            .product(name: "CarbocationLocalLLMTools", package: "CarbocationLocalLLM")
         ]
     )
 ]
@@ -61,12 +63,13 @@ targets: [
 
 ### Pick your products
 
-Most apps add these three package products to the app target:
+Most apps add these three package products to the app target. Add `CarbocationLocalLLMTools` only when you want the bundled `load_webpage`, `calculate`, or `convert_units` tools.
 
 ```swift
 import CarbocationLocalLLM         // core types
 import CarbocationLocalLLMRuntime  // unified llama.cpp + Apple Intelligence engine
 import CarbocationLocalLLMRuntimeUI // batteries-included model configuration UI
+import CarbocationLocalLLMTools    // optional bundled tools
 ```
 
 See [Products](#products) for the full list.
@@ -239,6 +242,85 @@ let response = try await LocalLLMEngine.shared.generate(
 ```
 
 Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
+
+### Use tools
+
+Tool calling is opt-in and per request. Keep using `generate(...)` for ordinary text generation. Use `generateWithTools(...)` only for prompts where your app is willing to let the model request host-side tool execution.
+
+```swift
+import CarbocationLocalLLM
+import CarbocationLocalLLMRuntime
+import CarbocationLocalLLMTools
+
+guard let plan = await LocalLLMEngine.loadPlan(from: valueFromPreferences, in: library) else {
+    // Show the picker or clear the stale preference.
+    return
+}
+
+let loaded = try await LocalLLMEngine.shared.load(
+    selection: plan.selection,
+    from: library,
+    requestedContext: plan.requestedContext
+)
+
+let request = LLMToolGenerationRequest(
+    system: "You are a helpful assistant.",
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 512),
+    tools: LLMStandardTools.initialTools(),
+    toolChoice: .auto,
+    maxToolRounds: 4
+)
+
+let result = try await LocalLLMEngine.shared.generateWithTools(request) { event in
+    // Observe model stream events, tool-call starts, and tool outputs here.
+}
+
+let response = result.finalText
+```
+
+`LLMStandardTools.initialTools()` enables all three bundled tools. Its default `load_webpage` uses `URLSessionWebpageFetcher`, so build an explicit tool list or pass a custom `webpageFetcher` when a request should not be able to touch the live network.
+
+`generateWithTools(...)` runs a bounded loop: model response, parsed tool calls, host validation, tool execution, tool outputs appended back to the prompt, then another model response until final text or `maxToolRounds`. Tool failures are returned to the model as structured error outputs unless the task is cancelled. Tool outputs are untrusted data; do not treat webpage text or tool results as system instructions in your own prompts or UI.
+
+### Enable or disable tools safely
+
+The safest default is no tools: call `generate(...)` and no host-side tool closure can run. To enable tools, construct an explicit `[LLMTool]` for that request and pass it to `LLMToolGenerationRequest`.
+
+For feature flags or settings UI, build the tool list from enabled app settings:
+
+```swift
+var tools: [LLMTool] = []
+
+if settings.enableWebpageTool {
+    tools.append(LLMStandardTools.loadWebpage())
+}
+if settings.enableCalculateTool {
+    tools.append(LLMStandardTools.calculate())
+}
+if settings.enableUnitConversionTool {
+    tools.append(LLMStandardTools.convertUnits())
+}
+
+let request = LLMToolGenerationRequest(
+    system: "You are a helpful assistant.",
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 512),
+    tools: tools,
+    toolChoice: tools.isEmpty ? .none : .auto,
+    maxToolRounds: 4
+)
+```
+
+An empty tool list, `.none`, or plain `generate(...)` means tool-disabled execution. The model may still print text that looks like a tool call, but the library will not execute a host tool unless you supplied that tool in the request.
+
+### Built-in tools
+
+`CarbocationLocalLLMTools` ships three initial tools:
+
+- `load_webpage`: fetches `http` and `https` URLs only, uses a timeout and byte cap, rejects redirects to unsupported schemes, extracts title and readable body text with SwiftSoup, and truncates output. Treat returned page content as untrusted text.
+- `calculate`: performs local deterministic arithmetic for `add`, `subtract`, `multiply`, `divide`, and `power` with structured numeric operands. It does not call the network.
+- `convert_units`: performs local Foundation `Measurement` conversions for length, mass, volume, temperature, and speed. It accepts canonical snake-case identifiers plus common names and abbreviations such as `mile`, `miles`, `mi`, `kilometer`, `kilometers`, and `km`, and returns canonical unit IDs in the output. Currency and live exchange-rate conversions are intentionally unsupported.
 
 ### Preflight a request
 
@@ -478,8 +560,10 @@ Add the keys you actually use to your app:
 
 | Capability | When you need it |
 | --- | --- |
-| Outgoing Network (`com.apple.security.network.client`) | A sandboxed app downloads GGUFs from Hugging Face or another remote URL |
+| Outgoing Network (`com.apple.security.network.client`) | A sandboxed macOS app downloads GGUFs from Hugging Face or another remote URL, or enables live `load_webpage` tool calls |
 | App Group | Multiple of your apps share installed GGUF models |
+
+Pure local tools such as `calculate` and `convert_units` do not need a network entitlement. `load_webpage` can also be wired to a custom or fixture fetcher for tests that should not touch the network.
 
 Apple Intelligence is exposed only when the SDK, OS, device, and user setting all support it. The package reports availability through `LocalLLMEngine.availableSystemModels()` and omits Apple Intelligence everywhere else. It additionally requires macOS 26 or iOS/iPadOS 26 or newer, Apple Intelligence enabled in Settings, a supported device, and an app build made with an SDK that includes Foundation Models.
 
@@ -503,6 +587,7 @@ Model weights are not distributed by this package. Downloaded or imported GGUF f
 | --- | --- | --- |
 | `CarbocationLocalLLM` | Core model library, selection, context policy, generation options, JSON helpers, download/import support, fake-engine testing helpers. | App code imports core types directly, or you only need shared model storage. |
 | `CarbocationLocalLLMRuntime` | Unified facade that routes selections to llama.cpp or Apple Intelligence. | Most apps. This is the entry point. |
+| `CarbocationLocalLLMTools` | Bundled tool implementations for webpage loading, arithmetic, and unit conversion. | You want to opt specific requests into the built-in tools. |
 | `CarbocationLocalLLMRuntimeUI` | Batteries-included SwiftUI model configuration view with runtime wiring, system models, calibration, and context controls. | Most apps that want a complete settings surface. |
 | `CarbocationLocalLLMUI` | Lower-level SwiftUI model library picker, curated downloads, Hugging Face URL downloads, local import, delete, refresh. | You want to build custom runtime/context settings around the picker. |
 | `CarbocationLlamaRuntime` | Lower-level llama.cpp runtime — model probing, chat-template fallback, grammar-aware generation, streaming, cancellation. | You need provider-specific control the unified runtime does not expose. |
@@ -767,7 +852,7 @@ smoke: ok
 
 For iOS, select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it. Both the `CLLMSmokeMac` and `CLLMSmokeIOS` schemes compile from the unified source at `Apps/CLLMSmoke/CLLMSmokeApp.swift`, so the iOS smoke runs the same automated JSON flow as the macOS smoke and ends with `smoke: ok`.
 
-For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, generation controls for max output and thinking budget, run/cancel controls, output, and a streaming event log.
+For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, generation controls for max output and thinking budget, run/cancel controls, output, and a streaming event log. The demo also includes a Tool Lab with Plain/Tools mode, per-tool toggles, canned prompts, a tool transcript, and fixture webpage mode for deterministic manual testing without live network access.
 
 On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
 
@@ -789,6 +874,7 @@ Apps/
 Sources/
   CarbocationLocalLLM/                    Core models, selection, context policy, generation options, JSON helpers
   CarbocationLocalLLMRuntime/             Unified facade over llama.cpp and Apple Intelligence
+  CarbocationLocalLLMTools/               Bundled host tools for tool-aware generation
   CarbocationLocalLLMRuntimeUI/           Runtime-aware SwiftUI model configuration
   CarbocationLlamaRuntime/                llama.cpp-backed runtime
   CarbocationAppleIntelligenceRuntime/    Foundation Models-backed runtime (consumed via the unified facade)
