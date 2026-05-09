@@ -108,12 +108,7 @@ public enum LLMLoadWebpageTool {
         guard let rawURL = arguments.string(forKey: "url") else {
             throw LoadWebpageError.missingURL
         }
-        guard let url = URL(string: rawURL), let scheme = url.scheme?.lowercased() else {
-            throw LoadWebpageError.invalidURL(rawURL)
-        }
-        guard scheme == "http" || scheme == "https" else {
-            throw LoadWebpageError.unsupportedScheme(scheme)
-        }
+        let url = try validatedRequestURL(from: rawURL)
 
         var request = URLRequest(url: url)
         request.timeoutInterval = configuration.timeout
@@ -121,8 +116,7 @@ public enum LLMLoadWebpageTool {
         request.setValue("text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.5", forHTTPHeaderField: "Accept")
 
         let response = try await fetcher.fetch(request)
-        guard let finalScheme = response.finalURL.scheme?.lowercased(),
-              finalScheme == "http" || finalScheme == "https" else {
+        guard isSupportedWebURL(response.finalURL) else {
             throw LoadWebpageError.unsupportedRedirect(response.finalURL.absoluteString)
         }
         if let statusCode = response.statusCode,
@@ -148,6 +142,34 @@ public enum LLMLoadWebpageTool {
             "truncated": .bool(truncatedText),
             "bytes_read": .number(Double(limitedData.count))
         ])
+    }
+
+    private static func validatedRequestURL(from rawURL: String) throws -> URL {
+        let sanitized = rawURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\/"#, with: "/")
+
+        guard let url = URL(string: sanitized, encodingInvalidCharacters: false),
+              let scheme = url.scheme?.lowercased() else {
+            throw LoadWebpageError.invalidURL(rawURL)
+        }
+        guard scheme == "http" || scheme == "https" else {
+            throw LoadWebpageError.unsupportedScheme(scheme)
+        }
+        guard let host = url.host, !host.isEmpty else {
+            throw LoadWebpageError.invalidURL(rawURL)
+        }
+        return url
+    }
+
+    private static func isSupportedWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host,
+              !host.isEmpty else {
+            return false
+        }
+        return true
     }
 
     public static func extractReadableText(

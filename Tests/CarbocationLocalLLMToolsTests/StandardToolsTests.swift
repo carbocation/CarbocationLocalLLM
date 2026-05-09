@@ -139,6 +139,27 @@ final class StandardToolsTests: XCTestCase {
         XCTAssertEqual(output.string(forKey: "text")?.count, 1_000)
     }
 
+    func testLoadWebpageNormalizesLiteralSlashEscapesWithoutDecodingPercentEscapes() async throws {
+        let expectedURL = "https://www.bing.com/search?q=S%26P+500+closing+price+May+8+2026"
+        let fetcher = RecordingWebpageFetcher(
+            html: "<html><body>Result</body></html>",
+            finalURL: URL(string: expectedURL)!
+        )
+
+        let output = try await LLMLoadWebpageTool.load(
+            arguments: [
+                "url": #"https:\/\/www.bing.com\/search?q=S%26P+500+closing+price+May+8+2026"#
+            ],
+            fetcher: fetcher
+        )
+
+        let requestedURLs = await fetcher.requestedURLs()
+        XCTAssertEqual(requestedURLs.map(\.absoluteString), [expectedURL])
+        XCTAssertEqual(output.string(forKey: "url"), expectedURL)
+        XCTAssertEqual(output.string(forKey: "url")?.contains("%26"), true)
+        XCTAssertEqual(output.string(forKey: "url")?.contains("%2526"), false)
+    }
+
     func testLoadWebpageRejectsNonHTTPURL() async throws {
         let output = try await LLMLoadWebpageTool.tool(fetcher: StubWebpageFetcher(html: "")).call(arguments: [
             "url": "file:///etc/passwd"
@@ -146,6 +167,48 @@ final class StandardToolsTests: XCTestCase {
 
         XCTAssertEqual(output.value(forKey: "ok"), .bool(false))
         XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "code"), "unsupported_scheme")
+    }
+
+    func testLoadWebpageRejectsHostlessHTTPURLsBeforeFetching() async throws {
+        for rawURL in ["https:///path", "https://"] {
+            let fetcher = RecordingWebpageFetcher()
+            let output = try await LLMLoadWebpageTool.tool(fetcher: fetcher).call(arguments: [
+                "url": .string(rawURL)
+            ])
+
+            XCTAssertEqual(output.value(forKey: "ok"), .bool(false))
+            XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "code"), "invalid_url")
+            let requestCount = await fetcher.requestCount()
+            XCTAssertEqual(requestCount, 0)
+        }
+    }
+
+    func testLoadWebpageRejectsInvalidCharactersBeforeURLAutoEncoding() async throws {
+        let fetcher = RecordingWebpageFetcher()
+
+        let output = try await LLMLoadWebpageTool.tool(fetcher: fetcher).call(arguments: [
+            "url": "https://www.bing.com/search?q=S%26P 500"
+        ])
+
+        XCTAssertEqual(output.value(forKey: "ok"), .bool(false))
+        XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "code"), "invalid_url")
+        XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "message")?.contains("S%26P 500"), true)
+        XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "message")?.contains("%2526"), false)
+        let requestCount = await fetcher.requestCount()
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testLoadWebpageRejectsHostlessHTTPRedirect() async throws {
+        let fetcher = RecordingWebpageFetcher(finalURL: URL(string: "https:///redirect")!)
+
+        let output = try await LLMLoadWebpageTool.tool(fetcher: fetcher).call(arguments: [
+            "url": "https://example.com"
+        ])
+
+        XCTAssertEqual(output.value(forKey: "ok"), .bool(false))
+        XCTAssertEqual(output.value(forKey: "error")?.string(forKey: "code"), "unsupported_redirect")
+        let requestCount = await fetcher.requestCount()
+        XCTAssertEqual(requestCount, 1)
     }
 
     func testLoadWebpageReturnsErrorForTimedOutFetcher() async throws {
@@ -186,5 +249,40 @@ private struct StubWebpageFetcher: LLMWebpageFetching {
             statusCode: statusCode,
             mimeType: "text/html"
         )
+    }
+}
+
+private actor RecordingWebpageFetcher: LLMWebpageFetching {
+    private var requests: [URLRequest] = []
+    private let html: String
+    private let finalURL: URL
+    private let statusCode: Int?
+
+    init(
+        html: String = "",
+        finalURL: URL = URL(string: "https://example.com")!,
+        statusCode: Int? = 200
+    ) {
+        self.html = html
+        self.finalURL = finalURL
+        self.statusCode = statusCode
+    }
+
+    func fetch(_ request: URLRequest) async throws -> LLMWebpageFetchResponse {
+        requests.append(request)
+        return LLMWebpageFetchResponse(
+            data: Data(html.utf8),
+            finalURL: finalURL,
+            statusCode: statusCode,
+            mimeType: "text/html"
+        )
+    }
+
+    func requestedURLs() -> [URL] {
+        requests.compactMap(\.url)
+    }
+
+    func requestCount() -> Int {
+        requests.count
     }
 }
