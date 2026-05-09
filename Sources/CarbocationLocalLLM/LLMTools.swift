@@ -205,12 +205,16 @@ public struct LLMToolGenerationResult: Codable, Hashable, Sendable {
     }
 }
 
-public enum LLMToolStreamEvent: Sendable {
-    case modelEvent(LLMStreamEvent)
+public enum LLMToolPhaseAwareStreamEvent: Sendable {
+    /// Raw model telemetry from hidden tool-candidate turns. This may include tool-call JSON and is not safe for chat display.
+    case toolCandidateEvent(round: Int, event: LLMStreamEvent)
+    /// Phase-aware events from the dedicated final-answer turn. Apps can render final-answer deltas and snapshots from this event.
+    case finalAnswerEvent(LLMPhaseAwareStreamEvent)
     case toolRoundStarted(round: Int)
     case toolCallStarted(LLMToolCall)
     case toolCallCompleted(LLMToolOutput)
     case toolCallFailed(LLMToolOutput)
+    case aggregateGenerationStats(promptTokens: Int, generatedTokens: Int, stopReason: String)
 }
 
 public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {

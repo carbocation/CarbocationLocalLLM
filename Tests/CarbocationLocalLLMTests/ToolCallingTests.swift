@@ -1,4 +1,5 @@
 import CarbocationLocalLLM
+import Foundation
 import XCTest
 
 final class ToolCallingTests: XCTestCase {
@@ -106,7 +107,7 @@ final class ToolCallingTests: XCTestCase {
 
     func testToolGenerationStopsAtMaxToolRounds() async throws {
         let toolCall = #"{"tool_calls":[{"id":"call_1","name":"noop","arguments":{"value":"x"}}]}"#
-        let engine = ScriptedEngine(responses: [toolCall, toolCall])
+        let engine = ScriptedEngine(responses: [toolCall, toolCall, "I cannot call more tools, so I will answer with the available result."])
         let tool = LLMTool(
             definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
         ) { arguments in
@@ -120,6 +121,7 @@ final class ToolCallingTests: XCTestCase {
         ))
 
         XCTAssertEqual(result.stopReason, "max-tool-rounds")
+        XCTAssertEqual(result.finalText, "I cannot call more tools, so I will answer with the available result.")
         XCTAssertEqual(result.roundsCompleted, 1)
         XCTAssertEqual(result.toolCalls.count, 2)
         XCTAssertEqual(result.toolOutputs.count, 1)
@@ -128,7 +130,8 @@ final class ToolCallingTests: XCTestCase {
 
     func testToolGenerationExecutesGemmaStyleToolCall() async throws {
         let toolCall = #"<|tool_call>call:calculate{operands:[17.5,23],operation:"multiply"}<tool_call|>"#
-        let engine = ScriptedEngine(responses: [toolCall, "17.5 times 23 is 402.5."])
+        let engine = ScriptedEngine(responses: [toolCall, #"{"tool_calls":[]}"#, "17.5 times 23 is 402.5."])
+        let recorder = ToolEventRecorder()
         let tool = LLMTool(
             definition: LLMToolDefinition(name: "calculate", description: "Math test tool.")
         ) { arguments in
@@ -143,7 +146,7 @@ final class ToolCallingTests: XCTestCase {
         let result = try await engine.generateWithTools(LLMToolGenerationRequest(
             prompt: "Use calculate.",
             tools: [tool]
-        ))
+        ), onPhaseAwareEvent: { event in recorder.append(event) })
 
         XCTAssertEqual(result.finalText, "17.5 times 23 is 402.5.")
         XCTAssertEqual(result.roundsCompleted, 1)
@@ -153,6 +156,105 @@ final class ToolCallingTests: XCTestCase {
         XCTAssertEqual(result.toolOutputs[0].content.string(forKey: "operation"), "multiply")
         XCTAssertEqual(result.toolOutputs[0].content.array(forKey: "operands") ?? [], [.number(17.5), .number(23)])
         XCTAssertFalse(result.finalText.contains("<|tool_call>"))
+
+        let events = recorder.events
+        XCTAssertTrue(events.containsToolCandidateText("<|tool_call>"))
+        XCTAssertEqual(events.finalAnswerDeltaText, "17.5 times 23 is 402.5.")
+        XCTAssertFalse(events.finalAnswerTextContains("<|tool_call>"))
+        XCTAssertTrue(events.containsAggregateStats(stopReason: "complete"))
+    }
+
+    func testToolGenerationWithoutEnabledToolsUsesFinalAnswerEvents() async throws {
+        let engine = ScriptedEngine(responses: ["Plain answer."])
+        let recorder = ToolEventRecorder()
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Answer plainly.",
+                tools: []
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.finalText, "Plain answer.")
+        XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Plain answer.")
+        XCTAssertFalse(recorder.events.containsToolCandidateEvent)
+    }
+
+    func testToolGenerationWithToolChoiceNoneUsesFinalAnswerEvents() async throws {
+        let engine = ScriptedEngine(responses: ["No tools answer."])
+        let recorder = ToolEventRecorder()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Answer without tools.",
+                tools: [tool],
+                toolChoice: .none
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.finalText, "No tools answer.")
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertEqual(recorder.events.finalAnswerDeltaText, "No tools answer.")
+        XCTAssertFalse(recorder.events.containsToolCandidateEvent)
+    }
+
+    func testToolCallJSONIsDiagnosticOnlyAndFinalAnswerStreamsAfterToolRound() async throws {
+        let toolCall = #"{"tool_calls":[{"id":"call_1","name":"lookup","arguments":{"query":"swift"}}]}"#
+        let engine = ScriptedEngine(responses: [toolCall, #"{"tool_calls":[]}"#, "Swift is a programming language."])
+        let recorder = ToolEventRecorder()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test tool.")
+        ) { arguments in
+            ["ok": true, "query": arguments.value(forKey: "query") ?? .null]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Use lookup.",
+                tools: [tool]
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.finalText, "Swift is a programming language.")
+        XCTAssertTrue(recorder.events.containsToolCandidateText(#""tool_calls""#))
+        XCTAssertFalse(recorder.events.finalAnswerTextContains("tool_calls"))
+        XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Swift is a programming language.")
+    }
+
+    func testMaxToolRoundsDoesNotStreamToolJSONAsFinalAnswer() async throws {
+        let toolCall = #"{"tool_calls":[{"id":"call_1","name":"noop","arguments":{}}]}"#
+        let engine = ScriptedEngine(responses: [toolCall, "Final answer after max rounds."])
+        let recorder = ToolEventRecorder()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Use a tool.",
+                tools: [tool],
+                maxToolRounds: 0
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.stopReason, "max-tool-rounds")
+        XCTAssertEqual(result.finalText, "Final answer after max rounds.")
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolOutputs.count, 0)
+        XCTAssertTrue(recorder.events.containsToolCandidateText("tool_calls"))
+        XCTAssertFalse(recorder.events.finalAnswerTextContains("tool_calls"))
+        XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Final answer after max rounds.")
     }
 }
 
@@ -178,7 +280,112 @@ private actor ScriptedEngine: LLMEngine {
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
         onEvent(.requestSent)
+        let response = nextResponse()
+        if !response.isEmpty {
+            onEvent(.tokenChunk(preview: response, bytesSoFar: response.utf8.count))
+        }
+        onEvent(.generationStats(
+            promptTokens: 2,
+            generatedTokens: TokenEstimator.estimate(text: response),
+            stopReason: "complete",
+            templateMode: .unavailable
+        ))
+        onEvent(.done(totalBytes: response.utf8.count, duration: 0))
+        return response
+    }
+
+    func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        onPhaseAwareEvent(.requestSent(phase: .final))
+        let response = nextResponse()
+        if !response.isEmpty {
+            onPhaseAwareEvent(.finalAnswerDelta(text: response, bytesSoFar: response.utf8.count))
+            onPhaseAwareEvent(.tokenChunk(preview: response, bytesSoFar: response.utf8.count, phase: .final))
+        }
+        onPhaseAwareEvent(.generationStats(
+            promptTokens: 3,
+            generatedTokens: TokenEstimator.estimate(text: response),
+            stopReason: "complete",
+            templateMode: .unavailable,
+            phase: .final
+        ))
+        onPhaseAwareEvent(.done(totalBytes: response.utf8.count, duration: 0, phase: .final))
+        return response
+    }
+
+    private func nextResponse() -> String {
         guard !responses.isEmpty else { return "" }
         return responses.removeFirst()
+    }
+}
+
+private final class ToolEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [LLMToolPhaseAwareStreamEvent] = []
+
+    func append(_ event: LLMToolPhaseAwareStreamEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    var events: [LLMToolPhaseAwareStreamEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+private extension Array where Element == LLMToolPhaseAwareStreamEvent {
+    var containsToolCandidateEvent: Bool {
+        contains {
+            if case .toolCandidateEvent = $0 { return true }
+            return false
+        }
+    }
+
+    var finalAnswerDeltaText: String {
+        reduce(into: "") { result, event in
+            if case .finalAnswerEvent(.finalAnswerDelta(let text, _)) = event {
+                result += text
+            }
+        }
+    }
+
+    func containsToolCandidateText(_ text: String) -> Bool {
+        contains { event in
+            guard case .toolCandidateEvent(_, let streamEvent) = event,
+                  case .tokenChunk(let preview, _) = streamEvent else {
+                return false
+            }
+            return preview.contains(text)
+        }
+    }
+
+    func finalAnswerTextContains(_ text: String) -> Bool {
+        contains { event in
+            switch event {
+            case .finalAnswerEvent(.finalAnswerDelta(let delta, _)):
+                return delta.contains(text)
+            case .finalAnswerEvent(.finalAnswerSnapshot(let snapshot, _, _)):
+                return snapshot.contains(text)
+            default:
+                return false
+            }
+        }
+    }
+
+    func containsAggregateStats(stopReason: String) -> Bool {
+        contains { event in
+            guard case .aggregateGenerationStats(let promptTokens, let generatedTokens, let actualStopReason) = event else {
+                return false
+            }
+            return promptTokens > 0 && generatedTokens > 0 && actualStopReason == stopReason
+        }
     }
 }

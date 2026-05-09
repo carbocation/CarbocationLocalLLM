@@ -274,16 +274,36 @@ let request = LLMToolGenerationRequest(
     maxToolRounds: 4
 )
 
-let result = try await LocalLLMEngine.shared.generateWithTools(request) { event in
-    // Observe model stream events, tool-call starts, and tool outputs here.
-}
+let result = try await LocalLLMEngine.shared.generateWithTools(
+    request,
+    onPhaseAwareEvent: { event in
+        switch event {
+        case .finalAnswerEvent(.finalAnswerDelta(let text, _)):
+            // Append user-visible final-answer text.
+            _ = text
+        case .finalAnswerEvent(.finalAnswerSnapshot(let text, _, _)):
+            // Replace the streamed answer if sanitization corrected it.
+            _ = text
+        case .toolCallStarted(let call):
+            // Observe tool lifecycle events separately from display text.
+            _ = call
+        case .toolCandidateEvent:
+            // Diagnostic only; do not render as assistant text.
+            break
+        default:
+            break
+        }
+    }
+)
 
 let response = result.finalText
 ```
 
+`generateWithTools(...)` runs hidden tool-candidate turns, executes parsed tool calls, appends tool outputs back into the prompt, then runs a dedicated phase-aware final-answer turn. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)`. `.toolCandidateEvent` is raw diagnostic telemetry from hidden tool-decision turns and may include thinking text or tool-call JSON.
+
 `LLMStandardTools.initialTools()` enables all three bundled tools. Its default `load_webpage` uses `URLSessionWebpageFetcher`, so build an explicit tool list or pass a custom `webpageFetcher` when a request should not be able to touch the live network.
 
-`generateWithTools(...)` runs a bounded loop: model response, parsed tool calls, host validation, tool execution, tool outputs appended back to the prompt, then another model response until final text or `maxToolRounds`. Tool failures are returned to the model as structured error outputs unless the task is cancelled. Tool outputs are untrusted data; do not treat webpage text or tool results as system instructions in your own prompts or UI.
+Tool failures are returned to the model as structured error outputs unless the task is cancelled. Tool outputs are untrusted data; do not treat webpage text or tool results as system instructions in your own prompts or UI.
 
 ### Enable or disable tools safely
 

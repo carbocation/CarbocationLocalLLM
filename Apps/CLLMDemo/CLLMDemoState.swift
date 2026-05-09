@@ -31,6 +31,15 @@ enum DemoRunMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum DemoStreamActivity: Equatable {
+    case idle
+    case detecting
+    case toolCandidate(round: Int)
+    case toolExecution(name: String?)
+    case thinking
+    case finalAnswer
+}
+
 enum DemoToolSamplePrompt: String, CaseIterable, Identifiable {
     case calculate
     case convertUnits
@@ -143,6 +152,7 @@ final class DemoState {
     var events = ""
     var toolTranscript = ""
     var streamPhase: LLMStreamContentPhase = .unknown
+    var streamActivity: DemoStreamActivity = .idle
     var streamBytesSoFar = 0
     var errorMessage: String?
     var loadedInfo: LocalLLMLoadedModelInfo?
@@ -198,34 +208,54 @@ final class DemoState {
     }
 
     var streamPhaseTitle: String {
-        switch streamPhase {
-        case .unknown:
-            return isRunning ? "Detecting phase..." : "Idle"
+        switch streamActivity {
+        case .idle:
+            return "Idle"
+        case .detecting:
+            return "Detecting phase..."
+        case .toolCandidate(let round):
+            if round > 1 {
+                return "Determining tools (round \(round))"
+            }
+            return "Determining tools..."
+        case .toolExecution(let name):
+            if let name, !name.isEmpty {
+                return "Running \(name)"
+            }
+            return "Running tool"
         case .thinking:
             return isRunning ? "Thinking..." : "Thinking"
-        case .final:
+        case .finalAnswer:
             return isRunning ? "Final answer" : "Final"
         }
     }
 
     var streamPhaseSystemImage: String {
-        switch streamPhase {
-        case .unknown:
-            return isRunning ? "questionmark.circle" : "circle"
+        switch streamActivity {
+        case .idle:
+            return "circle"
+        case .detecting:
+            return "questionmark.circle"
+        case .toolCandidate:
+            return "wrench.and.screwdriver"
+        case .toolExecution:
+            return "gearshape"
         case .thinking:
             return "brain.head.profile"
-        case .final:
+        case .finalAnswer:
             return "text.bubble"
         }
     }
 
     var streamPhaseColor: Color {
-        switch streamPhase {
-        case .unknown:
+        switch streamActivity {
+        case .idle, .detecting:
             return .secondary
+        case .toolCandidate, .toolExecution:
+            return .blue
         case .thinking:
             return .orange
-        case .final:
+        case .finalAnswer:
             return .green
         }
     }
@@ -474,6 +504,7 @@ final class DemoState {
         generationTask?.cancel()
         generationTask = nil
         isRunning = false
+        streamActivity = .idle
         appendEvent("cancelled")
 
         loadedInfo = nil
@@ -554,7 +585,7 @@ final class DemoState {
                 )
                 let result = try await engine.generateWithTools(
                     request,
-                    onEvent: { [weak self] event in
+                    onPhaseAwareEvent: { [weak self] event in
                         Task { @MainActor [weak self] in
                             self?.handle(event: event)
                         }
@@ -673,55 +704,68 @@ final class DemoState {
     private func handle(event: LLMPhaseAwareStreamEvent) {
         switch event {
         case .requestSent(let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
         case .firstByteReceived(_, let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
         case .phaseChanged(_, let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
         case .tokenChunk(_, let bytesSoFar, let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
             streamBytesSoFar = bytesSoFar
         case .finalAnswerDelta(let text, let bytesSoFar):
             streamPhase = .final
+            streamActivity = .finalAnswer
             streamBytesSoFar = bytesSoFar
             output += text
         case .finalAnswerSnapshot(let text, let bytesSoFar, _):
             streamPhase = .final
+            streamActivity = .finalAnswer
             streamBytesSoFar = bytesSoFar
             if output != text {
                 output = text
             }
         case .generationStats(_, _, _, _, let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
         case .done(_, _, let phase):
-            streamPhase = phase
+            setStreamPhase(phase)
         }
 
         appendEvent(Self.format(event: event))
     }
 
-    private func handle(event: LLMToolStreamEvent) {
+    private func handle(event: LLMToolPhaseAwareStreamEvent) {
         switch event {
-        case .modelEvent(let event):
+        case .finalAnswerEvent(let event):
             handle(event: event)
+        case .toolCandidateEvent(let round, let event):
+            streamPhase = .unknown
+            streamActivity = .toolCandidate(round: round)
+            updateToolCandidateProgress(for: event)
+            appendEvent("tool-candidate \(round): \(Self.format(event: event))")
         case .toolRoundStarted(let round):
+            streamActivity = .toolExecution(name: nil)
             appendEvent("tool-round: \(round)")
             appendToolTranscript("round \(round)")
         case .toolCallStarted(let call):
+            streamActivity = .toolExecution(name: call.name)
             appendEvent("tool-call: \(call.name) id=\(call.id)")
             appendToolTranscript(
                 "call \(call.id) \(call.name) arguments=\(Self.compactJSON(call.arguments))"
             )
         case .toolCallCompleted(let output):
+            streamActivity = .toolExecution(name: output.name)
             appendEvent("tool-output: \(output.name) id=\(output.callID) error=false")
             appendToolTranscript(
                 "result \(output.callID) \(output.name) content=\(Self.compactJSON(output.content))"
             )
         case .toolCallFailed(let output):
+            streamActivity = .toolExecution(name: output.name)
             appendEvent("tool-output: \(output.name) id=\(output.callID) error=true")
             appendToolTranscript(
                 "error \(output.callID) \(output.name) content=\(Self.compactJSON(output.content))"
             )
+        case .aggregateGenerationStats(let promptTokens, let generatedTokens, let stopReason):
+            appendEvent("tool-aggregate: prompt=\(promptTokens) generated=\(generatedTokens) stop=\(stopReason)")
         }
     }
 
@@ -729,15 +773,20 @@ final class DemoState {
         switch event {
         case .requestSent:
             streamPhase = .unknown
+            streamActivity = .detecting
         case .firstByteReceived:
             streamPhase = .final
+            streamActivity = .finalAnswer
         case .tokenChunk(_, let bytesSoFar):
             streamPhase = .final
+            streamActivity = .finalAnswer
             streamBytesSoFar = bytesSoFar
         case .generationStats:
             streamPhase = .final
+            streamActivity = .finalAnswer
         case .done:
             streamPhase = .final
+            streamActivity = .finalAnswer
         }
 
         appendEvent(Self.format(event: event))
@@ -745,7 +794,41 @@ final class DemoState {
 
     private func resetStreamState() {
         streamPhase = .unknown
+        if isRunning {
+            streamActivity = runMode == .tools ? .toolCandidate(round: 1) : .detecting
+        } else {
+            streamActivity = .idle
+        }
         streamBytesSoFar = 0
+    }
+
+    private func setStreamPhase(_ phase: LLMStreamContentPhase) {
+        streamPhase = phase
+        streamActivity = Self.activity(for: phase)
+    }
+
+    private static func activity(for phase: LLMStreamContentPhase) -> DemoStreamActivity {
+        switch phase {
+        case .unknown:
+            return .detecting
+        case .thinking:
+            return .thinking
+        case .final:
+            return .finalAnswer
+        }
+    }
+
+    private func updateToolCandidateProgress(for event: LLMStreamEvent) {
+        switch event {
+        case .requestSent:
+            streamBytesSoFar = 0
+        case .tokenChunk(_, let bytesSoFar):
+            streamBytesSoFar = bytesSoFar
+        case .done(let totalBytes, _):
+            streamBytesSoFar = totalBytes
+        case .firstByteReceived, .generationStats:
+            break
+        }
     }
 
     private func normalizeSelection() {
