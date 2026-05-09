@@ -161,7 +161,10 @@ extension LLMToolChoice: Codable {
 public struct LLMToolGenerationRequest: Sendable {
     public var system: String
     public var prompt: String
+    /// Options for the user-visible final answer turn.
     public var options: GenerationOptions
+    /// Options for hidden tool-decision turns. Defaults to a fast, bounded, no-thinking policy.
+    public var toolCandidateOptions: GenerationOptions
     public var tools: [LLMTool]
     public var toolChoice: LLMToolChoice
     public var maxToolRounds: Int
@@ -170,6 +173,7 @@ public struct LLMToolGenerationRequest: Sendable {
         system: String = "",
         prompt: String,
         options: GenerationOptions = GenerationOptions(),
+        toolCandidateOptions: GenerationOptions = .toolCandidateDefault,
         tools: [LLMTool] = [],
         toolChoice: LLMToolChoice = .auto,
         maxToolRounds: Int = 4
@@ -177,6 +181,7 @@ public struct LLMToolGenerationRequest: Sendable {
         self.system = system
         self.prompt = prompt
         self.options = options
+        self.toolCandidateOptions = toolCandidateOptions
         self.tools = tools
         self.toolChoice = toolChoice
         self.maxToolRounds = maxToolRounds
@@ -206,8 +211,8 @@ public struct LLMToolGenerationResult: Codable, Hashable, Sendable {
 }
 
 public enum LLMToolPhaseAwareStreamEvent: Sendable {
-    /// Raw model telemetry from hidden tool-candidate turns. This may include tool-call JSON and is not safe for chat display.
-    case toolCandidateEvent(round: Int, event: LLMStreamEvent)
+    /// Phase-aware model telemetry from hidden tool-candidate turns. This may include thinking text or tool-call JSON and is not safe for chat display.
+    case toolCandidateEvent(round: Int, event: LLMPhaseAwareStreamEvent)
     /// Phase-aware events from the dedicated final-answer turn. Apps can render final-answer deltas and snapshots from this event.
     case finalAnswerEvent(LLMPhaseAwareStreamEvent)
     case toolRoundStarted(round: Int)

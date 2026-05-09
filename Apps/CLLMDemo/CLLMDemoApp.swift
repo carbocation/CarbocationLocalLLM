@@ -321,17 +321,26 @@ private struct PromptPane: View {
                 .font(.headline)
 
             HStack(spacing: 12) {
-                Label(
-                    state.streamPhaseTitle,
-                    systemImage: state.streamPhaseSystemImage
-                )
-                .font(.headline)
-                .foregroundStyle(state.streamPhaseColor)
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        state.streamActivityTitle,
+                        systemImage: state.streamActivitySystemImage
+                    )
+                    .font(.headline)
+                    .foregroundStyle(state.streamActivityColor)
+
+                    Label(
+                        state.streamPhaseDetailTitle,
+                        systemImage: state.streamPhaseDetailSystemImage
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(state.streamPhaseDetailColor)
+                }
 
                 Spacer()
 
-                if state.streamBytesSoFar > 0 {
-                    Text("\(state.streamBytesSoFar) bytes")
+                if let byteCount = state.streamByteCountLabel {
+                    Text(byteCount)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

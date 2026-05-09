@@ -105,6 +105,75 @@ final class ToolCallingTests: XCTestCase {
         }
     }
 
+    func testToolGenerationRequestDefaultsToFastCandidateOptions() {
+        let request = LLMToolGenerationRequest(prompt: "test")
+
+        XCTAssertEqual(request.toolCandidateOptions, .toolCandidateDefault)
+        XCTAssertFalse(request.toolCandidateOptions.enableThinking)
+        XCTAssertNil(request.toolCandidateOptions.thinkingBudgetTokens)
+        XCTAssertEqual(request.toolCandidateOptions.maxOutputTokens, 256)
+        XCTAssertTrue(request.toolCandidateOptions.stopAtBalancedJSON)
+    }
+
+    func testToolGenerationUsesFastCandidateOptionsByDefault() async throws {
+        let finalOptions = GenerationOptions(
+            maxOutputTokens: 1_024,
+            grammar: "root ::= object",
+            enableThinking: true,
+            thinkingBudgetTokens: 128,
+            thinkingBudgetMessage: "Final thinking budget reached."
+        )
+        let engine = ScriptedEngine(responses: [#"{"tool_calls":[]}"#, "Final answer."])
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        _ = try await engine.generateWithTools(LLMToolGenerationRequest(
+            prompt: "Usually answer directly.",
+            options: finalOptions,
+            tools: [tool]
+        ))
+
+        let invocations = await engine.invocations()
+        XCTAssertEqual(invocations.count, 2)
+        XCTAssertTrue(invocations[0].phaseAware)
+        XCTAssertEqual(invocations[0].options, .toolCandidateDefault)
+        XCTAssertEqual(invocations[1].options, finalOptions)
+    }
+
+    func testToolGenerationRespectsExplicitCandidateOptions() async throws {
+        let finalOptions = GenerationOptions(maxOutputTokens: 1_024, enableThinking: true)
+        let candidateOptions = GenerationOptions(
+            temperature: 0.2,
+            maxOutputTokens: 42,
+            stopAtBalancedJSON: false,
+            grammar: "root ::= object",
+            enableThinking: true,
+            thinkingBudgetTokens: 4
+        )
+        let engine = ScriptedEngine(responses: [#"{"tool_calls":[]}"#, "Final answer."])
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        _ = try await engine.generateWithTools(LLMToolGenerationRequest(
+            prompt: "Use explicit candidate options.",
+            options: finalOptions,
+            toolCandidateOptions: candidateOptions,
+            tools: [tool]
+        ))
+
+        let invocations = await engine.invocations()
+        XCTAssertEqual(invocations.count, 2)
+        XCTAssertEqual(invocations[0].options, candidateOptions)
+        XCTAssertEqual(invocations[0].options.grammar, "root ::= object")
+        XCTAssertEqual(invocations[1].options, finalOptions)
+    }
+
     func testToolGenerationStopsAtMaxToolRounds() async throws {
         let toolCall = #"{"tool_calls":[{"id":"call_1","name":"noop","arguments":{"value":"x"}}]}"#
         let engine = ScriptedEngine(responses: [toolCall, toolCall, "I cannot call more tools, so I will answer with the available result."])
@@ -229,6 +298,32 @@ final class ToolCallingTests: XCTestCase {
         XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Swift is a programming language.")
     }
 
+    func testToolCandidateEventsArePhaseAwareHiddenTelemetry() async throws {
+        let candidateOptions = GenerationOptions(enableThinking: true, thinkingBudgetTokens: 4)
+        let engine = ScriptedEngine(responses: [#"{"tool_calls":[]}"#, "Visible answer."])
+        let recorder = ToolEventRecorder()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "noop", description: "No-op test tool.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Answer if no tool is needed.",
+                toolCandidateOptions: candidateOptions,
+                tools: [tool]
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.finalText, "Visible answer.")
+        XCTAssertTrue(recorder.events.containsToolCandidateThinking)
+        XCTAssertTrue(recorder.events.containsToolCandidateText(#""tool_calls""#))
+        XCTAssertFalse(recorder.events.finalAnswerTextContains("tool_calls"))
+        XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Visible answer.")
+    }
+
     func testMaxToolRoundsDoesNotStreamToolJSONAsFinalAnswer() async throws {
         let toolCall = #"{"tool_calls":[{"id":"call_1","name":"noop","arguments":{}}]}"#
         let engine = ScriptedEngine(responses: [toolCall, "Final answer after max rounds."])
@@ -258,8 +353,14 @@ final class ToolCallingTests: XCTestCase {
     }
 }
 
+private struct GenerationInvocation: Sendable {
+    var options: GenerationOptions
+    var phaseAware: Bool
+}
+
 private actor ScriptedEngine: LLMEngine {
     private var responses: [String]
+    private var recordedInvocations: [GenerationInvocation] = []
 
     init(responses: [String]) {
         self.responses = responses
@@ -279,6 +380,7 @@ private actor ScriptedEngine: LLMEngine {
         options: GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        recordedInvocations.append(GenerationInvocation(options: options, phaseAware: false))
         onEvent(.requestSent)
         let response = nextResponse()
         if !response.isEmpty {
@@ -301,7 +403,13 @@ private actor ScriptedEngine: LLMEngine {
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
-        onPhaseAwareEvent(.requestSent(phase: .final))
+        recordedInvocations.append(GenerationInvocation(options: options, phaseAware: true))
+        let initialPhase: LLMStreamContentPhase = options.enableThinking ? .thinking : .final
+        onPhaseAwareEvent(.requestSent(phase: initialPhase))
+        if options.enableThinking {
+            onPhaseAwareEvent(.tokenChunk(preview: "thinking", bytesSoFar: "thinking".utf8.count, phase: .thinking))
+            onPhaseAwareEvent(.phaseChanged(from: .thinking, to: .final))
+        }
         let response = nextResponse()
         if !response.isEmpty {
             onPhaseAwareEvent(.finalAnswerDelta(text: response, bytesSoFar: response.utf8.count))
@@ -316,6 +424,10 @@ private actor ScriptedEngine: LLMEngine {
         ))
         onPhaseAwareEvent(.done(totalBytes: response.utf8.count, duration: 0, phase: .final))
         return response
+    }
+
+    func invocations() -> [GenerationInvocation] {
+        recordedInvocations
     }
 
     private func nextResponse() -> String {
@@ -359,11 +471,39 @@ private extension Array where Element == LLMToolPhaseAwareStreamEvent {
 
     func containsToolCandidateText(_ text: String) -> Bool {
         contains { event in
-            guard case .toolCandidateEvent(_, let streamEvent) = event,
-                  case .tokenChunk(let preview, _) = streamEvent else {
+            guard case .toolCandidateEvent(_, let streamEvent) = event else {
                 return false
             }
-            return preview.contains(text)
+            switch streamEvent {
+            case .tokenChunk(let preview, _, _):
+                return preview.contains(text)
+            case .finalAnswerDelta(let preview, _):
+                return preview.contains(text)
+            case .finalAnswerSnapshot(let preview, _, _):
+                return preview.contains(text)
+            default:
+                return false
+            }
+        }
+    }
+
+    var containsToolCandidateThinking: Bool {
+        contains { event in
+            guard case .toolCandidateEvent(_, let streamEvent) = event else {
+                return false
+            }
+            switch streamEvent {
+            case .requestSent(.thinking),
+                 .firstByteReceived(_, .thinking),
+                 .tokenChunk(_, _, .thinking),
+                 .generationStats(_, _, _, _, .thinking),
+                 .done(_, _, .thinking):
+                return true
+            case .phaseChanged(_, .thinking):
+                return true
+            default:
+                return false
+            }
         }
     }
 

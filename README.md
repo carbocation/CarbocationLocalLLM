@@ -269,6 +269,7 @@ let request = LLMToolGenerationRequest(
     system: "You are a helpful assistant.",
     prompt: userPrompt,
     options: GenerationOptions(maxOutputTokens: 512),
+    toolCandidateOptions: .toolCandidateDefault,
     tools: LLMStandardTools.initialTools(),
     toolChoice: .auto,
     maxToolRounds: 4
@@ -287,8 +288,9 @@ let result = try await LocalLLMEngine.shared.generateWithTools(
         case .toolCallStarted(let call):
             // Observe tool lifecycle events separately from display text.
             _ = call
-        case .toolCandidateEvent:
-            // Diagnostic only; do not render as assistant text.
+        case .toolCandidateEvent(_, let event):
+            // Hidden phase-aware diagnostic telemetry; do not render as assistant text.
+            _ = event
             break
         default:
             break
@@ -299,7 +301,7 @@ let result = try await LocalLLMEngine.shared.generateWithTools(
 let response = result.finalText
 ```
 
-`generateWithTools(...)` runs hidden tool-candidate turns, executes parsed tool calls, appends tool outputs back into the prompt, then runs a dedicated phase-aware final-answer turn. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)`. `.toolCandidateEvent` is raw diagnostic telemetry from hidden tool-decision turns and may include thinking text or tool-call JSON.
+`generateWithTools(...)` runs hidden tool-candidate turns, executes parsed tool calls, appends tool outputs back into the prompt, then runs a dedicated phase-aware final-answer turn. `options` controls the user-visible final answer, matching `generate(...)`. `toolCandidateOptions` controls hidden tool-decision turns and defaults to `.toolCandidateDefault`, a fast bounded no-thinking policy for tool-call JSON. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)`. `.toolCandidateEvent` is phase-aware diagnostic telemetry from hidden tool-decision turns and may include thinking text or tool-call JSON.
 
 `LLMStandardTools.initialTools()` enables all three bundled tools. Its default `load_webpage` uses `URLSessionWebpageFetcher`, so build an explicit tool list or pass a custom `webpageFetcher` when a request should not be able to touch the live network.
 

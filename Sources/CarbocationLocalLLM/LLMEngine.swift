@@ -267,11 +267,12 @@ extension LLMEngine {
             let text = try await generate(
                 system: system,
                 prompt: prompt,
-                options: request.options.with(grammar: nil),
-                onEvent: { event in
+                options: request.toolCandidateOptions,
+                onPhaseAwareEvent: { event in
                     stats.record(event)
                     onPhaseAwareEvent(.toolCandidateEvent(round: candidateRound, event: event))
-                }
+                },
+                ()
             )
             let calls = LLMToolCallParser.parseToolCalls(in: text)
             guard !calls.isEmpty else {
