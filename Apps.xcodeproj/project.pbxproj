@@ -23,6 +23,8 @@
 		CLLM100000000000000000001015 /* CarbocationLocalLLMRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007002 /* CarbocationLocalLLMRuntime */; };
 		CLLM100000000000000000001016 /* CarbocationLocalLLMRuntimeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007003 /* CarbocationLocalLLMRuntimeUI */; };
 		CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002006 /* CLLMDemoApp.swift */; };
+		CLLM100000000000000000001028 /* CLLMDemoState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002011 /* CLLMDemoState.swift */; };
+		CLLM100000000000000000001029 /* CLLMDemoState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CLLM100000000000000000002011 /* CLLMDemoState.swift */; };
 		CLLM100000000000000000001026 /* CarbocationLocalLLMTools in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007005 /* CarbocationLocalLLMTools */; };
 		CLLM100000000000000000001027 /* CarbocationLocalLLMTools in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007005 /* CarbocationLocalLLMTools */; };
 		CLLM100000000000000000001018 /* CarbocationLocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = CLLM100000000000000000007001 /* CarbocationLocalLLM */; };
@@ -47,6 +49,7 @@
 		CLLM100000000000000000002004 /* CLLMSmokeMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMSmokeMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002005 /* CLLMDemoIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMDemoIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002006 /* CLLMDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMDemoApp.swift; sourceTree = "<group>"; };
+		CLLM100000000000000000002011 /* CLLMDemoState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMDemoState.swift; sourceTree = "<group>"; };
 		CLLM100000000000000000002007 /* CLLMDemoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMDemoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002008 /* CLLMCalgacusIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CLLMCalgacusIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CLLM100000000000000000002009 /* CLLMCalgacusApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLLMCalgacusApp.swift; sourceTree = "<group>"; };
@@ -160,6 +163,7 @@
 			isa = PBXGroup;
 			children = (
 				CLLM100000000000000000002006 /* CLLMDemoApp.swift */,
+				CLLM100000000000000000002011 /* CLLMDemoState.swift */,
 			);
 			path = Apps/CLLMDemo;
 			sourceTree = "<group>";
@@ -381,6 +385,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CLLM100000000000000000001013 /* CLLMDemoApp.swift in Sources */,
+				CLLM100000000000000000001028 /* CLLMDemoState.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -389,6 +394,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CLLM100000000000000000001017 /* CLLMDemoApp.swift in Sources */,
+				CLLM100000000000000000001029 /* CLLMDemoState.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

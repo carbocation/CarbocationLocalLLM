@@ -1,0 +1,308 @@
+import Foundation
+
+public enum LLMGenerationBudget {
+    public static let outputTokenReserve = 1_024
+    public static let promptSafetyTokens = 256
+}
+
+public struct LLMGenerationPreflight: Hashable, Sendable {
+    public var loadedContextSize: Int
+    public var modelTrainingContextSize: Int
+    public var promptTokens: Int
+    public var reservedOutputTokens: Int
+    public var requestedMaxOutputTokens: Int?
+    public var availableOutputTokens: Int
+    public var effectiveMaxOutputTokens: Int
+    public var canGenerate: Bool
+    public var usesExactTokenCounts: Bool
+    public var templateMode: LLMChatTemplateMode
+
+    public init(
+        loadedContextSize: Int,
+        modelTrainingContextSize: Int,
+        promptTokens: Int,
+        reservedOutputTokens: Int,
+        requestedMaxOutputTokens: Int?,
+        usesExactTokenCounts: Bool,
+        templateMode: LLMChatTemplateMode
+    ) {
+        self.loadedContextSize = loadedContextSize
+        self.modelTrainingContextSize = modelTrainingContextSize
+        self.promptTokens = promptTokens
+        self.reservedOutputTokens = reservedOutputTokens
+        self.requestedMaxOutputTokens = requestedMaxOutputTokens
+
+        let availableOutputTokens = max(0, loadedContextSize - promptTokens - reservedOutputTokens)
+        let positiveRequestedMax = requestedMaxOutputTokens.flatMap { $0 > 0 ? $0 : nil }
+        self.availableOutputTokens = availableOutputTokens
+        self.effectiveMaxOutputTokens = min(positiveRequestedMax ?? availableOutputTokens, availableOutputTokens)
+        self.canGenerate = promptTokens < loadedContextSize && self.effectiveMaxOutputTokens > 0
+        self.usesExactTokenCounts = usesExactTokenCounts
+        self.templateMode = templateMode
+    }
+}
+
+public enum LLMSystemModelID: String, Codable, Hashable, Sendable {
+    case appleIntelligence = "system.apple-intelligence"
+}
+
+public enum LLMModelSelection: Codable, Hashable, Sendable {
+    case installed(UUID)
+    case system(LLMSystemModelID)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        guard let selection = LLMModelSelection(storageValue: value) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid model selection: \(value)"
+            )
+        }
+        self = selection
+    }
+
+    public init?(storageValue: String) {
+        if let systemModel = LLMSystemModelID(rawValue: storageValue) {
+            self = .system(systemModel)
+            return
+        }
+        guard let uuid = UUID(uuidString: storageValue) else {
+            return nil
+        }
+        self = .installed(uuid)
+    }
+
+    public var storageValue: String {
+        switch self {
+        case .installed(let id):
+            return id.uuidString
+        case .system(let id):
+            return id.rawValue
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(storageValue)
+    }
+}
+
+public struct LLMSystemModelOption: Identifiable, Hashable, Sendable {
+    public var selection: LLMModelSelection
+    public var displayName: String
+    public var subtitle: String
+    public var contextLength: Int
+    public var systemImageName: String
+
+    public var id: String {
+        selection.storageValue
+    }
+
+    public init(
+        selection: LLMModelSelection,
+        displayName: String,
+        subtitle: String,
+        contextLength: Int,
+        systemImageName: String
+    ) {
+        self.selection = selection
+        self.displayName = displayName
+        self.subtitle = subtitle
+        self.contextLength = contextLength
+        self.systemImageName = systemImageName
+    }
+}
+
+public enum LlamaContextMode: String, CaseIterable, Codable, Sendable {
+    case auto
+    case manual
+}
+
+public struct LlamaContextPreferenceKeys: Sendable {
+    public var contextMode: String
+    public var numCtx: String
+    public var autoContextLimit: String
+    public var autoContextLimitUsesMaximum: String
+
+    public init(
+        contextMode: String = "llama.contextMode",
+        numCtx: String = "llama.numCtx",
+        autoContextLimit: String = "llama.autoContextLimit",
+        autoContextLimitUsesMaximum: String = "llama.autoContextLimitUsesMaximum"
+    ) {
+        self.contextMode = contextMode
+        self.numCtx = numCtx
+        self.autoContextLimit = autoContextLimit
+        self.autoContextLimitUsesMaximum = autoContextLimitUsesMaximum
+    }
+}
+
+public enum LlamaContextPolicy {
+#if os(iOS)
+    public static let defaultAutoCap = 4_096
+    public static let unknownTrainingFallback = 4_096
+#else
+    public static let defaultAutoCap = 16_384
+    public static let unknownTrainingFallback = 8_192
+#endif
+    public static let legacyDefaultNumCtx = 8_192
+    public static let minimumContext = 512
+
+    public static func currentMode(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys()
+    ) -> LlamaContextMode {
+        if let raw = defaults.string(forKey: keys.contextMode),
+           let mode = LlamaContextMode(rawValue: raw) {
+            return mode
+        }
+
+        let hasLegacyOverride = defaults.object(forKey: keys.numCtx) != nil
+        let legacyValue = defaults.integer(forKey: keys.numCtx)
+        if hasLegacyOverride, legacyValue > 0, legacyValue != legacyDefaultNumCtx {
+            return .manual
+        }
+        return .auto
+    }
+
+    public static func manualContext(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys()
+    ) -> Int {
+        sanitizedContext(defaults.integer(forKey: keys.numCtx))
+    }
+
+    public static func autoContextLimit(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
+        defaultLimit: Int = defaultAutoCap
+    ) -> Int {
+        guard defaults.object(forKey: keys.autoContextLimit) != nil else {
+            return max(minimumContext, defaultLimit)
+        }
+        let value = defaults.integer(forKey: keys.autoContextLimit)
+        guard value > 0 else {
+            return max(minimumContext, defaultLimit)
+        }
+        return sanitizedContext(value)
+    }
+
+    public static func autoContextLimitUsesMaximum(
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys()
+    ) -> Bool {
+        defaults.bool(forKey: keys.autoContextLimitUsesMaximum)
+    }
+
+    public static func autoContext(
+        for trainingContext: Int,
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
+    ) -> Int {
+        let contextCap = boundedAutoContextLimit(
+            autoCap,
+            maximumSupportedContext: maximumSupportedContext
+        )
+        guard trainingContext > 0 else {
+            return max(minimumContext, min(unknownTrainingFallback, contextCap))
+        }
+        return max(minimumContext, min(trainingContext, contextCap))
+    }
+
+    public static func resolvedRequestedContext(
+        trainingContext: Int,
+        mode: LlamaContextMode,
+        manualContext: Int,
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
+    ) -> Int {
+        switch mode {
+        case .auto:
+            return autoContext(
+                for: trainingContext,
+                autoCap: autoCap,
+                maximumSupportedContext: maximumSupportedContext
+            )
+        case .manual:
+            return sanitizedContext(manualContext)
+        }
+    }
+
+    public static func resolvedRequestedContext(
+        trainingContext: Int,
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
+    ) -> Int {
+        resolvedRequestedContext(
+            trainingContext: trainingContext,
+            mode: currentMode(defaults: defaults, keys: keys),
+            manualContext: manualContext(defaults: defaults, keys: keys),
+            autoCap: resolvedAutoCap(
+                trainingContext: trainingContext,
+                defaults: defaults,
+                keys: keys,
+                defaultLimit: autoCap,
+                maximumSupportedContext: maximumSupportedContext
+            ),
+            maximumSupportedContext: maximumSupportedContext
+        )
+    }
+
+    public static func resolvedRequestedContext(
+        for model: InstalledModel,
+        defaults: UserDefaults = .standard,
+        keys: LlamaContextPreferenceKeys = LlamaContextPreferenceKeys(),
+        autoCap: Int = defaultAutoCap,
+        maximumSupportedContext: Int? = nil
+    ) -> Int {
+        resolvedRequestedContext(
+            trainingContext: model.contextLength,
+            defaults: defaults,
+            keys: keys,
+            autoCap: autoCap,
+            maximumSupportedContext: maximumSupportedContext
+        )
+    }
+
+    public static func sanitizedContext(_ value: Int) -> Int {
+        max(minimumContext, value > 0 ? value : legacyDefaultNumCtx)
+    }
+
+    private static func boundedAutoContextLimit(
+        _ value: Int,
+        maximumSupportedContext: Int?
+    ) -> Int {
+        let requested = max(minimumContext, value)
+        guard let maximumSupportedContext, maximumSupportedContext > 0 else {
+            return requested
+        }
+        return min(requested, max(minimumContext, maximumSupportedContext))
+    }
+
+    private static func resolvedAutoCap(
+        trainingContext: Int,
+        defaults: UserDefaults,
+        keys: LlamaContextPreferenceKeys,
+        defaultLimit: Int,
+        maximumSupportedContext: Int?
+    ) -> Int {
+        guard autoContextLimitUsesMaximum(defaults: defaults, keys: keys) else {
+            return autoContextLimit(
+                defaults: defaults,
+                keys: keys,
+                defaultLimit: defaultLimit
+            )
+        }
+
+        if let maximumSupportedContext, maximumSupportedContext > 0 {
+            return max(minimumContext, maximumSupportedContext)
+        }
+        if trainingContext > 0, trainingContext < defaultLimit {
+            return max(minimumContext, trainingContext)
+        }
+        return max(minimumContext, defaultLimit)
+    }
+}
