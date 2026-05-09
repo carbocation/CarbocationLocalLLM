@@ -246,11 +246,121 @@ final class CarbocationLocalLLMTests: XCTestCase {
         defaults.set(0.2, forKey: "llama.temperature")
         defaults.set(0.7, forKey: "llama.topP")
         defaults.set(64, forKey: "llama.topK")
+        defaults.set(0.05, forKey: "llama.minP")
+        defaults.set(1.5, forKey: "llama.presencePenalty")
+        defaults.set(1.0, forKey: "llama.repetitionPenalty")
 
         let options = GenerationOptionsResolver.configuredExtractionOptions(defaults: defaults)
         XCTAssertEqual(options.temperature, 0.2)
         XCTAssertEqual(options.topP, 0.7)
         XCTAssertEqual(options.topK, 64)
+        XCTAssertEqual(options.minP, 0.05)
+        XCTAssertEqual(options.presencePenalty, 1.5)
+        XCTAssertEqual(options.repetitionPenalty, 1.0)
+    }
+
+    func testSamplingDefaultsMergeOverridesOnlySpecifiedFields() {
+        let base = LLMSamplingDefaults(
+            temperature: 0,
+            topP: 0.9,
+            topK: 40,
+            minP: 0.05,
+            presencePenalty: 0,
+            repetitionPenalty: 1.3
+        )
+        let override = LLMSamplingDefaults(
+            temperature: 0.7,
+            topK: 20,
+            minP: 0,
+            repetitionPenalty: 1.0
+        )
+
+        let merged = base.merged(with: override)
+
+        XCTAssertEqual(merged.temperature, 0.7)
+        XCTAssertEqual(merged.topP, 0.9)
+        XCTAssertEqual(merged.topK, 20)
+        XCTAssertEqual(merged.minP, 0)
+        XCTAssertEqual(merged.presencePenalty, 0)
+        XCTAssertEqual(merged.repetitionPenalty, 1.0)
+    }
+
+    func testSamplingDefaultsResolverLayersGlobalCuratedAppAndRequestOptions() {
+        let curated = CuratedModel(
+            id: "lab",
+            displayName: "Lab",
+            subtitle: "",
+            hfRepo: "example/lab",
+            hfFilename: "lab-Q4_K_M.gguf",
+            approxSizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            recommendedRAMGB: 8,
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(temperature: 0.7, minP: 0)
+        )
+        let installed = InstalledModel(
+            displayName: "Lab",
+            filename: "lab-Q4_K_M.gguf",
+            sizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            source: .curated,
+            hfRepo: curated.hfRepo,
+            hfFilename: curated.hfFilename,
+            sha256: nil
+        )
+
+        let resolved = LLMSamplingDefaultsResolver.resolvedOptions(
+            globalDefaults: .extractionSafe,
+            installedModel: installed,
+            curatedModels: [curated],
+            appOverrides: [curated.reference: LLMSamplingDefaults(topK: 20, presencePenalty: 1.5)],
+            requestOptions: GenerationOptions(topP: 0.95, repetitionPenalty: 1.0, maxOutputTokens: 128)
+        )
+
+        XCTAssertEqual(resolved.temperature, 0.7)
+        XCTAssertEqual(resolved.topP, 0.95)
+        XCTAssertEqual(resolved.topK, 20)
+        XCTAssertEqual(resolved.minP, 0)
+        XCTAssertEqual(resolved.presencePenalty, 1.5)
+        XCTAssertEqual(resolved.repetitionPenalty, 1.0)
+        XCTAssertEqual(resolved.maxOutputTokens, 128)
+    }
+
+    func testSamplingDefaultsResolverDoesNotApplyCuratedDefaultsToCustomHFModel() {
+        let curated = CuratedModel(
+            id: "lab",
+            displayName: "Lab",
+            subtitle: "",
+            hfRepo: "example/lab",
+            hfFilename: "lab-Q4_K_M.gguf",
+            approxSizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            recommendedRAMGB: 8,
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(temperature: 0.7)
+        )
+        let installed = InstalledModel(
+            displayName: "Lab",
+            filename: "lab-Q4_K_M.gguf",
+            sizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            source: .customHF,
+            hfRepo: curated.hfRepo,
+            hfFilename: curated.hfFilename,
+            sha256: nil
+        )
+
+        let resolved = LLMSamplingDefaultsResolver.resolvedDefaults(
+            globalDefaults: .extractionSafe,
+            installedModel: installed,
+            curatedModels: [curated]
+        )
+
+        XCTAssertEqual(resolved, .extractionSafe)
     }
 
     func testGenerationOptionsDecodeLegacyPayloadWithNewDefaults() throws {
@@ -260,6 +370,9 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(options.temperature, 0.1)
         XCTAssertEqual(options.topP, 0.8)
         XCTAssertEqual(options.topK, 32)
+        XCTAssertNil(options.minP)
+        XCTAssertNil(options.presencePenalty)
+        XCTAssertNil(options.repetitionPenalty)
         XCTAssertNil(options.seed)
         XCTAssertEqual(options.stopSequences, [])
         XCTAssertFalse(options.stopAtBalancedJSON)
@@ -277,6 +390,27 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil((try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(GenerationOptions())
         ) as? [String: Any])?["enableThinking"])
+    }
+
+    func testGenerationOptionsSamplingParametersRoundTrip() throws {
+        let options = GenerationOptions(
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 20,
+            minP: 0,
+            presencePenalty: 1.5,
+            repetitionPenalty: 1.0
+        )
+
+        let data = try JSONEncoder().encode(options)
+        let decoded = try JSONDecoder().decode(GenerationOptions.self, from: data)
+
+        XCTAssertEqual(decoded.temperature, 0.7)
+        XCTAssertEqual(decoded.topP, 0.8)
+        XCTAssertEqual(decoded.topK, 20)
+        XCTAssertEqual(decoded.minP, 0)
+        XCTAssertEqual(decoded.presencePenalty, 1.5)
+        XCTAssertEqual(decoded.repetitionPenalty, 1.0)
     }
 
     func testGenerationOptionsThinkingBudgetRoundTrips() throws {
@@ -1197,8 +1331,14 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(smallTier?.approxSizeBytes, 3_500_000_000)
         XCTAssertEqual(smallTier?.contextLength, 131_072)
         XCTAssertEqual(smallTier?.recommendedRAMGB, 8)
+        XCTAssertEqual(smallTier?.samplingDefaults?.temperature, 1.0)
+        XCTAssertEqual(smallTier?.samplingDefaults?.topP, 0.95)
+        XCTAssertEqual(smallTier?.samplingDefaults?.topK, 64)
         XCTAssertEqual(mediumTier?.id, "qwen3.5-9b-instruct-q4km")
         XCTAssertEqual(largeTier?.id, "gemma-4-26b-a4b-it-q4km")
+        XCTAssertEqual(largeTier?.samplingDefaults?.temperature, 1.0)
+        XCTAssertEqual(largeTier?.samplingDefaults?.topP, 0.95)
+        XCTAssertEqual(largeTier?.samplingDefaults?.topK, 64)
         XCTAssertEqual(topTier?.id, "qwen3.6-27b-dense-q4km")
         XCTAssertEqual(topTier?.displayName, "Qwen3.6 27B Dense (Q4_K_M)")
         XCTAssertEqual(topTier?.hfRepo, "bartowski/Qwen_Qwen3.6-27B-GGUF")
@@ -1206,6 +1346,12 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(topTier?.approxSizeBytes, 17_500_000_000)
         XCTAssertEqual(topTier?.contextLength, 262_144)
         XCTAssertEqual(topTier?.recommendedRAMGB, 48)
+        XCTAssertEqual(topTier?.samplingDefaults?.temperature, 0.7)
+        XCTAssertEqual(topTier?.samplingDefaults?.topP, 0.8)
+        XCTAssertEqual(topTier?.samplingDefaults?.topK, 20)
+        XCTAssertEqual(topTier?.samplingDefaults?.minP, 0)
+        XCTAssertEqual(topTier?.samplingDefaults?.presencePenalty, 1.5)
+        XCTAssertEqual(topTier?.samplingDefaults?.repetitionPenalty, 1.0)
     }
 
     private func makeTemporaryDirectory() throws -> URL {

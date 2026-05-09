@@ -1,5 +1,15 @@
 import Foundation
 
+public struct CuratedModelReference: Codable, Hashable, Sendable {
+    public var hfRepo: String
+    public var hfFilename: String
+
+    public init(hfRepo: String, hfFilename: String) {
+        self.hfRepo = hfRepo
+        self.hfFilename = hfFilename
+    }
+}
+
 public struct CuratedModel: Identifiable, Hashable, Sendable {
     public let id: String
     public let displayName: String
@@ -11,6 +21,33 @@ public struct CuratedModel: Identifiable, Hashable, Sendable {
     public let quantization: String
     public let recommendedRAMGB: Int
     public let sha256: String?
+    public let samplingDefaults: LLMSamplingDefaults?
+
+    public init(
+        id: String,
+        displayName: String,
+        subtitle: String,
+        hfRepo: String,
+        hfFilename: String,
+        approxSizeBytes: Int64,
+        contextLength: Int,
+        quantization: String,
+        recommendedRAMGB: Int,
+        sha256: String?,
+        samplingDefaults: LLMSamplingDefaults? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.subtitle = subtitle
+        self.hfRepo = hfRepo
+        self.hfFilename = hfFilename
+        self.approxSizeBytes = approxSizeBytes
+        self.contextLength = contextLength
+        self.quantization = quantization
+        self.recommendedRAMGB = recommendedRAMGB
+        self.sha256 = sha256
+        self.samplingDefaults = samplingDefaults
+    }
 
     public init(
         id: String,
@@ -24,20 +61,33 @@ public struct CuratedModel: Identifiable, Hashable, Sendable {
         recommendedRAMGB: Int,
         sha256: String?
     ) {
-        self.id = id
-        self.displayName = displayName
-        self.subtitle = subtitle
-        self.hfRepo = hfRepo
-        self.hfFilename = hfFilename
-        self.approxSizeBytes = approxSizeBytes
-        self.contextLength = contextLength
-        self.quantization = quantization
-        self.recommendedRAMGB = recommendedRAMGB
-        self.sha256 = sha256
+        self.init(
+            id: id,
+            displayName: displayName,
+            subtitle: subtitle,
+            hfRepo: hfRepo,
+            hfFilename: hfFilename,
+            approxSizeBytes: approxSizeBytes,
+            contextLength: contextLength,
+            quantization: quantization,
+            recommendedRAMGB: recommendedRAMGB,
+            sha256: sha256,
+            samplingDefaults: nil
+        )
     }
 
     public var recommendedRAMBytes: UInt64 {
         UInt64(recommendedRAMGB) * 1_073_741_824
+    }
+
+    public var reference: CuratedModelReference {
+        CuratedModelReference(hfRepo: hfRepo, hfFilename: hfFilename)
+    }
+
+    public func matches(installedModel: InstalledModel) -> Bool {
+        installedModel.source == .curated
+            && installedModel.hfRepo == hfRepo
+            && installedModel.hfFilename == hfFilename
     }
 }
 
@@ -53,7 +103,12 @@ public enum CuratedModelCatalog {
             contextLength: 131_072,
             quantization: "Q4_K_M",
             recommendedRAMGB: 8,
-            sha256: nil
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(
+                temperature: 1.0,
+                topP: 0.95,
+                topK: 64
+            )
         ),
         CuratedModel(
             id: "qwen3.5-9b-instruct-q4km",
@@ -77,7 +132,12 @@ public enum CuratedModelCatalog {
             contextLength: 262_144,
             quantization: "Q4_K_M",
             recommendedRAMGB: 32,
-            sha256: nil
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(
+                temperature: 1.0,
+                topP: 0.95,
+                topK: 64
+            )
         ),
         CuratedModel(
             id: "qwen3.6-27b-dense-q4km",
@@ -89,7 +149,15 @@ public enum CuratedModelCatalog {
             contextLength: 262_144,
             quantization: "Q4_K_M",
             recommendedRAMGB: 48,
-            sha256: nil
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(
+                temperature: 0.7,
+                topP: 0.8,
+                topK: 20,
+                minP: 0,
+                presencePenalty: 1.5,
+                repetitionPenalty: 1.0
+            )
         )
     ]
 
@@ -110,5 +178,58 @@ public enum CuratedModelCatalog {
             }
         }
         return bestFit
+    }
+
+    public static func entry(
+        for installedModel: InstalledModel,
+        among models: [CuratedModel] = all
+    ) -> CuratedModel? {
+        models.first { $0.matches(installedModel: installedModel) }
+    }
+}
+
+public enum LLMSamplingDefaultsResolver {
+    public static func resolvedDefaults(
+        globalDefaults: LLMSamplingDefaults = .extractionSafe,
+        curatedDefaults: LLMSamplingDefaults? = nil,
+        appOverrides: LLMSamplingDefaults? = nil
+    ) -> LLMSamplingDefaults {
+        globalDefaults
+            .merged(with: curatedDefaults)
+            .merged(with: appOverrides)
+    }
+
+    public static func resolvedDefaults(
+        globalDefaults: LLMSamplingDefaults = .extractionSafe,
+        installedModel: InstalledModel?,
+        curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        appOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
+    ) -> LLMSamplingDefaults {
+        guard let installedModel,
+              let curatedModel = CuratedModelCatalog.entry(for: installedModel, among: curatedModels)
+        else {
+            return globalDefaults
+        }
+
+        return resolvedDefaults(
+            globalDefaults: globalDefaults,
+            curatedDefaults: curatedModel.samplingDefaults,
+            appOverrides: appOverrides[curatedModel.reference]
+        )
+    }
+
+    public static func resolvedOptions(
+        globalDefaults: LLMSamplingDefaults = .extractionSafe,
+        installedModel: InstalledModel?,
+        curatedModels: [CuratedModel] = CuratedModelCatalog.all,
+        appOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:],
+        requestOptions: GenerationOptions
+    ) -> GenerationOptions {
+        resolvedDefaults(
+            globalDefaults: globalDefaults,
+            installedModel: installedModel,
+            curatedModels: curatedModels,
+            appOverrides: appOverrides
+        ).applying(to: requestOptions)
     }
 }

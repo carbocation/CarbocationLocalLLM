@@ -144,6 +144,8 @@ func generate(
 
 This is additive, not a rename of `ModelLibraryPickerView`. Existing apps that import `CarbocationLocalLLMUI` and use `ModelLibraryPickerView` can keep doing that. Apps adopting the batteries-included settings surface should add `CarbocationLocalLLMRuntimeUI` and switch the settings view to `LocalLLMModelConfigurationView`.
 
+Generation policy stays app-owned. `LLMSamplingDefaultsResolver` can layer package/app global sampling defaults, optional curated-model sampling defaults, app-local curated overrides, and the explicit `GenerationOptions` for a request. Sampling defaults cover temperature, top-p, top-k, min-p, presence penalty, and repetition penalty. They are resolved at generation time and are not written into shared installed-model metadata.
+
 ## Integration Guide
 
 ### Set up a model library
@@ -241,7 +243,7 @@ let response = try await LocalLLMEngine.shared.generate(
 }
 ```
 
-Apple Intelligence does not accept every llama option — GBNF grammars are rejected for it, and token counts are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
+`GenerationOptions` is a shared request surface, not a guarantee that every backend can apply every knob. llama.cpp-backed GGUF models support the sampler chain used by the package. Apple Intelligence exposes a narrower sampling API: GBNF grammars, min-p, non-neutral presence/repetition penalties, and combined top-k plus top-p filtering are reported as unsupported options. Token counts for Apple Intelligence are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
 ### Use tools
 
@@ -524,7 +526,7 @@ The configuration view injects `LocalLLMEngine.availableSystemModels()`, `LocalL
 
 Uncalibrated automatic context stays conservative, such as 16,384 tokens on macOS or 4,096 tokens on iOS. After calibration, the context section offers discrete sub-maximum choices such as 16k, 32k, 64k, and 128k when the model and device support them. Calibration records still mean "maximum supported context"; they do not force default auto loads to use the largest possible context.
 
-The lower-level `CarbocationLocalLLMUI.ModelLibraryPickerView` remains available when an app wants to build its own settings UI and wire system models, calibration, and context controls manually. The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, or `labelPolicy:` to replace or suppress picker labels.
+The lower-level `CarbocationLocalLLMUI.ModelLibraryPickerView` remains available when an app wants to build its own settings UI and wire system models, calibration, and context controls manually. The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, `samplingDefaults:` on individual curated entries to supply optional lab/model defaults, or `labelPolicy:` to replace or suppress picker labels.
 
 GGUF weights are not bundled. Apps either import local `.gguf` files, use the curated Hugging Face downloads, or ship their own download UI.
 
@@ -908,7 +910,7 @@ Stays in this package:
 Stays in host apps:
 
 - selected-model preference key
-- app-specific curated-model list, when the shared default is not the right fit
+- app-specific curated-model list and sampling overrides, when the shared default is not the right fit
 - app-specific prompts, grammars, and operations
 - context cap defaults and generation settings UI
 - provider-selection UI policy around the system models returned by `LocalLLMEngine.availableSystemModels()`

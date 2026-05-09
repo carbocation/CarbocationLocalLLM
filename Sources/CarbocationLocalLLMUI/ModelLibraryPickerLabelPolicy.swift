@@ -112,8 +112,6 @@ public struct ModelLibraryPickerLabelPolicy: Equatable, Sendable {
         _ installedModel: InstalledModel,
         matches curatedModel: CuratedModel
     ) -> Bool {
-        installedModel.source == .curated
-            && installedModel.hfRepo == curatedModel.hfRepo
-            && installedModel.hfFilename == curatedModel.hfFilename
+        curatedModel.matches(installedModel: installedModel)
     }
 }

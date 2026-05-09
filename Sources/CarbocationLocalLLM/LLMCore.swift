@@ -31,10 +31,76 @@ public struct LLMStreamPhaseConfiguration: Codable, Hashable, Sendable {
     }
 }
 
+public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
+    public var temperature: Double?
+    public var topP: Double?
+    public var topK: Int?
+    public var minP: Double?
+    public var presencePenalty: Double?
+    public var repetitionPenalty: Double?
+
+    public init(
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        minP: Double? = nil,
+        presencePenalty: Double? = nil,
+        repetitionPenalty: Double? = nil
+    ) {
+        self.temperature = temperature
+        self.topP = topP
+        self.topK = topK
+        self.minP = minP
+        self.presencePenalty = presencePenalty
+        self.repetitionPenalty = repetitionPenalty
+    }
+
+    public static let providerDefault = LLMSamplingDefaults()
+    public static let extractionSafe = LLMSamplingDefaults(temperature: 0, topP: 0.9, topK: 40)
+
+    public func merged(with override: LLMSamplingDefaults?) -> LLMSamplingDefaults {
+        guard let override else { return self }
+        return LLMSamplingDefaults(
+            temperature: override.temperature ?? temperature,
+            topP: override.topP ?? topP,
+            topK: override.topK ?? topK,
+            minP: override.minP ?? minP,
+            presencePenalty: override.presencePenalty ?? presencePenalty,
+            repetitionPenalty: override.repetitionPenalty ?? repetitionPenalty
+        )
+    }
+
+    public func applying(to options: GenerationOptions) -> GenerationOptions {
+        var copy = options
+        if copy.temperature == nil {
+            copy.temperature = temperature
+        }
+        if copy.topP == nil {
+            copy.topP = topP
+        }
+        if copy.topK == nil {
+            copy.topK = topK
+        }
+        if copy.minP == nil {
+            copy.minP = minP
+        }
+        if copy.presencePenalty == nil {
+            copy.presencePenalty = presencePenalty
+        }
+        if copy.repetitionPenalty == nil {
+            copy.repetitionPenalty = repetitionPenalty
+        }
+        return copy
+    }
+}
+
 public struct GenerationOptions: Codable, Hashable, Sendable {
     public var temperature: Double?
     public var topP: Double?
     public var topK: Int?
+    public var minP: Double?
+    public var presencePenalty: Double?
+    public var repetitionPenalty: Double?
     public var maxOutputTokens: Int?
     public var seed: UInt32?
     public var stopSequences: [String]
@@ -61,6 +127,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         temperature: Double? = nil,
         topP: Double? = nil,
         topK: Int? = nil,
+        minP: Double? = nil,
+        presencePenalty: Double? = nil,
+        repetitionPenalty: Double? = nil,
         maxOutputTokens: Int? = nil,
         seed: UInt32? = nil,
         stopSequences: [String] = [],
@@ -78,6 +147,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
+        self.minP = minP
+        self.presencePenalty = presencePenalty
+        self.repetitionPenalty = repetitionPenalty
         self.maxOutputTokens = maxOutputTokens
         self.seed = seed
         self.stopSequences = stopSequences
@@ -99,12 +171,51 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopAtBalancedJSON: Bool = false,
         grammar: String? = nil,
         enableThinking: Bool = false,
+        thinkingBudgetTokens: Int? = nil,
+        thinkingBudgetMessage: String = "",
         streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
     ) {
         self.init(
             temperature: temperature,
             topP: topP,
             topK: topK,
+            minP: nil,
+            presencePenalty: nil,
+            repetitionPenalty: nil,
+            maxOutputTokens: maxOutputTokens,
+            seed: seed,
+            stopSequences: stopSequences,
+            stopAtBalancedJSON: stopAtBalancedJSON,
+            grammar: grammar,
+            enableThinking: enableThinking,
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            thinkingBudgetMessage: thinkingBudgetMessage,
+            streamPhaseConfiguration: streamPhaseConfiguration
+        )
+    }
+
+    public init(
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        minP: Double? = nil,
+        presencePenalty: Double? = nil,
+        repetitionPenalty: Double? = nil,
+        maxOutputTokens: Int? = nil,
+        seed: UInt32? = nil,
+        stopSequences: [String] = [],
+        stopAtBalancedJSON: Bool = false,
+        grammar: String? = nil,
+        enableThinking: Bool = false,
+        streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
+    ) {
+        self.init(
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            minP: minP,
+            presencePenalty: presencePenalty,
+            repetitionPenalty: repetitionPenalty,
             maxOutputTokens: maxOutputTokens,
             seed: seed,
             stopSequences: stopSequences,
@@ -117,8 +228,37 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         )
     }
 
+    public init(
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        maxOutputTokens: Int? = nil,
+        seed: UInt32? = nil,
+        stopSequences: [String] = [],
+        stopAtBalancedJSON: Bool = false,
+        grammar: String? = nil,
+        enableThinking: Bool = false,
+        streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
+    ) {
+        self.init(
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            minP: nil,
+            presencePenalty: nil,
+            repetitionPenalty: nil,
+            maxOutputTokens: maxOutputTokens,
+            seed: seed,
+            stopSequences: stopSequences,
+            stopAtBalancedJSON: stopAtBalancedJSON,
+            grammar: grammar,
+            enableThinking: enableThinking,
+            streamPhaseConfiguration: streamPhaseConfiguration
+        )
+    }
+
     public static var extractionSafe: GenerationOptions {
-        GenerationOptions(temperature: 0, topP: 0.9, topK: 40)
+        LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions())
     }
 
     public func with(grammar: String?) -> GenerationOptions {
@@ -131,6 +271,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         case temperature
         case topP
         case topK
+        case minP
+        case presencePenalty
+        case repetitionPenalty
         case maxOutputTokens
         case seed
         case stopSequences
@@ -147,6 +290,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
         topP = try container.decodeIfPresent(Double.self, forKey: .topP)
         topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+        minP = try container.decodeIfPresent(Double.self, forKey: .minP)
+        presencePenalty = try container.decodeIfPresent(Double.self, forKey: .presencePenalty)
+        repetitionPenalty = try container.decodeIfPresent(Double.self, forKey: .repetitionPenalty)
         maxOutputTokens = try container.decodeIfPresent(Int.self, forKey: .maxOutputTokens)
         seed = try container.decodeIfPresent(UInt32.self, forKey: .seed)
         stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
@@ -174,6 +320,9 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         try container.encodeIfPresent(temperature, forKey: .temperature)
         try container.encodeIfPresent(topP, forKey: .topP)
         try container.encodeIfPresent(topK, forKey: .topK)
+        try container.encodeIfPresent(minP, forKey: .minP)
+        try container.encodeIfPresent(presencePenalty, forKey: .presencePenalty)
+        try container.encodeIfPresent(repetitionPenalty, forKey: .repetitionPenalty)
         try container.encodeIfPresent(maxOutputTokens, forKey: .maxOutputTokens)
         try container.encodeIfPresent(seed, forKey: .seed)
         if !stopSequences.isEmpty {
@@ -986,17 +1135,26 @@ public struct GenerationOptionsPreferenceKeys: Sendable {
     public var temperature: String
     public var topP: String
     public var topK: String
+    public var minP: String
+    public var presencePenalty: String
+    public var repetitionPenalty: String
 
     public init(
         mode: String = "llama.optionsMode",
         temperature: String = "llama.temperature",
         topP: String = "llama.topP",
-        topK: String = "llama.topK"
+        topK: String = "llama.topK",
+        minP: String = "llama.minP",
+        presencePenalty: String = "llama.presencePenalty",
+        repetitionPenalty: String = "llama.repetitionPenalty"
     ) {
         self.mode = mode
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
+        self.minP = minP
+        self.presencePenalty = presencePenalty
+        self.repetitionPenalty = repetitionPenalty
     }
 }
 
@@ -1015,7 +1173,14 @@ public enum GenerationOptionsResolver {
         return GenerationOptions(
             temperature: defaults.double(forKey: keys.temperature),
             topP: topPRaw > 0 ? topPRaw : 0.9,
-            topK: topKRaw > 0 ? topKRaw : 40
+            topK: topKRaw > 0 ? topKRaw : 40,
+            minP: defaults.object(forKey: keys.minP) == nil ? nil : defaults.double(forKey: keys.minP),
+            presencePenalty: defaults.object(forKey: keys.presencePenalty) == nil
+                ? nil
+                : defaults.double(forKey: keys.presencePenalty),
+            repetitionPenalty: defaults.object(forKey: keys.repetitionPenalty) == nil
+                ? nil
+                : defaults.double(forKey: keys.repetitionPenalty)
         )
     }
 }

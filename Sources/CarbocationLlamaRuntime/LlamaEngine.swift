@@ -1511,9 +1511,11 @@ public actor LlamaEngine: LLMEngine {
             activeReasoningBudgetSampler = reasoningBudgetSampler
         }
 
+        let repetitionPenalty = Float(options.repetitionPenalty ?? Double(Self.penaltyRepeat))
+        let presencePenalty = Float(options.presencePenalty ?? 0)
         llama_sampler_chain_add(
             chain,
-            llama_sampler_init_penalties(Self.penaltyLastN, Self.penaltyRepeat, 0.0, 0.0)
+            llama_sampler_init_penalties(Self.penaltyLastN, repetitionPenalty, 0.0, presencePenalty)
         )
 
         switch grammarMode {
@@ -1554,6 +1556,9 @@ public actor LlamaEngine: LLMEngine {
             }
             if let topP = options.topP {
                 llama_sampler_chain_add(chain, llama_sampler_init_top_p(Float(topP), 1))
+            }
+            if let minP = options.minP, minP > 0 {
+                llama_sampler_chain_add(chain, llama_sampler_init_min_p(Float(minP), 1))
             }
             llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
             let seed = options.seed ?? UInt32.random(in: 1...UInt32.max)

@@ -507,6 +507,7 @@ private final class DemoState {
     var isRunning = false
 
     private var generationTask: Task<Void, Never>?
+    private let appSamplingOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
     private let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
         heartbeatInterval: 0.5
     ))
@@ -810,13 +811,26 @@ private final class DemoState {
     }
 
     private func generationOptions(for loaded: LocalLLMLoadedModelInfo) -> GenerationOptions {
-        GenerationOptions(
-            temperature: loaded.supportsGrammar ? 0 : nil,
+        let installedModel: InstalledModel?
+        if case .installed(let id) = loaded.selection {
+            installedModel = library.model(id: id)
+        } else {
+            installedModel = nil
+        }
+
+        let requestOptions = GenerationOptions(
             maxOutputTokens: parsedMaxOutputTokens,
             stopAtBalancedJSON: false,
             enableThinking: enableThinking,
             thinkingBudgetTokens: parsedThinkingBudgetTokens,
             thinkingBudgetMessage: "Thinking budget reached."
+        )
+
+        return LLMSamplingDefaultsResolver.resolvedOptions(
+            globalDefaults: loaded.supportsGrammar ? .extractionSafe : .providerDefault,
+            installedModel: installedModel,
+            appOverrides: appSamplingOverrides,
+            requestOptions: requestOptions
         )
     }
 
@@ -858,6 +872,16 @@ private final class DemoState {
     ) {
         let maxOutput = options.maxOutputTokens.map(String.init) ?? "context"
         appendEvent("max-output: \(maxOutput)")
+        let temperature = options.temperature.map { String(describing: $0) } ?? "provider"
+        let topP = options.topP.map { String(describing: $0) } ?? "provider"
+        let topK = options.topK.map(String.init) ?? "provider"
+        let minP = options.minP.map { String(describing: $0) } ?? "provider"
+        let presencePenalty = options.presencePenalty.map { String(describing: $0) } ?? "provider"
+        let repetitionPenalty = options.repetitionPenalty.map { String(describing: $0) } ?? "provider"
+        appendEvent(
+            "sampling: temp=\(temperature) top-p=\(topP) top-k=\(topK) "
+                + "min-p=\(minP) presence=\(presencePenalty) repetition=\(repetitionPenalty)"
+        )
 
         var line = "thinking: \(options.enableThinking ? "enabled" : "disabled")"
         if options.enableThinking {

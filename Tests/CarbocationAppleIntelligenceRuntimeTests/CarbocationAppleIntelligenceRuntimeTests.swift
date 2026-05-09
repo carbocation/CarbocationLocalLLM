@@ -31,6 +31,7 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
             temperature: 0,
             topP: 0.9,
             topK: 40,
+            minP: 0.05,
             maxOutputTokens: 128,
             seed: 7,
             grammar: "root ::= object"
@@ -57,7 +58,7 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         XCTAssertEqual(resolved.sampling, .randomTopK(12, seed: 99))
         XCTAssertEqual(resolved.temperature, 0.4)
         XCTAssertNil(resolved.maximumResponseTokens)
-        XCTAssertTrue(resolved.unsupportedFeatures.isEmpty)
+        XCTAssertEqual(resolved.unsupportedFeatures, [.combinedSamplingFilters])
     }
 
     func testOptionsMapperFallsBackToProbabilityThreshold() {
@@ -71,6 +72,38 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
 
         XCTAssertEqual(resolved.sampling, .randomProbabilityThreshold(1, seed: 3))
         XCTAssertEqual(resolved.temperature, 0.6)
+    }
+
+    func testOptionsMapperReportsUnsupportedLlamaOnlySamplingControls() {
+        let options = GenerationOptions(
+            temperature: 0.8,
+            minP: 0.05,
+            presencePenalty: 1.2,
+            repetitionPenalty: 1.1
+        )
+
+        let resolved = AppleIntelligenceOptionsMapper.resolve(options)
+
+        XCTAssertEqual(
+            resolved.unsupportedFeatures,
+            [.minP, .presencePenalty, .repetitionPenalty]
+        )
+    }
+
+    func testOptionsMapperAllowsNeutralLlamaOnlySamplingControls() {
+        let options = GenerationOptions(
+            temperature: 0.8,
+            topP: 1,
+            topK: 20,
+            minP: 0,
+            presencePenalty: 0,
+            repetitionPenalty: 1
+        )
+
+        let resolved = AppleIntelligenceOptionsMapper.resolve(options)
+
+        XCTAssertEqual(resolved.sampling, .randomTopK(20, seed: nil))
+        XCTAssertTrue(resolved.unsupportedFeatures.isEmpty)
     }
 
     func testConfigurationDefaultsPromptReserve() {

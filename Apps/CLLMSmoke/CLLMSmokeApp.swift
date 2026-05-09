@@ -308,12 +308,13 @@ private final class SmokeState {
     }
 
     private func generationOptions(for loaded: LocalLLMLoadedModelInfo) -> GenerationOptions {
-        GenerationOptions(
-            temperature: loaded.supportsGrammar ? 0 : nil,
+        let requestOptions = GenerationOptions(
             maxOutputTokens: 96,
             stopAtBalancedJSON: true,
             grammar: loaded.supportsGrammar ? Self.jsonObjectGrammar : nil
         )
+        return (loaded.supportsGrammar ? LLMSamplingDefaults.extractionSafe : .providerDefault)
+            .applying(to: requestOptions)
     }
 
     private func systemPrompt(for loaded: LocalLLMLoadedModelInfo) -> String {

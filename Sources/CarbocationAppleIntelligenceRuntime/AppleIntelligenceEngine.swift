@@ -74,6 +74,14 @@ public enum AppleIntelligenceAvailability: Hashable, Sendable {
 public enum AppleIntelligenceUnsupportedFeature: String, Codable, Hashable, Sendable {
     /// llama.cpp GBNF grammars are not accepted by Foundation Models text responses.
     case grammar
+    /// Foundation Models exposes top-k and top-p choices separately, not as a combined sampler chain.
+    case combinedSamplingFilters
+    /// Foundation Models does not expose llama.cpp-style min-p sampling.
+    case minP
+    /// Foundation Models does not expose llama.cpp-style presence penalties.
+    case presencePenalty
+    /// Foundation Models does not expose llama.cpp-style repetition penalties.
+    case repetitionPenalty
 }
 
 public enum AppleIntelligenceUnsupportedFeatureBehavior: String, Codable, Hashable, Sendable {
@@ -165,6 +173,21 @@ public enum AppleIntelligenceOptionsMapper {
         var unsupportedFeatures = Set<AppleIntelligenceUnsupportedFeature>()
         if options.grammar != nil {
             unsupportedFeatures.insert(.grammar)
+        }
+        let isGreedy = options.temperature.map { $0 <= 0 } ?? false
+        if !isGreedy,
+           let topK = options.topK, topK > 0,
+           let topP = options.topP, topP > 0, topP < 1 {
+            unsupportedFeatures.insert(.combinedSamplingFilters)
+        }
+        if !isGreedy, let minP = options.minP, minP > 0 {
+            unsupportedFeatures.insert(.minP)
+        }
+        if let presencePenalty = options.presencePenalty, presencePenalty != 0 {
+            unsupportedFeatures.insert(.presencePenalty)
+        }
+        if let repetitionPenalty = options.repetitionPenalty, repetitionPenalty != 1 {
+            unsupportedFeatures.insert(.repetitionPenalty)
         }
 
         return AppleIntelligenceResolvedOptions(
