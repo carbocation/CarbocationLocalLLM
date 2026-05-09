@@ -854,7 +854,7 @@ smoke: ok
 
 For iOS, select the `CLLMSmokeIOS` scheme with an iOS device or simulator destination and run it. Both the `CLLMSmokeMac` and `CLLMSmokeIOS` schemes compile from the unified source at `Apps/CLLMSmoke/CLLMSmokeApp.swift`, so the iOS smoke runs the same automated JSON flow as the macOS smoke and ends with `smoke: ok`.
 
-For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, generation controls for max output and thinking budget, run/cancel controls, output, and a streaming event log. The demo also includes a Tool Lab with Plain/Tools mode, per-tool toggles, canned prompts, a tool transcript, and fixture webpage mode for deterministic manual testing without live network access.
+For interactive exploratory testing, use the `CLLMDemoMac` or `CLLMDemoIOS` scheme. Both compile from `Apps/CLLMDemo/CLLMDemoApp.swift` and provide editable prompts, generation controls for thinking budget and sampling options, run/cancel controls, output, and a streaming event log. The demo also includes a Tool Lab with Plain/Tools mode, per-tool toggles, canned prompts, a tool transcript, and fixture webpage mode for deterministic manual testing without live network access.
 
 On iOS, the default llama configuration loads GGUF models CPU-only with a smaller batch size to avoid Metal/backend allocation crashes on first load. Host apps can still opt into GPU offload by passing a nonzero `llamaGPULayerCount`.
 

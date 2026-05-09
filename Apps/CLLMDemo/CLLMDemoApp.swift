@@ -164,6 +164,7 @@ private struct DemoRootView: View {
         }
         .onChange(of: state.selectedModelID) { _, newValue in
             state.persistSelection(newValue)
+            state.resetSamplingControlsToDefaults()
         }
         .task {
             await state.refreshLibrary()
@@ -273,21 +274,20 @@ private struct PromptPane: View {
 
     private var generationOptionsEditor: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Generation")
-                .font(.headline)
+            HStack {
+                Text("Generation")
+                    .font(.headline)
 
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Max output")
-                    .frame(width: 84, alignment: .leading)
+                Spacer()
 
-                TextField("Context cap", text: $state.maxOutputTokensText)
-                    .textFieldStyle(.roundedBorder)
-                    .demoNumericInput()
-                    .disabled(state.isRunning)
-                    .frame(maxWidth: 180)
-
-                Text("tokens")
-                    .foregroundStyle(.secondary)
+                Button {
+                    state.resetSamplingControlsToDefaults()
+                } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.isRunning)
+                .help("Reset sampling controls")
             }
 
             Toggle("Thinking", isOn: $state.enableThinking)
@@ -308,13 +308,19 @@ private struct PromptPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let message = state.thinkingBudgetValidationMessage {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
+            Divider()
 
-            if let message = state.maxOutputTokensValidationMessage {
+            Text("Sampling")
+                .font(.subheadline.weight(.semibold))
+
+            samplingRow("Temperature", text: $state.temperatureText)
+            samplingRow("Top P", text: $state.topPText)
+            samplingRow("Top K", text: $state.topKText, integerOnly: true)
+            samplingRow("Min P", text: $state.minPText)
+            samplingRow("Presence penalty", text: $state.presencePenaltyText)
+            samplingRow("Repetition penalty", text: $state.repetitionPenaltyText)
+
+            if let message = state.generationOptionsValidationMessage {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -322,6 +328,23 @@ private struct PromptPane: View {
         }
         .padding(12)
         .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+    }
+
+    private func samplingRow(
+        _ title: String,
+        text: Binding<String>,
+        integerOnly: Bool = false
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .frame(width: 128, alignment: .leading)
+
+            TextField("Default", text: text)
+                .textFieldStyle(.roundedBorder)
+                .demoSamplingInput(integerOnly: integerOnly)
+                .disabled(state.isRunning)
+                .frame(maxWidth: 180)
+        }
     }
 
     private var toolLabSection: some View {
@@ -489,7 +512,12 @@ private final class DemoState {
     var selectedModelID: String
     var systemPrompt = "You are concise and helpful."
     var prompt = "Write one sentence about local on-device language models."
-    var maxOutputTokensText = "256"
+    var temperatureText = ""
+    var topPText = ""
+    var topKText = ""
+    var minPText = ""
+    var presencePenaltyText = ""
+    var repetitionPenaltyText = ""
     var enableThinking = false
     var thinkingBudgetText = ""
     var runMode: DemoRunMode = .plain
@@ -522,6 +550,7 @@ private final class DemoState {
         )
         selectedModelID = UserDefaults.standard.string(forKey: CLLMDemoMetadata.selectedModelDefaultsKey) ?? ""
         normalizeSelection()
+        resetSamplingControlsToDefaults()
     }
 
     var systemModels: [LLMSystemModelOption] {
@@ -543,7 +572,7 @@ private final class DemoState {
     }
 
     var generationOptionsValidationMessage: String? {
-        maxOutputTokensValidationMessage ?? thinkingBudgetValidationMessage
+        thinkingBudgetValidationMessage ?? samplingOptionsValidationMessage
     }
 
     var toolValidationMessage: String? {
@@ -587,16 +616,6 @@ private final class DemoState {
         }
     }
 
-    var maxOutputTokensValidationMessage: String? {
-        let trimmed = maxOutputTokensText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        guard let value = Int(trimmed), value > 0 else {
-            return "Max output must be blank or a positive integer."
-        }
-        return nil
-    }
-
     var thinkingBudgetValidationMessage: String? {
         guard enableThinking else { return nil }
 
@@ -612,10 +631,47 @@ private final class DemoState {
         return nil
     }
 
-    private var parsedMaxOutputTokens: Int? {
-        let trimmed = maxOutputTokensText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return Int(trimmed)
+    var samplingOptionsValidationMessage: String? {
+        validateDouble(
+            temperatureText,
+            name: "Temperature",
+            lowerBound: 0,
+            upperBound: nil
+        )
+            ?? validateDouble(topPText, name: "Top P", lowerBound: 0, upperBound: 1)
+            ?? validateInt(topKText, name: "Top K", lowerBound: 0)
+            ?? validateDouble(minPText, name: "Min P", lowerBound: 0, upperBound: 1)
+            ?? validateDouble(
+                presencePenaltyText,
+                name: "Presence penalty",
+                lowerBound: nil,
+                upperBound: nil
+            )
+            ?? validatePositiveDouble(repetitionPenaltyText, name: "Repetition penalty")
+    }
+
+    private var parsedTemperature: Double? {
+        parsedDouble(temperatureText)
+    }
+
+    private var parsedTopP: Double? {
+        parsedDouble(topPText)
+    }
+
+    private var parsedTopK: Int? {
+        parsedInt(topKText)
+    }
+
+    private var parsedMinP: Double? {
+        parsedDouble(minPText)
+    }
+
+    private var parsedPresencePenalty: Double? {
+        parsedDouble(presencePenaltyText)
+    }
+
+    private var parsedRepetitionPenalty: Double? {
+        parsedDouble(repetitionPenaltyText)
     }
 
     private var parsedThinkingBudgetTokens: Int? {
@@ -634,10 +690,115 @@ private final class DemoState {
         ].filter { $0 }.count
     }
 
+    private func parsedDouble(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Double(trimmed)
+    }
+
+    private func parsedInt(_ text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Int(trimmed)
+    }
+
+    private func validateDouble(
+        _ text: String,
+        name: String,
+        lowerBound: Double?,
+        upperBound: Double?
+    ) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = Double(trimmed), value.isFinite else {
+            return "\(name) must be blank or a number."
+        }
+        if let lowerBound, value < lowerBound {
+            return "\(name) must be at least \(Self.formatSamplingValue(lowerBound))."
+        }
+        if let upperBound, value > upperBound {
+            return "\(name) must be at most \(Self.formatSamplingValue(upperBound))."
+        }
+        return nil
+    }
+
+    private func validateInt(_ text: String, name: String, lowerBound: Int) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = Int(trimmed), value >= lowerBound else {
+            return "\(name) must be blank or at least \(lowerBound)."
+        }
+        return nil
+    }
+
+    private func validatePositiveDouble(_ text: String, name: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = Double(trimmed), value.isFinite else {
+            return "\(name) must be blank or a number."
+        }
+        guard value > 0 else {
+            return "\(name) must be greater than 0."
+        }
+        return nil
+    }
+
+    private func applySamplingDefaults(_ defaults: LLMSamplingDefaults) {
+        temperatureText = Self.formatSamplingValue(defaults.temperature)
+        topPText = Self.formatSamplingValue(defaults.topP)
+        topKText = defaults.topK.map(String.init) ?? ""
+        minPText = Self.formatSamplingValue(defaults.minP)
+        presencePenaltyText = Self.formatSamplingValue(defaults.presencePenalty)
+        repetitionPenaltyText = Self.formatSamplingValue(defaults.repetitionPenalty)
+    }
+
+    private func resolvedSamplingDefaultsForSelectedModel() -> LLMSamplingDefaults {
+        let selection = LLMModelSelection(storageValue: selectedModelID)
+        return resolvedSamplingDefaults(for: selection)
+    }
+
+    private func resolvedSamplingDefaults(
+        for selection: LLMModelSelection?,
+        supportsGrammar: Bool? = nil
+    ) -> LLMSamplingDefaults {
+        LLMSamplingDefaultsResolver.resolvedDefaults(
+            globalDefaults: globalSamplingDefaults(for: selection, supportsGrammar: supportsGrammar),
+            installedModel: installedModel(for: selection),
+            appOverrides: appSamplingOverrides
+        )
+    }
+
+    private func installedModel(for selection: LLMModelSelection?) -> InstalledModel? {
+        guard case .installed(let id) = selection else { return nil }
+        return library.model(id: id)
+    }
+
+    private func globalSamplingDefaults(
+        for selection: LLMModelSelection?,
+        supportsGrammar: Bool?
+    ) -> LLMSamplingDefaults {
+        if let supportsGrammar {
+            return supportsGrammar ? .extractionSafe : .providerDefault
+        }
+
+        switch selection {
+        case .system:
+            return .providerDefault
+        case .installed, nil:
+            return .extractionSafe
+        }
+    }
+
+    private static func formatSamplingValue(_ value: Double?) -> String {
+        guard let value else { return "" }
+        return String(format: "%.6g", value)
+    }
+
     func select(_ selection: LLMModelSelection) {
         selectedModelID = selection.storageValue
         loadedInfo = nil
         errorMessage = nil
+        resetSamplingControlsToDefaults()
         persistSelection(selectedModelID)
         Task { [engine] in
             await engine.unload()
@@ -651,6 +812,11 @@ private final class DemoState {
     func refreshLibrary() async {
         await library.refresh()
         normalizeSelection()
+        resetSamplingControlsToDefaults()
+    }
+
+    func resetSamplingControlsToDefaults() {
+        applySamplingDefaults(resolvedSamplingDefaultsForSelectedModel())
     }
 
     func applyToolSample(_ sample: DemoToolSamplePrompt) {
@@ -811,15 +977,13 @@ private final class DemoState {
     }
 
     private func generationOptions(for loaded: LocalLLMLoadedModelInfo) -> GenerationOptions {
-        let installedModel: InstalledModel?
-        if case .installed(let id) = loaded.selection {
-            installedModel = library.model(id: id)
-        } else {
-            installedModel = nil
-        }
-
         let requestOptions = GenerationOptions(
-            maxOutputTokens: parsedMaxOutputTokens,
+            temperature: parsedTemperature,
+            topP: parsedTopP,
+            topK: parsedTopK,
+            minP: parsedMinP,
+            presencePenalty: parsedPresencePenalty,
+            repetitionPenalty: parsedRepetitionPenalty,
             stopAtBalancedJSON: false,
             enableThinking: enableThinking,
             thinkingBudgetTokens: parsedThinkingBudgetTokens,
@@ -828,7 +992,7 @@ private final class DemoState {
 
         return LLMSamplingDefaultsResolver.resolvedOptions(
             globalDefaults: loaded.supportsGrammar ? .extractionSafe : .providerDefault,
-            installedModel: installedModel,
+            installedModel: installedModel(for: loaded.selection),
             appOverrides: appSamplingOverrides,
             requestOptions: requestOptions
         )
@@ -870,8 +1034,6 @@ private final class DemoState {
         options: GenerationOptions,
         loaded: LocalLLMLoadedModelInfo
     ) {
-        let maxOutput = options.maxOutputTokens.map(String.init) ?? "context"
-        appendEvent("max-output: \(maxOutput)")
         let temperature = options.temperature.map { String(describing: $0) } ?? "provider"
         let topP = options.topP.map { String(describing: $0) } ?? "provider"
         let topK = options.topK.map(String.init) ?? "provider"
@@ -1078,6 +1240,23 @@ private extension View {
         keyboardType(.numberPad)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+#else
+        self
+#endif
+    }
+
+    @ViewBuilder
+    func demoSamplingInput(integerOnly: Bool) -> some View {
+#if os(iOS)
+        if integerOnly {
+            keyboardType(.numberPad)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        } else {
+            keyboardType(.decimalPad)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
 #else
         self
 #endif
