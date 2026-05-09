@@ -5,6 +5,8 @@ public enum ModelLibraryError: Error, LocalizedError, Sendable {
     case destinationExists(URL)
     case metadataWriteFailed(String)
     case notAGGUF(String)
+    case missingPrimaryArtifact
+    case unsafeArtifactPath(String)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +18,10 @@ public enum ModelLibraryError: Error, LocalizedError, Sendable {
             return "Failed to save model metadata: \(detail)"
         case .notAGGUF(let filename):
             return "\(filename) is not a .gguf file."
+        case .missingPrimaryArtifact:
+            return "No primary GGUF model artifact was provided."
+        case .unsafeArtifactPath(let path):
+            return "Invalid model artifact path: \(path)"
         }
     }
 }
@@ -91,6 +97,30 @@ public final class ModelLibrary {
         return result.model
     }
 
+    public func add(
+        artifacts: [ModelLibraryInstallArtifact],
+        displayName: String,
+        source: ModelSource,
+        hfRepo: String? = nil,
+        hfFilename: String? = nil,
+        sha256: String? = nil,
+        contextLength: Int = 0,
+        quantization: String? = nil
+    ) async throws -> InstalledModel {
+        let result = try await fileWorker.add(
+            artifacts: artifacts,
+            displayName: displayName,
+            source: source,
+            hfRepo: hfRepo,
+            hfFilename: hfFilename,
+            sha256: sha256,
+            contextLength: contextLength,
+            quantization: quantization
+        )
+        apply(result.snapshot)
+        return result.model
+    }
+
     public func importFile(at sourceURL: URL, displayName: String? = nil) async throws -> InstalledModel {
         let result = try await fileWorker.importFile(at: sourceURL, displayName: displayName)
         apply(result.snapshot)
@@ -137,11 +167,6 @@ private struct ModelLibraryInstallResult: Sendable, Hashable {
 }
 
 private final class ModelLibraryFileWorker: @unchecked Sendable {
-    private enum InstallStrategy {
-        case move(URL)
-        case copy(URL)
-    }
-
     private let root: URL
     private let fileManager: FileManager
     private let contextLengthProbe: ModelContextLengthProbe?
@@ -181,10 +206,40 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     ) async throws -> ModelLibraryInstallResult {
         try await run {
             try self.install(
-                strategy: .move(tempURL),
+                artifacts: [
+                    ModelLibraryInstallArtifact(
+                        sourceURL: tempURL,
+                        role: .primaryModel,
+                        relativePath: filename,
+                        sizeBytes: sizeBytes,
+                        sha256: sha256
+                    )
+                ],
                 displayName: displayName,
-                filename: filename,
-                sizeBytes: sizeBytes,
+                source: source,
+                hfRepo: hfRepo,
+                hfFilename: hfFilename,
+                sha256: sha256,
+                contextLength: contextLength,
+                quantization: quantization
+            )
+        }
+    }
+
+    func add(
+        artifacts: [ModelLibraryInstallArtifact],
+        displayName: String,
+        source: ModelSource,
+        hfRepo: String?,
+        hfFilename: String?,
+        sha256: String?,
+        contextLength: Int,
+        quantization: String?
+    ) async throws -> ModelLibraryInstallResult {
+        try await run {
+            try self.install(
+                artifacts: artifacts,
+                displayName: displayName,
                 source: source,
                 hfRepo: hfRepo,
                 hfFilename: hfFilename,
@@ -209,10 +264,16 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
                 ?? filename.replacingOccurrences(of: ".gguf", with: "")
 
             return try self.install(
-                strategy: .copy(sourceURL),
+                artifacts: [
+                    ModelLibraryInstallArtifact(
+                        sourceURL: sourceURL,
+                        role: .primaryModel,
+                        relativePath: filename,
+                        sizeBytes: 0,
+                        copySource: true
+                    )
+                ],
                 displayName: resolvedName,
-                filename: filename,
-                sizeBytes: 0,
                 source: .imported,
                 hfRepo: nil,
                 hfFilename: nil,
@@ -266,10 +327,8 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     }
 
     private func install(
-        strategy: InstallStrategy,
+        artifacts installArtifacts: [ModelLibraryInstallArtifact],
         displayName: String,
-        filename: String,
-        sizeBytes requestedSizeBytes: Int64,
         source: ModelSource,
         hfRepo: String?,
         hfFilename: String?,
@@ -277,17 +336,17 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
         contextLength: Int,
         quantization: String?
     ) throws -> ModelLibraryInstallResult {
-        guard filename.lowercased().hasSuffix(".gguf") else {
-            throw ModelLibraryError.notAGGUF(filename)
+        guard let primaryArtifact = installArtifacts.first(where: { $0.role == .primaryModel }) else {
+            throw ModelLibraryError.missingPrimaryArtifact
         }
-
-        let sourceURL: URL
-        switch strategy {
-        case .move(let url), .copy(let url):
-            sourceURL = url
+        guard primaryArtifact.relativePath.lowercased().hasSuffix(".gguf") else {
+            throw ModelLibraryError.notAGGUF(primaryArtifact.relativePath)
         }
-        guard fileManager.fileExists(atPath: sourceURL.path) else {
-            throw ModelLibraryError.sourceFileMissing(sourceURL)
+        for artifact in installArtifacts {
+            try validateRelativeArtifactPath(artifact.relativePath)
+            guard fileManager.fileExists(atPath: artifact.sourceURL.path) else {
+                throw ModelLibraryError.sourceFileMissing(artifact.sourceURL)
+            }
         }
 
         try ensureRootExists()
@@ -305,45 +364,52 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
 
         do {
             try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
-            let destination = stagingDirectory.appendingPathComponent(filename)
-            try fileManager.createDirectory(
-                at: destination.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
 
-            switch strategy {
-            case .move(let tempURL):
-                try fileManager.moveItem(at: tempURL, to: destination)
-            case .copy(let sourceURL):
-                try fileManager.copyItem(at: sourceURL, to: destination)
+            var metadataArtifacts: [InstalledModelArtifact] = []
+            metadataArtifacts.reserveCapacity(installArtifacts.count)
+            for artifact in installArtifacts {
+                let destination = stagingDirectory.appendingPathComponent(artifact.relativePath)
+                try fileManager.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if artifact.copySource {
+                    try fileManager.copyItem(at: artifact.sourceURL, to: destination)
+                } else {
+                    try fileManager.moveItem(at: artifact.sourceURL, to: destination)
+                }
+                metadataArtifacts.append(InstalledModelArtifact(
+                    role: artifact.role,
+                    relativePath: artifact.relativePath,
+                    sizeBytes: artifact.sizeBytes > 0 ? artifact.sizeBytes : fileSize(at: destination),
+                    sha256: artifact.sha256
+                ))
             }
 
-            let sizeBytes: Int64
-            if requestedSizeBytes > 0 {
-                sizeBytes = requestedSizeBytes
-            } else {
-                sizeBytes = fileSize(at: destination)
-            }
+            let primaryDestination = stagingDirectory.appendingPathComponent(primaryArtifact.relativePath)
+            let sizeBytes = metadataArtifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let primaryFilename = primaryArtifact.relativePath
 
             let resolvedContextLength: Int
             if contextLength > 0 {
                 resolvedContextLength = contextLength
             } else {
-                resolvedContextLength = GGUFMetadata.trainingContextLength(at: destination)
-                    ?? contextLengthProbe?(destination)
+                resolvedContextLength = GGUFMetadata.trainingContextLength(at: primaryDestination)
+                    ?? contextLengthProbe?(primaryDestination)
                     ?? 0
             }
             let metadata = InstalledModel(
                 id: id,
                 displayName: displayName,
-                filename: filename,
+                filename: primaryFilename,
                 sizeBytes: sizeBytes,
                 contextLength: resolvedContextLength,
-                quantization: quantization ?? InstalledModel.inferQuantization(from: filename),
+                quantization: quantization ?? InstalledModel.inferQuantization(from: primaryFilename),
                 source: source,
                 hfRepo: hfRepo,
                 hfFilename: hfFilename,
                 sha256: sha256,
+                artifacts: metadataArtifacts,
                 installedAt: Date()
             )
 
@@ -419,6 +485,13 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
             contextLength: 0,
             quantization: InstalledModel.inferQuantization(from: gguf.lastPathComponent),
             source: .imported,
+            artifacts: [
+                InstalledModelArtifact(
+                    role: .primaryModel,
+                    relativePath: gguf.lastPathComponent,
+                    sizeBytes: fileSize(at: gguf)
+                )
+            ],
             installedAt: Date()
         )
     }
@@ -437,6 +510,15 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
 
     private func ensureRootExists() throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    private func validateRelativeArtifactPath(_ path: String) throws {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.split(separator: "/").contains("..")
+        else {
+            throw ModelLibraryError.unsafeArtifactPath(path)
+        }
     }
 
     private func fileSize(at url: URL) -> Int64 {

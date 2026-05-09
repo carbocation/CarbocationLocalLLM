@@ -174,11 +174,11 @@ public struct ModelLibraryPickerView: View {
             await refresh()
         }
         .sheet(isPresented: $showCustomSheet) {
-            CustomHFSheet { repo, filename, displayName in
+            CustomHFSheet { resolution, displayName, token in
                 startDownload(
-                    hfRepo: repo,
-                    hfFilename: filename,
+                    resolution: resolution,
                     displayName: displayName,
+                    bearerToken: token,
                     expectedSHA256: nil,
                     contextLength: 0,
                     source: .customHF
@@ -608,7 +608,7 @@ public struct ModelLibraryPickerView: View {
                 Button {
                     showCustomSheet = true
                 } label: {
-                    Label("Paste a Hugging Face URL", systemImage: "link")
+                    Label("Add Hugging Face Model", systemImage: "link")
                 }
                 .padding(.top, 4)
             }
@@ -759,8 +759,44 @@ public struct ModelLibraryPickerView: View {
         contextLength: Int,
         source: ModelSource
     ) {
+        let reference = HuggingFaceModelReference(repo: hfRepo, file: hfFilename)
         downloadError = nil
-        let download = ModelLibraryDownload(hfRepo: hfRepo, hfFilename: hfFilename, displayName: displayName)
+        let download = ModelLibraryDownload(reference: reference, displayName: displayName)
+        activeDownload = download
+        download.start(
+            expectedSHA256: expectedSHA256,
+            expectedContextLength: contextLength,
+            source: source,
+            into: library
+        ) { result in
+            switch result {
+            case .success(let model):
+                if selectedModelID.isEmpty {
+                    selectedModelID = model.id.uuidString
+                }
+            case .failure(let error):
+                downloadError = error.localizedDescription
+            }
+            activeDownload = nil
+            Task { await refresh() }
+        }
+    }
+
+    private func startDownload(
+        resolution: HuggingFaceResolution,
+        displayName: String,
+        bearerToken: String?,
+        expectedSHA256: String?,
+        contextLength: Int,
+        source: ModelSource
+    ) {
+        downloadError = nil
+        let download = ModelLibraryDownload(
+            reference: resolution.reference,
+            resolved: resolution,
+            displayName: displayName,
+            bearerToken: bearerToken
+        )
         activeDownload = download
         download.start(
             expectedSHA256: expectedSHA256,
@@ -891,17 +927,24 @@ private final class ModelLibraryDownload {
     var isRunning = false
     var errorMessage: String?
 
-    let hfRepo: String
-    let hfFilename: String
+    let reference: HuggingFaceModelReference
+    let resolved: HuggingFaceResolution?
     let displayName: String
+    let bearerToken: String?
 
     @ObservationIgnored
     private var task: Task<Void, Never>?
 
-    init(hfRepo: String, hfFilename: String, displayName: String) {
-        self.hfRepo = hfRepo
-        self.hfFilename = hfFilename
+    init(
+        reference: HuggingFaceModelReference,
+        resolved: HuggingFaceResolution? = nil,
+        displayName: String,
+        bearerToken: String? = nil
+    ) {
+        self.reference = reference
+        self.resolved = resolved
         self.displayName = displayName
+        self.bearerToken = bearerToken
     }
 
     func start(
@@ -918,12 +961,21 @@ private final class ModelLibraryDownload {
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let resolution: HuggingFaceResolution
+                if let resolved {
+                    resolution = resolved
+                } else {
+                    resolution = try await HuggingFaceModelResolver(endpoint: reference.endpoint)
+                        .resolve(reference, token: bearerToken)
+                }
+                let resolvedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? resolution.displayName
+                    : displayName
                 let result = try await ModelDownloader.download(
-                    hfRepo: hfRepo,
-                    hfFilename: hfFilename,
+                    resolution: resolution,
                     modelsRoot: library.root,
-                    displayName: displayName,
-                    expectedSHA256: expectedSHA256,
+                    expectedPrimarySHA256: expectedSHA256,
+                    bearerToken: bearerToken,
                     onProgress: { [weak self] progress in
                         Task { @MainActor [weak self] in
                             self?.progress = progress
@@ -931,15 +983,14 @@ private final class ModelLibraryDownload {
                     }
                 )
                 let model = try await library.add(
-                    weightsAt: result.tempURL,
-                    displayName: displayName,
-                    filename: hfFilename,
-                    sizeBytes: result.sizeBytes,
+                    artifacts: result.artifacts,
+                    displayName: resolvedDisplayName,
                     source: source,
-                    hfRepo: hfRepo,
-                    hfFilename: hfFilename,
-                    sha256: result.sha256,
-                    contextLength: expectedContextLength
+                    hfRepo: resolution.reference.repo,
+                    hfFilename: resolution.primaryArtifact.path,
+                    sha256: result.primarySHA256,
+                    contextLength: expectedContextLength,
+                    quantization: resolution.quantization
                 )
                 isRunning = false
                 completion(.success(model))
@@ -966,9 +1017,14 @@ private struct CustomHFSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
     @State private var displayName = ""
+    @State private var token = ""
+    @State private var rememberToken = false
+    @State private var resolution: HuggingFaceResolution?
+    @State private var resolvedInput = ""
+    @State private var isResolving = false
     @State private var parseError: String?
 
-    let onSubmit: (_ repo: String, _ filename: String, _ displayName: String) -> Void
+    let onSubmit: (_ resolution: HuggingFaceResolution, _ displayName: String, _ token: String?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -976,15 +1032,30 @@ private struct CustomHFSheet: View {
                 .font(.title3.bold())
 
             TextField(
-                "https://huggingface.co/<repo>/resolve/main/<file>.gguf",
+                "owner/repo[:quant] or https://huggingface.co/owner/repo/resolve/main/file.gguf",
                 text: $input,
                 axis: .vertical
             )
             .textFieldStyle(.roundedBorder)
             .lineLimit(2...4)
+            .onChange(of: input) { _, _ in
+                if input != resolvedInput {
+                    resolution = nil
+                }
+            }
 
             TextField("Display name", text: $displayName)
                 .textFieldStyle(.roundedBorder)
+
+            SecureField("Hugging Face token", text: $token)
+                .textFieldStyle(.roundedBorder)
+
+            Toggle("Remember token in Keychain", isOn: $rememberToken)
+                .font(.callout)
+
+            if let resolution {
+                resolvedSummary(resolution)
+            }
 
             if let parseError {
                 Label(parseError, systemImage: "exclamationmark.triangle")
@@ -995,25 +1066,114 @@ private struct CustomHFSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Download") { submit() }
+                Button("Resolve") {
+                    Task { await resolveInput() }
+                }
+                .disabled(isResolving || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Download") {
+                    Task { await submit() }
+                }
                     .buttonStyle(.borderedProminent)
-                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isResolving || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(20)
-        .frame(width: 480)
+        .frame(width: 560)
     }
 
-    private func submit() {
-        guard let (repo, filename) = HuggingFaceURL.parse(input) else {
-            parseError = "Expected a Hugging Face URL or repo/file.gguf path."
+    private func resolvedSummary(_ resolution: HuggingFaceResolution) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(resolution.primaryArtifact.path)
+                    .font(.caption.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let quantization = resolution.quantization {
+                    Text(quantization)
+                        .font(.caption.monospaced())
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: .rect(cornerRadius: 3))
+                }
+            }
+            HStack(spacing: 8) {
+                Text(formatBytes(resolution.totalSizeBytes))
+                if resolution.splitCount > 1 {
+                    Text("\(resolution.splitCount) split files")
+                }
+                if resolution.mmprojArtifact != nil {
+                    Text("mmproj included")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 6))
+    }
+
+    private func resolveInput() async {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let reference = HuggingFaceModelReference.parse(trimmed) else {
+            parseError = "Expected owner/repo[:quant], a Hugging Face URL, or owner/repo/file.gguf."
             return
         }
 
+        isResolving = true
+        parseError = nil
+        defer { isResolving = false }
+
+        do {
+            if token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let stored = try? HuggingFaceTokenStore.shared.token(for: reference.endpoint) {
+                token = stored
+            }
+            let resolved = try await HuggingFaceModelResolver(endpoint: reference.endpoint)
+                .resolve(reference, token: token.nilIfEmpty)
+            resolution = resolved
+            resolvedInput = trimmed
+            if displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                displayName = resolved.displayName
+            }
+        } catch {
+            parseError = error.localizedDescription
+        }
+    }
+
+    private func submit() async {
+        if resolution == nil || resolvedInput != input.trimmingCharacters(in: .whitespacesAndNewlines) {
+            await resolveInput()
+        }
+        guard let resolution else { return }
+
+        if rememberToken, let token = token.nilIfEmpty {
+            do {
+                try HuggingFaceTokenStore.shared.save(token, for: resolution.reference.endpoint)
+            } catch {
+                parseError = error.localizedDescription
+                return
+            }
+        }
+
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? filename.replacingOccurrences(of: ".gguf", with: "")
+            ? resolution.displayName
             : displayName
-        onSubmit(repo, filename, name)
+        onSubmit(resolution, name, token.nilIfEmpty)
         dismiss()
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "Unknown size" }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .binary
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

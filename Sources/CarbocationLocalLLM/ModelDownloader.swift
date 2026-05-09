@@ -100,6 +100,25 @@ public struct ModelDownloadResult: Sendable, Hashable {
     }
 }
 
+public struct HuggingFaceModelDownloadResult: Sendable, Hashable {
+    public let resolution: HuggingFaceResolution
+    public let artifacts: [ModelLibraryInstallArtifact]
+    public let sizeBytes: Int64
+    public let primarySHA256: String?
+
+    public init(
+        resolution: HuggingFaceResolution,
+        artifacts: [ModelLibraryInstallArtifact],
+        sizeBytes: Int64,
+        primarySHA256: String?
+    ) {
+        self.resolution = resolution
+        self.artifacts = artifacts
+        self.sizeBytes = sizeBytes
+        self.primarySHA256 = primarySHA256
+    }
+}
+
 public struct ModelDownloadConfiguration: Sendable, Hashable {
     public static let defaultChunkSize: Int64 = 16 * 1_024 * 1_024
     public static let defaultParallelConnections = 12
@@ -356,6 +375,39 @@ private final class ProgressTracker: @unchecked Sendable {
     }
 }
 
+private final class AggregateDownloadProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private let expectedTotals: [String: Int64]
+    private var received: [String: Int64] = [:]
+    private var totals: [String: Int64] = [:]
+    private var speeds: [String: Double] = [:]
+
+    init(artifacts: [HuggingFaceResolvedArtifact]) {
+        var expected: [String: Int64] = [:]
+        for artifact in artifacts {
+            expected[artifact.path] = max(0, artifact.sizeBytes)
+        }
+        self.expectedTotals = expected
+        self.totals = expected
+    }
+
+    func update(path: String, progress: DownloadProgress) -> DownloadProgress {
+        lock.lock()
+        received[path] = progress.bytesReceived
+        totals[path] = max(progress.totalBytes, expectedTotals[path] ?? 0)
+        speeds[path] = progress.bytesPerSecond
+        let aggregateReceived = received.values.reduce(Int64(0), +)
+        let aggregateTotal = totals.values.reduce(Int64(0), +)
+        let aggregateSpeed = speeds.values.reduce(0, +)
+        lock.unlock()
+        return DownloadProgress(
+            bytesReceived: aggregateReceived,
+            totalBytes: aggregateTotal,
+            bytesPerSecond: aggregateSpeed
+        )
+    }
+}
+
 private final class URLSessionTaskBox: @unchecked Sendable {
     private let lock = NSLock()
     private var task: URLSessionTask?
@@ -557,6 +609,7 @@ public enum ModelDownloader {
         modelsRoot: URL,
         displayName: String? = nil,
         expectedSHA256: String? = nil,
+        bearerToken: String? = nil,
         configuration: ModelDownloadConfiguration = .default,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
     ) async throws -> ModelDownloadResult {
@@ -565,8 +618,63 @@ public enum ModelDownloader {
             modelsRoot: modelsRoot,
             displayName: displayName,
             expectedSHA256: expectedSHA256,
+            bearerToken: bearerToken,
             configuration: configuration,
             onProgress: onProgress
+        )
+    }
+
+    public static func download(
+        resolution: HuggingFaceResolution,
+        modelsRoot: URL,
+        expectedPrimarySHA256: String? = nil,
+        bearerToken: String? = nil,
+        configuration: ModelDownloadConfiguration = .default,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
+    ) async throws -> HuggingFaceModelDownloadResult {
+        let aggregateProgress = AggregateDownloadProgressTracker(artifacts: resolution.artifacts)
+        var installedArtifacts: [ModelLibraryInstallArtifact] = []
+        installedArtifacts.reserveCapacity(resolution.artifacts.count)
+
+        do {
+            for artifact in resolution.artifacts {
+                let expectedSHA256 = artifact.role == .primaryModel ? expectedPrimarySHA256 : nil
+                let result = try await download(
+                    from: artifact.url,
+                    modelsRoot: modelsRoot,
+                    displayName: resolution.displayName,
+                    expectedSHA256: expectedSHA256,
+                    bearerToken: bearerToken,
+                    configuration: configuration
+                ) { progress in
+                    onProgress(aggregateProgress.update(path: artifact.path, progress: progress))
+                }
+                installedArtifacts.append(ModelLibraryInstallArtifact(
+                    sourceURL: result.tempURL,
+                    role: artifact.role.installedModelRole,
+                    relativePath: artifact.path,
+                    sizeBytes: result.sizeBytes,
+                    sha256: result.sha256
+                ))
+            }
+        } catch {
+            for artifact in installedArtifacts {
+                try? FileManager.default.removeItem(at: artifact.sourceURL)
+            }
+            throw error
+        }
+
+        let totalSize = installedArtifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        onProgress(DownloadProgress(
+            bytesReceived: totalSize,
+            totalBytes: max(totalSize, resolution.totalSizeBytes),
+            bytesPerSecond: 0
+        ))
+        return HuggingFaceModelDownloadResult(
+            resolution: resolution,
+            artifacts: installedArtifacts,
+            sizeBytes: totalSize,
+            primarySHA256: installedArtifacts.first(where: { $0.role == .primaryModel })?.sha256
         )
     }
 
@@ -578,6 +686,7 @@ public enum ModelDownloader {
         modelsRoot: URL,
         displayName: String? = nil,
         expectedSHA256: String? = nil,
+        bearerToken: String? = nil,
         configuration: ModelDownloadConfiguration = .default,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }
     ) async throws -> ModelDownloadResult {
@@ -606,6 +715,7 @@ public enum ModelDownloader {
                 sidecar: updatedSidecar,
                 configuration: configuration,
                 expectedSHA256: expectedSHA256,
+                bearerToken: bearerToken,
                 onProgress: onProgress
             )
         }
@@ -616,7 +726,7 @@ public enum ModelDownloader {
             sourceURL: url
         )
 
-        guard let probe = try await probeServer(url: url) else {
+        guard let probe = try await probeServer(url: url, bearerToken: bearerToken) else {
             modelDownloaderLog.info(
                 "Server does not support Range for \(url.lastPathComponent, privacy: .public); using single stream"
             )
@@ -627,6 +737,7 @@ public enum ModelDownloader {
                 prior: legacy,
                 displayName: displayName,
                 expectedSHA256: expectedSHA256,
+                bearerToken: bearerToken,
                 onProgress: onProgress
             )
         }
@@ -682,6 +793,7 @@ public enum ModelDownloader {
             sidecar: sidecar,
             configuration: configuration,
             expectedSHA256: expectedSHA256,
+            bearerToken: bearerToken,
             onProgress: onProgress
         )
     }
@@ -752,6 +864,7 @@ public enum ModelDownloader {
         sidecar: PartialSidecar,
         configuration: ModelDownloadConfiguration,
         expectedSHA256: String?,
+        bearerToken: String?,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void
     ) async throws -> ModelDownloadResult {
         let alreadyHad = plan.completedBytes()
@@ -780,6 +893,7 @@ public enum ModelDownloader {
                                 session: session,
                                 delegate: delegate,
                                 requestTimeout: configuration.requestTimeout,
+                                bearerToken: bearerToken,
                                 writer: writer,
                                 queue: queue,
                                 tracker: tracker,
@@ -840,13 +954,14 @@ public enum ModelDownloader {
         session: URLSession,
         delegate: RangedDownloadDelegate,
         requestTimeout: TimeInterval,
+        bearerToken: String?,
         writer: RandomAccessFileWriter,
         queue: ChunkWorkQueue,
         tracker: ProgressTracker,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void
     ) async throws {
         var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        applyStandardHeaders(to: &request, bearerToken: bearerToken)
         request.setValue("bytes=\(chunk.start)-\(chunk.end)", forHTTPHeaderField: "Range")
         if let validator {
             request.setValue(validator, forHTTPHeaderField: "If-Range")
@@ -895,9 +1010,9 @@ public enum ModelDownloader {
         let lastModified: String?
     }
 
-    private static func probeServer(url: URL) async throws -> ProbeResult? {
+    private static func probeServer(url: URL, bearerToken: String?) async throws -> ProbeResult? {
         var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        applyStandardHeaders(to: &request, bearerToken: bearerToken)
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         request.timeoutInterval = 30
 
@@ -923,10 +1038,11 @@ public enum ModelDownloader {
         prior: PartialDownloadState?,
         displayName: String?,
         expectedSHA256: String?,
+        bearerToken: String?,
         onProgress: @escaping @Sendable (DownloadProgress) -> Void
     ) async throws -> ModelDownloadResult {
         var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        applyStandardHeaders(to: &request, bearerToken: bearerToken)
         request.timeoutInterval = 3_600
 
         if let prior {
@@ -1291,6 +1407,27 @@ public enum ModelDownloader {
         guard parts.count >= 5, parts[2] == "resolve" || parts[2] == "blob" else { return nil }
         return ("\(parts[0])/\(parts[1])", parts.suffix(from: 4).joined(separator: "/"))
     }
+
+    static func applyStandardHeaders(to request: inout URLRequest, bearerToken: String?) {
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if let token = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+    }
+}
+
+private extension HuggingFaceArtifactRole {
+    var installedModelRole: InstalledModelArtifactRole {
+        switch self {
+        case .primaryModel:
+            return .primaryModel
+        case .splitModel:
+            return .splitModel
+        case .mmproj:
+            return .mmproj
+        }
+    }
 }
 
 private extension Optional where Wrapped == String {
@@ -1303,32 +1440,5 @@ private extension Optional where Wrapped == String {
               !value.isEmpty
         else { return nil }
         return value.lowercased()
-    }
-}
-
-public enum HuggingFaceURL {
-    public static func parse(_ input: String) -> (repo: String, filename: String)? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let url = URL(string: trimmed),
-           let host = url.host,
-           host.contains("huggingface.co") {
-            let parts = url.pathComponents.filter { $0 != "/" }
-            if parts.count >= 5, parts[2] == "resolve" || parts[2] == "blob" {
-                let repo = "\(parts[0])/\(parts[1])"
-                let filename = parts.suffix(from: 4).joined(separator: "/")
-                if filename.lowercased().hasSuffix(".gguf") {
-                    return (repo, filename)
-                }
-            }
-            return nil
-        }
-
-        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        if parts.count >= 3, parts.last?.lowercased().hasSuffix(".gguf") == true {
-            return ("\(parts[0])/\(parts[1])", parts.suffix(from: 2).joined(separator: "/"))
-        }
-        return nil
     }
 }

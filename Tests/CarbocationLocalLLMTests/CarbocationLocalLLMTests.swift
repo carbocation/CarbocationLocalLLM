@@ -598,6 +598,213 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil(HuggingFaceURL.parse("https://huggingface.co/bartowski/model/blob/main/README.md"))
     }
 
+    func testHuggingFaceModelReferenceParsesLlamaCppForms() {
+        let repoQuant = HuggingFaceModelReference.parse("unsloth/gemma-4-31B-it-GGUF:UD-Q8_K_XL")
+        XCTAssertEqual(repoQuant?.repo, "unsloth/gemma-4-31B-it-GGUF")
+        XCTAssertEqual(repoQuant?.quantization, "UD-Q8_K_XL")
+        XCTAssertNil(repoQuant?.file)
+
+        let repoOnly = HuggingFaceModelReference.parse("ggml-org/gemma-3-1b-it-GGUF")
+        XCTAssertEqual(repoOnly?.repo, "ggml-org/gemma-3-1b-it-GGUF")
+        XCTAssertNil(repoOnly?.quantization)
+
+        let exact = HuggingFaceModelReference.parse("bartowski/model/nested/foo-Q4_K_M.gguf")
+        XCTAssertEqual(exact?.repo, "bartowski/model")
+        XCTAssertEqual(exact?.file, "nested/foo-Q4_K_M.gguf")
+
+        let url = HuggingFaceModelReference.parse("https://huggingface.co/bartowski/model/blob/dev/nested/foo-Q4_K_M.gguf")
+        XCTAssertEqual(url?.repo, "bartowski/model")
+        XCTAssertEqual(url?.revision, "dev")
+        XCTAssertEqual(url?.file, "nested/foo-Q4_K_M.gguf")
+
+        XCTAssertNil(HuggingFaceModelReference.parse("owner/repo/not-a-gguf.txt"))
+        XCTAssertNil(HuggingFaceModelReference.parse("owner/repo/too/many/parts"))
+    }
+
+    func testHuggingFaceResolverChoosesDefaultQuantAndSendsAuthorization() async throws {
+        let client = MockHuggingFaceHTTPClient(
+            refsJSON: refsJSON(commit: Self.mockCommit),
+            treeJSON: #"""
+            [
+              {"type":"file","path":"README.md","size":10},
+              {"type":"file","path":"model-Q8_0.gguf","size":800},
+              {"type":"file","path":"model-Q4_K_M.gguf","lfs":{"oid":"1111111111111111111111111111111111111111","size":400}},
+              {"type":"file","path":"mmproj-model-Q4_K_M.gguf","size":50}
+            ]
+            """#
+        )
+        let endpoint = URL(string: "https://huggingface.test")!
+        let resolver = HuggingFaceModelResolver(endpoint: endpoint, httpClient: client)
+        let reference = HuggingFaceModelReference(repo: "org/model", endpoint: endpoint)
+
+        let resolution = try await resolver.resolve(reference, token: "hf_testtoken")
+
+        XCTAssertEqual(resolution.commit, Self.mockCommit)
+        XCTAssertEqual(resolution.primaryArtifact.path, "model-Q4_K_M.gguf")
+        XCTAssertEqual(resolution.quantization, "Q4_K_M")
+        XCTAssertEqual(resolution.splitCount, 1)
+        XCTAssertEqual(resolution.mmprojArtifact?.path, "mmproj-model-Q4_K_M.gguf")
+        XCTAssertEqual(resolution.totalSizeBytes, 450)
+        XCTAssertTrue(client.requests.contains {
+            $0.value(forHTTPHeaderField: "Authorization") == "Bearer hf_testtoken"
+        })
+    }
+
+    func testHuggingFaceResolverChoosesRequestedSplitQuant() async throws {
+        let client = MockHuggingFaceHTTPClient(
+            refsJSON: refsJSON(commit: Self.mockCommit),
+            treeJSON: #"""
+            [
+              {"type":"file","path":"model-Q4_K_M.gguf","size":400},
+              {"type":"file","path":"nested/model-UD-Q8_K_XL-00002-of-00003.gguf","size":200},
+              {"type":"file","path":"nested/model-UD-Q8_K_XL-00001-of-00003.gguf","size":200},
+              {"type":"file","path":"nested/model-UD-Q8_K_XL-00003-of-00003.gguf","size":200},
+              {"type":"file","path":"nested/mmproj-model-UD-Q8_K_XL.gguf","size":25},
+              {"type":"file","path":"nested/model-UD-Q8_K_XL-imatrix.dat","size":1}
+            ]
+            """#
+        )
+        let endpoint = URL(string: "https://huggingface.test")!
+        let resolver = HuggingFaceModelResolver(endpoint: endpoint, httpClient: client)
+        let reference = HuggingFaceModelReference(
+            repo: "org/model",
+            quantization: "ud-q8_k_xl",
+            endpoint: endpoint
+        )
+
+        let resolution = try await resolver.resolve(reference)
+
+        XCTAssertEqual(resolution.primaryArtifact.path, "nested/model-UD-Q8_K_XL-00001-of-00003.gguf")
+        XCTAssertEqual(resolution.quantization, "UD-Q8_K_XL")
+        XCTAssertEqual(resolution.splitCount, 3)
+        XCTAssertEqual(
+            resolution.artifacts.filter { $0.role == .splitModel }.map(\.path),
+            [
+                "nested/model-UD-Q8_K_XL-00002-of-00003.gguf",
+                "nested/model-UD-Q8_K_XL-00003-of-00003.gguf"
+            ]
+        )
+        XCTAssertEqual(resolution.mmprojArtifact?.path, "nested/mmproj-model-UD-Q8_K_XL.gguf")
+        XCTAssertEqual(resolution.totalSizeBytes, 625)
+    }
+
+    func testHuggingFaceResolverReportsMissingQuantAndNoGGUF() async throws {
+        let endpoint = URL(string: "https://huggingface.test")!
+        let missingQuant = HuggingFaceModelResolver(
+            endpoint: endpoint,
+            httpClient: MockHuggingFaceHTTPClient(
+                refsJSON: refsJSON(commit: Self.mockCommit),
+                treeJSON: #"[{"type":"file","path":"model-Q4_K_M.gguf","size":400}]"#
+            )
+        )
+
+        do {
+            _ = try await missingQuant.resolve(HuggingFaceModelReference(
+                repo: "org/model",
+                quantization: "Q8_0",
+                endpoint: endpoint
+            ))
+            XCTFail("Expected missing quantization error.")
+        } catch HuggingFaceModelResolverError.quantizationNotFound(let quantization) {
+            XCTAssertEqual(quantization, "Q8_0")
+        }
+
+        let noGGUF = HuggingFaceModelResolver(
+            endpoint: endpoint,
+            httpClient: MockHuggingFaceHTTPClient(
+                refsJSON: refsJSON(commit: Self.mockCommit),
+                treeJSON: #"[{"type":"file","path":"README.md","size":1}]"#
+            )
+        )
+
+        do {
+            _ = try await noGGUF.resolve(HuggingFaceModelReference(repo: "org/model", endpoint: endpoint))
+            XCTFail("Expected no GGUF error.")
+        } catch HuggingFaceModelResolverError.noGGUFFiles(let repo) {
+            XCTAssertEqual(repo, "org/model")
+        }
+    }
+
+    @MainActor
+    func testModelLibraryInstallsMultipleArtifactsAndMetadataStaysCompatible() async throws {
+        let root = try makeTemporaryDirectory()
+        let primary = root.appendingPathComponent("primary.gguf")
+        let split = root.appendingPathComponent("split.gguf")
+        let mmproj = root.appendingPathComponent("mmproj.gguf")
+        try Data("primary".utf8).write(to: primary)
+        try Data("split".utf8).write(to: split)
+        try Data("mmproj".utf8).write(to: mmproj)
+
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let library = ModelLibrary(root: modelsRoot)
+        let model = try await library.add(
+            artifacts: [
+                ModelLibraryInstallArtifact(
+                    sourceURL: primary,
+                    role: .primaryModel,
+                    relativePath: "nested/model-Q4_K_M-00001-of-00002.gguf",
+                    sizeBytes: 7,
+                    sha256: "primary-sha"
+                ),
+                ModelLibraryInstallArtifact(
+                    sourceURL: split,
+                    role: .splitModel,
+                    relativePath: "nested/model-Q4_K_M-00002-of-00002.gguf",
+                    sizeBytes: 5
+                ),
+                ModelLibraryInstallArtifact(
+                    sourceURL: mmproj,
+                    role: .mmproj,
+                    relativePath: "nested/mmproj-model-Q4_K_M.gguf",
+                    sizeBytes: 6
+                )
+            ],
+            displayName: "Split Model",
+            source: .customHF,
+            hfRepo: "org/model",
+            hfFilename: "nested/model-Q4_K_M-00001-of-00002.gguf",
+            sha256: "primary-sha",
+            quantization: "Q4_K_M"
+        )
+
+        XCTAssertEqual(model.sizeBytes, 18)
+        XCTAssertEqual(model.filename, "nested/model-Q4_K_M-00001-of-00002.gguf")
+        XCTAssertEqual(model.artifacts.map(\.role), [.primaryModel, .splitModel, .mmproj])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: model.weightsURL(in: modelsRoot).path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: model.directory(in: modelsRoot)
+                .appendingPathComponent("nested/mmproj-model-Q4_K_M.gguf")
+                .path
+        ))
+
+        let oldMetadata = #"""
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "displayName": "Old",
+          "filename": "old-Q4_K_M.gguf",
+          "sizeBytes": 123,
+          "contextLength": 0,
+          "quantization": "Q4_K_M",
+          "source": "imported",
+          "sha256": "abc",
+          "installedAt": "2026-01-01T00:00:00Z"
+        }
+        """#
+        let decoded = try LocalLLMJSON.makeDecoder().decode(InstalledModel.self, from: Data(oldMetadata.utf8))
+        XCTAssertEqual(decoded.artifacts.count, 1)
+        XCTAssertEqual(decoded.artifacts[0].role, .primaryModel)
+        XCTAssertEqual(decoded.artifacts[0].relativePath, "old-Q4_K_M.gguf")
+        XCTAssertEqual(decoded.artifacts[0].sha256, "abc")
+    }
+
+    func testModelDownloaderAuthorizationHeaderDoesNotLeakIntoSidecars() throws {
+        var request = URLRequest(url: URL(string: "https://huggingface.co/org/model/resolve/main/model.gguf")!)
+        ModelDownloader.applyStandardHeaders(to: &request, bearerToken: " hf_secret ")
+
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer hf_secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "hf_secret"))
+    }
+
     func testChunkPlanComputesPendingRangesAndCompletedBytes() {
         let plan = ChunkPlan(totalBytes: 25, chunkSize: 10, doneChunks: [0, 2])
 
@@ -1008,6 +1215,19 @@ final class CarbocationLocalLLMTests: XCTestCase {
         return url
     }
 
+    private static let mockCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    private func refsJSON(commit: String) -> String {
+        #"""
+        {
+          "branches": [
+            {"name": "main", "targetCommit": "\#(commit)"}
+          ],
+          "tags": []
+        }
+        """#
+    }
+
     private func makeMinimalGGUF(contextLength: UInt32) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
         appendUInt32(3, to: &data)
@@ -1093,5 +1313,37 @@ private final class ThreadProbeRecorder: @unchecked Sendable {
         lock.lock()
         recordedValue = value
         lock.unlock()
+    }
+}
+
+private final class MockHuggingFaceHTTPClient: HuggingFaceModelResolverHTTPClient, @unchecked Sendable {
+    private let refsData: Data
+    private let treeData: Data
+    private let queue = DispatchQueue(label: "MockHuggingFaceHTTPClient")
+    private var recordedRequests: [URLRequest] = []
+
+    init(refsJSON: String, treeJSON: String) {
+        self.refsData = Data(refsJSON.utf8)
+        self.treeData = Data(treeJSON.utf8)
+    }
+
+    var requests: [URLRequest] {
+        queue.sync { recordedRequests }
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        queue.sync {
+            recordedRequests.append(request)
+        }
+
+        let path = request.url?.absoluteString ?? ""
+        let data = path.contains("/refs") ? refsData : treeData
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://huggingface.test")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (data, response)
     }
 }
