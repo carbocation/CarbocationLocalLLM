@@ -88,6 +88,141 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testCalibrationMemoryGuardrailAllowsPlausibleCandidate() {
+        let gib = UInt64(1_073_741_824)
+        let profile = LlamaContextMemoryGuardrail.ModelProfile(
+            modelTensorBytes: 4 * gib,
+            layerCount: 32,
+            embeddingCount: 4_096,
+            headCount: 32,
+            kvHeadCount: 8,
+            keyCacheBytesPerElement: 2,
+            valueCacheBytesPerElement: 2
+        )
+
+        let estimate = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 8_192,
+            batchSize: 64,
+            budgetBytes: 16 * gib
+        )
+
+        XCTAssertTrue(LlamaContextMemoryGuardrail.allowsProbe(estimate))
+        XCTAssertLessThan(estimate.totalBytes, estimate.budgetBytes)
+        XCTAssertGreaterThan(estimate.kvCacheBytes, 0)
+        XCTAssertEqual(estimate.modelReserveBytes, profile.modelTensorBytes)
+    }
+
+    func testCalibrationMemoryGuardrailDoesNotRejectOnlyBecauseLoadedModelExceedsBudget() {
+        let gib = UInt64(1_073_741_824)
+        let profile = LlamaContextMemoryGuardrail.ModelProfile(
+            modelTensorBytes: 28 * gib,
+            layerCount: 32,
+            embeddingCount: 4_096,
+            headCount: 32,
+            kvHeadCount: 8,
+            keyCacheBytesPerElement: 2,
+            valueCacheBytesPerElement: 2
+        )
+
+        let estimate = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 8_192,
+            batchSize: 64,
+            budgetBytes: 8 * gib
+        )
+
+        XCTAssertTrue(LlamaContextMemoryGuardrail.allowsProbe(estimate))
+        XCTAssertGreaterThan(estimate.totalBytes, estimate.budgetBytes)
+        XCTAssertLessThan(estimate.modelReserveBytes, estimate.modelTensorBytes)
+        XCTAssertLessThanOrEqual(estimate.requiredBytes, estimate.budgetBytes)
+    }
+
+    func testCalibrationMemoryGuardrailCountsBoundedLoadedModelReserve() {
+        let gib = UInt64(1_073_741_824)
+        let profile = LlamaContextMemoryGuardrail.ModelProfile(
+            modelTensorBytes: 28 * gib,
+            layerCount: 32,
+            embeddingCount: 4_096,
+            headCount: 32,
+            kvHeadCount: 8,
+            keyCacheBytesPerElement: 2,
+            valueCacheBytesPerElement: 2
+        )
+        let budgetBytes = 8 * gib
+
+        let estimate = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 65_536,
+            batchSize: 2_048,
+            budgetBytes: budgetBytes
+        )
+
+        XCTAssertEqual(
+            estimate.modelReserveBytes,
+            UInt64((Double(budgetBytes) * LlamaContextMemoryGuardrail.maximumModelReserveBudgetFraction).rounded(.up))
+        )
+        XCTAssertEqual(estimate.requiredBytes, estimate.modelReserveBytes + estimate.incrementalBytes)
+        XCTAssertFalse(LlamaContextMemoryGuardrail.allowsProbe(estimate))
+    }
+
+    func testCalibrationMemoryGuardrailUsesStricterIncrementalSafetyMargin() {
+        let profile = LlamaContextMemoryGuardrail.ModelProfile(
+            modelTensorBytes: 4 * UInt64(1_073_741_824),
+            layerCount: 1,
+            embeddingCount: 1_024,
+            headCount: 1,
+            kvHeadCount: 1,
+            keyCacheBytesPerElement: 2,
+            valueCacheBytesPerElement: 2
+        )
+        let baseline = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 2_000_000,
+            batchSize: 1,
+            budgetBytes: 0
+        )
+        let basis = baseline.kvCacheBytes + baseline.decodeWorkspaceBytes
+        let tooLenientBudget = basis + UInt64((Double(basis) * 0.15).rounded(.up))
+        let estimate = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 2_000_000,
+            batchSize: 1,
+            budgetBytes: tooLenientBudget
+        )
+
+        XCTAssertFalse(LlamaContextMemoryGuardrail.allowsProbe(estimate))
+        XCTAssertEqual(
+            estimate.safetyMarginBytes,
+            UInt64((Double(basis) * LlamaContextMemoryGuardrail.incrementalSafetyMarginRatio).rounded(.up))
+        )
+        XCTAssertGreaterThan(estimate.requiredBytes, estimate.budgetBytes)
+    }
+
+    func testCalibrationMemoryGuardrailRejectsClearlyOversizedCandidate() {
+        let gib = UInt64(1_073_741_824)
+        let profile = LlamaContextMemoryGuardrail.ModelProfile(
+            modelTensorBytes: 28 * gib,
+            layerCount: 48,
+            embeddingCount: 8_192,
+            headCount: 64,
+            kvHeadCount: 8,
+            keyCacheBytesPerElement: 2,
+            valueCacheBytesPerElement: 2
+        )
+
+        let estimate = LlamaContextMemoryGuardrail.estimate(
+            profile: profile,
+            contextSize: 262_144,
+            batchSize: 2_048,
+            budgetBytes: 16 * gib
+        )
+
+        XCTAssertFalse(LlamaContextMemoryGuardrail.allowsProbe(estimate))
+        XCTAssertGreaterThan(estimate.totalBytes, estimate.budgetBytes)
+        XCTAssertGreaterThan(estimate.requiredBytes, estimate.budgetBytes)
+    }
+
     func testContextParamsClampBatchAndMicroBatchTogether() {
         let params = LlamaEngine.contextParams(
             contextSize: 4_096,

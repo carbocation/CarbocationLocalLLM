@@ -184,7 +184,7 @@ public struct LlamaContextCalibrationSearchResult: Hashable, Sendable {
 }
 
 public enum LlamaContextCalibrationAlgorithm {
-    public static let version = 1
+    public static let version = 6
 
     public static func powerOfTwoTiers(
         upTo upperBound: Int,

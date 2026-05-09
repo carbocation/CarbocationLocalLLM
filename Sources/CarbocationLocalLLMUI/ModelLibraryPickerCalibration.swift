@@ -4,6 +4,11 @@ import Foundation
 public struct ModelLibraryPickerCalibrationAdapter {
     public var store: LlamaContextCalibrationStore
     public var runtimeFingerprint: LlamaContextCalibrationRuntimeFingerprint
+    public var onCalibrationStarted: @MainActor (_ model: InstalledModel) -> Void
+    public var onCalibrationCompleted: @MainActor (
+        _ model: InstalledModel,
+        _ record: LlamaContextCalibrationRecord
+    ) -> Void
     public var calibrate: @MainActor (
         _ model: InstalledModel,
         _ onProgress: @escaping @MainActor (LlamaContextCalibrationProgress) -> Void
@@ -12,6 +17,11 @@ public struct ModelLibraryPickerCalibrationAdapter {
     public init(
         store: LlamaContextCalibrationStore = .shared,
         runtimeFingerprint: LlamaContextCalibrationRuntimeFingerprint,
+        onCalibrationStarted: @escaping @MainActor (_ model: InstalledModel) -> Void = { _ in },
+        onCalibrationCompleted: @escaping @MainActor (
+            _ model: InstalledModel,
+            _ record: LlamaContextCalibrationRecord
+        ) -> Void = { _, _ in },
         calibrate: @escaping @MainActor (
             _ model: InstalledModel,
             _ onProgress: @escaping @MainActor (LlamaContextCalibrationProgress) -> Void
@@ -19,7 +29,20 @@ public struct ModelLibraryPickerCalibrationAdapter {
     ) {
         self.store = store
         self.runtimeFingerprint = runtimeFingerprint
+        self.onCalibrationStarted = onCalibrationStarted
+        self.onCalibrationCompleted = onCalibrationCompleted
         self.calibrate = calibrate
+    }
+
+    @MainActor
+    public func runCalibration(
+        _ model: InstalledModel,
+        onProgress: @escaping @MainActor (LlamaContextCalibrationProgress) -> Void
+    ) async throws -> LlamaContextCalibrationRecord {
+        onCalibrationStarted(model)
+        let record = try await calibrate(model, onProgress)
+        onCalibrationCompleted(model, record)
+        return record
     }
 }
 

@@ -82,6 +82,94 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil(store.record(for: model, runtime: runtime))
     }
 
+    func testContextCalibrationAlgorithmVersionInvalidatesOlderRecords() {
+        let suiteName = "CarbocationLocalLLMCalibrationVersionTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("device-a", forKey: LlamaContextCalibrationStore.deviceIDDefaultsKey)
+
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let model = InstalledModel(
+            displayName: "Calibration Model",
+            filename: "model-Q4_K_M.gguf",
+            sizeBytes: 2_000_000,
+            contextLength: 65_536,
+            quantization: "Q4_K_M",
+            source: .imported,
+            sha256: "abc123"
+        )
+        let initOnlyRuntime = calibrationRuntime(batchSizeLimit: 2_048, algorithmVersion: 1)
+        let overlyConservativeRuntime = calibrationRuntime(batchSizeLimit: 2_048, algorithmVersion: 2)
+        let overlyLiberalRuntime = calibrationRuntime(batchSizeLimit: 2_048, algorithmVersion: 3)
+        let stillTooLiberalRuntime = calibrationRuntime(batchSizeLimit: 2_048, algorithmVersion: 4)
+        let missingModelReserveRuntime = calibrationRuntime(batchSizeLimit: 2_048, algorithmVersion: 5)
+        let currentRuntime = calibrationRuntime(batchSizeLimit: 2_048)
+        let initOnlyKey = store.key(for: model, runtime: initOnlyRuntime)
+        let overlyConservativeKey = store.key(for: model, runtime: overlyConservativeRuntime)
+        let overlyLiberalKey = store.key(for: model, runtime: overlyLiberalRuntime)
+        let stillTooLiberalKey = store.key(for: model, runtime: stillTooLiberalRuntime)
+        let missingModelReserveKey = store.key(for: model, runtime: missingModelReserveRuntime)
+
+        store.save(LlamaContextCalibrationRecord(
+            key: initOnlyKey,
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true)
+            ]
+        ))
+        store.save(LlamaContextCalibrationRecord(
+            key: overlyConservativeKey,
+            maximumSupportedContext: 16_384,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 16_384, succeeded: true)
+            ]
+        ))
+        store.save(LlamaContextCalibrationRecord(
+            key: overlyLiberalKey,
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true)
+            ]
+        ))
+        store.save(LlamaContextCalibrationRecord(
+            key: stillTooLiberalKey,
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true)
+            ]
+        ))
+        store.save(LlamaContextCalibrationRecord(
+            key: missingModelReserveKey,
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true)
+            ]
+        ))
+
+        XCTAssertGreaterThan(LlamaContextCalibrationAlgorithm.version, 5)
+        XCTAssertEqual(
+            store.record(for: model, runtime: initOnlyRuntime)?.maximumSupportedContext,
+            65_536
+        )
+        XCTAssertEqual(
+            store.record(for: model, runtime: overlyConservativeRuntime)?.maximumSupportedContext,
+            16_384
+        )
+        XCTAssertEqual(
+            store.record(for: model, runtime: overlyLiberalRuntime)?.maximumSupportedContext,
+            65_536
+        )
+        XCTAssertEqual(
+            store.record(for: model, runtime: stillTooLiberalRuntime)?.maximumSupportedContext,
+            65_536
+        )
+        XCTAssertEqual(
+            store.record(for: model, runtime: missingModelReserveRuntime)?.maximumSupportedContext,
+            65_536
+        )
+        XCTAssertNil(store.record(for: model, runtime: currentRuntime))
+    }
+
     func testContextCalibrationSearchUsesCoarsePowerOfTwoBisect() async throws {
         let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: 65_536)
         var probed: [Int] = []
@@ -96,6 +184,29 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertLessThan(probed.count, candidates.count)
         XCTAssertTrue(result.probes.contains(LlamaContextCalibrationProbe(context: 16_384, succeeded: true)))
         XCTAssertTrue(result.probes.contains { !$0.succeeded })
+    }
+
+    func testContextCalibrationSearchUsesDecodeSuccessfulCandidate() async throws {
+        let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: 65_536)
+        let initSuccessfulLimit = 65_536
+        let decodeSuccessfulLimit = 16_384
+        var probed: [(context: Int, initSucceeded: Bool, decodeSucceeded: Bool)] = []
+
+        let result = try await LlamaContextCalibrationAlgorithm.search(candidates: candidates) { context in
+            let initSucceeded = context <= initSuccessfulLimit
+            let decodeSucceeded = context <= decodeSuccessfulLimit
+            probed.append((
+                context: context,
+                initSucceeded: initSucceeded,
+                decodeSucceeded: decodeSucceeded
+            ))
+            XCTAssertTrue(initSucceeded)
+            return initSucceeded && decodeSucceeded
+        }
+
+        XCTAssertEqual(result.maximumSupportedContext, decodeSuccessfulLimit)
+        XCTAssertNotEqual(result.maximumSupportedContext, initSuccessfulLimit)
+        XCTAssertTrue(probed.contains { $0.initSucceeded && !$0.decodeSucceeded })
     }
 
     func testInstalledModelInfersQuantization() {
@@ -1419,14 +1530,16 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     private func calibrationRuntime(
-        batchSizeLimit: Int
+        batchSizeLimit: Int,
+        algorithmVersion: Int = LlamaContextCalibrationAlgorithm.version
     ) -> LlamaContextCalibrationRuntimeFingerprint {
         LlamaContextCalibrationRuntimeFingerprint(
             platform: "macOS",
             gpuLayerCount: 999,
             useMemoryMap: true,
             batchSizeLimit: batchSizeLimit,
-            threadCount: 4
+            threadCount: 4,
+            algorithmVersion: algorithmVersion
         )
     }
 }

@@ -159,7 +159,7 @@ public struct LocalLLMModelConfigurationView: View {
             applyFixedContextIfNeeded()
         }
         .onChange(of: selectedModelID) { oldValue, _ in
-            preserveMaximumIntentIfNeeded(forPreviousSelection: oldValue)
+            preserveMaximumIntentIfNeeded(forSelectionID: oldValue)
             syncContextStateFromDefaults()
         }
         .onDisappear {
@@ -170,11 +170,18 @@ public struct LocalLLMModelConfigurationView: View {
     static func makeCalibrationAdapter(
         library: ModelLibrary,
         store: LlamaContextCalibrationStore,
-        configuration: LocalLLMEngineConfiguration
+        configuration: LocalLLMEngineConfiguration,
+        onCalibrationStarted: @escaping @MainActor (_ model: InstalledModel) -> Void = { _ in },
+        onCalibrationCompleted: @escaping @MainActor (
+            _ model: InstalledModel,
+            _ record: LlamaContextCalibrationRecord
+        ) -> Void = { _, _ in }
     ) -> ModelLibraryPickerCalibrationAdapter {
         ModelLibraryPickerCalibrationAdapter(
             store: store,
             runtimeFingerprint: LocalLLMEngine.contextCalibrationRuntimeFingerprint(configuration: configuration),
+            onCalibrationStarted: onCalibrationStarted,
+            onCalibrationCompleted: onCalibrationCompleted,
             calibrate: { model, progress in
                 try await LocalLLMEngine.calibrateContext(
                     for: model,
@@ -226,7 +233,13 @@ public struct LocalLLMModelConfigurationView: View {
         return Self.makeCalibrationAdapter(
             library: library,
             store: calibrationStore,
-            configuration: configuration
+            configuration: configuration,
+            onCalibrationStarted: { model in
+                prepareSelectedContextForCalibration(model)
+            },
+            onCalibrationCompleted: { model, _ in
+                refreshSelectedContextAfterCalibration(model)
+            }
         )
     }
 
@@ -517,14 +530,31 @@ public struct LocalLLMModelConfigurationView: View {
         }
     }
 
-    private func preserveMaximumIntentIfNeeded(forPreviousSelection previousSelectionID: String) {
+    private func preserveMaximumIntentIfNeeded(forSelectionID selectionID: String) {
         guard !autoContextLimitUsesMaximum,
               hasExplicitAutoContextLimitPreference,
-              autoContextLimitTracksMaximum(forSelectionID: previousSelectionID)
+              autoContextLimitTracksMaximum(forSelectionID: selectionID)
         else { return }
 
         autoContextLimitUsesMaximum = true
         defaults.set(true, forKey: contextKeys.autoContextLimitUsesMaximum)
+    }
+
+    private func prepareSelectedContextForCalibration(_ model: InstalledModel) {
+        guard isSelectedInstalledModel(model) else { return }
+        preserveMaximumIntentIfNeeded(forSelectionID: selectedModelID)
+        syncContextStateFromDefaults()
+    }
+
+    private func refreshSelectedContextAfterCalibration(_ model: InstalledModel) {
+        guard isSelectedInstalledModel(model) else { return }
+        syncContextStateFromDefaults()
+        refreshToken = UUID()
+    }
+
+    private func isSelectedInstalledModel(_ model: InstalledModel) -> Bool {
+        guard case .installed(let id) = selectedSelection else { return false }
+        return id == model.id
     }
 
     private func autoContextLimitTracksMaximum(forSelectionID selectionID: String) -> Bool {
@@ -560,11 +590,17 @@ public struct LocalLLMModelConfigurationView: View {
         let adapter = Self.makeCalibrationAdapter(
             library: library,
             store: calibrationStore,
-            configuration: configuration
+            configuration: configuration,
+            onCalibrationStarted: { model in
+                prepareSelectedContextForCalibration(model)
+            },
+            onCalibrationCompleted: { model, _ in
+                refreshSelectedContextAfterCalibration(model)
+            }
         )
         calibrationTask = Task { @MainActor in
             do {
-                _ = try await adapter.calibrate(model) { progress in
+                _ = try await adapter.runCalibration(model) { progress in
                     guard activeCalibrationModelID == modelID else { return }
                     calibrationProgress = progress
                 }

@@ -517,7 +517,7 @@ public struct ModelLibraryPickerView: View {
         let modelID = model.id
         calibrationTask = Task { @MainActor in
             do {
-                _ = try await calibrationAdapter.calibrate(model) { progress in
+                _ = try await calibrationAdapter.runCalibration(model) { progress in
                     guard activeCalibrationModelID == modelID else { return }
                     calibrationProgress = progress
                 }

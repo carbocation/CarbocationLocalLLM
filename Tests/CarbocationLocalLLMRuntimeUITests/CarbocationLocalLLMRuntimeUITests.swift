@@ -34,6 +34,68 @@ final class CarbocationLocalLLMRuntimeUITests: XCTestCase {
         )
     }
 
+    func testCalibrationAdapterRunsLifecycleCallbacks() async throws {
+        let suiteName = "CarbocationLocalLLMRuntimeUICalibrationAdapterTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LlamaContextCalibrationStore(defaults: defaults)
+        let runtime = LlamaContextCalibrationRuntimeFingerprint(
+            platform: "macOS",
+            gpuLayerCount: 999,
+            useMemoryMap: true,
+            batchSizeLimit: 2_048,
+            threadCount: 4
+        )
+        let model = InstalledModel(
+            displayName: "Calibration Model",
+            filename: "model-Q4_K_M.gguf",
+            sizeBytes: 2_000_000,
+            contextLength: 65_536,
+            quantization: "Q4_K_M",
+            source: .imported,
+            sha256: "abc123"
+        )
+        let record = LlamaContextCalibrationRecord(
+            key: store.key(for: model, runtime: runtime),
+            maximumSupportedContext: 65_536,
+            probedTiers: [
+                LlamaContextCalibrationProbe(context: 65_536, succeeded: true)
+            ]
+        )
+        var events: [String] = []
+        let adapter = ModelLibraryPickerCalibrationAdapter(
+            store: store,
+            runtimeFingerprint: runtime,
+            onCalibrationStarted: { model in
+                events.append("started:\(model.id.uuidString)")
+            },
+            onCalibrationCompleted: { _, record in
+                events.append("completed:\(record.maximumSupportedContext)")
+            },
+            calibrate: { calibratedModel, progress in
+                XCTAssertEqual(calibratedModel.id, model.id)
+                progress(LlamaContextCalibrationProgress(
+                    phase: .completed,
+                    currentContext: record.maximumSupportedContext
+                ))
+                events.append("calibrated")
+                return record
+            }
+        )
+
+        let returned = try await adapter.runCalibration(model) { progress in
+            events.append("progress:\(progress.currentContext ?? 0)")
+        }
+
+        XCTAssertEqual(returned, record)
+        XCTAssertEqual(events, [
+            "started:\(model.id.uuidString)",
+            "progress:65536",
+            "calibrated",
+            "completed:65536"
+        ])
+    }
+
     func testUncalibratedContextWindowTiersStayConservative() {
         let candidates = LocalLLMContextWindowTiers.candidates(
             trainingContext: 262_144,

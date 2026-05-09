@@ -350,7 +350,7 @@ GGUF preflight uses exact tokenization through the loaded llama vocabulary and c
 
 ### Calibrate GGUF context
 
-GGUF context calibration is explicit and user-triggered. It probes power-of-two context tiers, records the highest tier that can initialize on the current device, and saves the result in the shared App Group settings. The cache key includes a generated per-device id, the installed model fingerprint, and the llama runtime configuration, so the same user can share model files across apps while keeping separate limits for different devices and runtime knobs.
+GGUF context calibration is explicit and user-triggered. It probes power-of-two context tiers, first skips candidates whose estimated KV-cache, decode-workspace, safety-margin, and bounded loaded-model reserve footprint is clearly over the device memory budget, then records the highest remaining tier that can initialize and run a minimal llama decode on the current device. The loaded model size contributes to a capped residency reserve rather than being treated as a full fresh allocation. The cache key includes a generated per-device id, the installed model fingerprint, and the llama runtime configuration, so the same user can share model files across apps while keeping separate limits for different devices and runtime knobs.
 
 ```swift
 let record = try await LocalLLMEngine.calibrateContext(
@@ -364,7 +364,7 @@ let record = try await LocalLLMEngine.calibrateContext(
 print(record.maximumSupportedContext)
 ```
 
-`LocalLLMEngine.loadPlan(from:in:)` uses a matching calibration record as an upper bound in automatic context mode. Calibration does not automatically promote auto mode to the largest context that initialized. Manual mode still uses the explicit user value. If there is no matching calibration or `llama.autoContextLimit` preference, automatic mode keeps the conservative defaults: 4,096 tokens on iOS and 16,384 tokens on desktop, bounded by the model training context when known.
+`LocalLLMEngine.loadPlan(from:in:)` uses a matching calibration record as an upper bound in automatic context mode. Calibration does not automatically promote auto mode to the largest context that passed the memory guardrail and decode probe. Manual mode still uses the explicit user value. If there is no matching calibration or `llama.autoContextLimit` preference, automatic mode keeps the conservative defaults: 4,096 tokens on iOS and 16,384 tokens on desktop, bounded by the model training context when known. A calibration record is not a guarantee that every future prompt, batch setting, or system-memory condition will succeed.
 
 ### Keep a session live between queries
 
@@ -524,7 +524,7 @@ struct LocalModelSettingsView: View {
 
 The configuration view injects `LocalLLMEngine.availableSystemModels()`, `LocalLLMEngine.contextCalibrationRuntimeFingerprint()`, and `LocalLLMEngine.calibrateContext(...)` for you. It writes context preferences to the standard keys used by `LocalLLMEngine.loadPlan(from:in:)`, including `llama.contextMode`, `llama.numCtx`, and `llama.autoContextLimit`.
 
-Uncalibrated automatic context stays conservative, such as 16,384 tokens on macOS or 4,096 tokens on iOS. After calibration, the context section offers discrete sub-maximum choices such as 16k, 32k, 64k, and 128k when the model and device support them. Calibration records still mean "maximum supported context"; they do not force default auto loads to use the largest possible context.
+Uncalibrated automatic context stays conservative, such as 16,384 tokens on macOS or 4,096 tokens on iOS. After calibration, the context section offers discrete sub-maximum choices such as 16k, 32k, 64k, and 128k when the model and device support them. Calibration records still mean "maximum supported context that passed a conservative memory estimate, initialized, and passed a minimal decode probe"; they do not force default auto loads to use the largest possible context, and they cannot guarantee every future prompt or memory condition.
 
 The lower-level `CarbocationLocalLLMUI.ModelLibraryPickerView` remains available when an app wants to build its own settings UI and wire system models, calibration, and context controls manually. The picker is configurable. By default it shows `CuratedModelCatalog.all`, labels the hardware-recommended curated model, labels the best installed curated fallback when the recommendation is not installed, and marks Apple Intelligence as not recommended while a curated llama.cpp model fits the device memory. If no curated llama.cpp model fits and Apple Intelligence is available, Apple Intelligence receives the recommended label instead. Pass `curatedModels:` to replace the recommended download list, `samplingDefaults:` on individual curated entries to supply optional lab/model defaults, or `labelPolicy:` to replace or suppress picker labels.
 
