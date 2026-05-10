@@ -9,8 +9,8 @@ let localLlamaBinaryArtifactPath = "Vendor/llama-artifacts/release/llama.xcframe
 let localLlamaBinaryArtifactExists = FileManager.default.fileExists(
     atPath: "\(packageRoot)/\(localLlamaBinaryArtifactPath)"
 )
-let llamaBinaryArtifactURL = ""
-let llamaBinaryArtifactChecksum = ""
+let llamaBinaryArtifactURL = "https://github.com/carbocation/CarbocationLocalLLM/releases/download/v0.20.0/llama.xcframework.zip"
+let llamaBinaryArtifactChecksum = "eaf229dab5449348dafc479ba44056a2b4c46b964faf1c9234e26fdde26fd25d"
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
 let forceSourceLlama = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA"] == "1"
 
