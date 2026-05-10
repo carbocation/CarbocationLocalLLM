@@ -461,11 +461,22 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
         }
 
         return ModelLibrarySnapshot(
-            models: found.sorted {
-                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-            },
+            models: found.sorted(by: Self.modelSortPrecedes),
             partials: ModelDownloader.listPartials(in: root)
         )
+    }
+
+    private static func modelSortPrecedes(_ lhs: InstalledModel, _ rhs: InstalledModel) -> Bool {
+        if lhs.sizeBytes != rhs.sizeBytes {
+            return lhs.sizeBytes < rhs.sizeBytes
+        }
+
+        let nameComparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+        if nameComparison != .orderedSame {
+            return nameComparison == .orderedAscending
+        }
+
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private func synthesizeMetadata(for directory: URL) -> InstalledModel? {

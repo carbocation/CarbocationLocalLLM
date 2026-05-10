@@ -741,6 +741,60 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     @MainActor
+    func testModelLibraryOrdersInstalledModelsBySizeThenNameThenID() async throws {
+        let root = try makeTemporaryDirectory()
+        let sourcesRoot = root.appendingPathComponent("Sources", isDirectory: true)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourcesRoot, withIntermediateDirectories: true)
+        let library = ModelLibrary(root: modelsRoot)
+
+        let largest = try await addFakeModel(
+            to: library,
+            sourcesRoot: sourcesRoot,
+            displayName: "Zulu",
+            filename: "zulu-Q8_0.gguf",
+            sizeBytes: 300
+        )
+        let nameTieSecond = try await addFakeModel(
+            to: library,
+            sourcesRoot: sourcesRoot,
+            displayName: "bravo",
+            filename: "bravo-Q4_K_M.gguf",
+            sizeBytes: 100
+        )
+        let nameTieFirst = try await addFakeModel(
+            to: library,
+            sourcesRoot: sourcesRoot,
+            displayName: "Alpha",
+            filename: "alpha-Q4_K_M.gguf",
+            sizeBytes: 100
+        )
+        let idTieFirst = try await addFakeModel(
+            to: library,
+            sourcesRoot: sourcesRoot,
+            displayName: "Same",
+            filename: "same-a-Q5_K_M.gguf",
+            sizeBytes: 200
+        )
+        let idTieSecond = try await addFakeModel(
+            to: library,
+            sourcesRoot: sourcesRoot,
+            displayName: "Same",
+            filename: "same-b-Q5_K_M.gguf",
+            sizeBytes: 200
+        )
+
+        let idTieOrder = [idTieFirst, idTieSecond].sorted {
+            $0.id.uuidString < $1.id.uuidString
+        }
+        XCTAssertEqual(
+            library.models.map(\.id),
+            [nameTieFirst.id, nameTieSecond.id] + idTieOrder.map(\.id) + [largest.id]
+        )
+        XCTAssertEqual(library.models.map(\.sizeBytes), [100, 100, 200, 200, 300])
+    }
+
+    @MainActor
     func testModelLibraryResolveInstalledModelRefreshesOnDemand() async throws {
         let root = try makeTemporaryDirectory()
         let modelID = UUID()
@@ -1470,6 +1524,25 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .appendingPathComponent("CarbocationLocalLLMTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func addFakeModel(
+        to library: ModelLibrary,
+        sourcesRoot: URL,
+        displayName: String,
+        filename: String,
+        sizeBytes: Int64
+    ) async throws -> InstalledModel {
+        let source = sourcesRoot.appendingPathComponent("\(UUID().uuidString)-\(filename)")
+        try Data("fake gguf".utf8).write(to: source)
+        return try await library.add(
+            weightsAt: source,
+            displayName: displayName,
+            filename: filename,
+            sizeBytes: sizeBytes,
+            source: .imported,
+            contextLength: 4_096
+        )
     }
 
     private static let mockCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
