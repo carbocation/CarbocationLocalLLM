@@ -23,6 +23,10 @@ extension LlamaEngine {
         user: String,
         options: GenerationOptions
     ) throws -> PromptFormattingResult {
+        guard vocabulary != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
         if let chatTemplate {
             switch preparedChatTemplate {
             case .swiftJinja(let formatter):
@@ -125,6 +129,10 @@ extension LlamaEngine {
         tools: [LLMToolDefinition],
         options: GenerationOptions
     ) throws -> PromptFormattingResult {
+        guard vocabulary != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
         guard chatTemplate != nil else {
             throw LLMEngineError.chatTemplateUnavailable(Self.templateUnavailableDescription(
                 embeddedTemplate: nil,

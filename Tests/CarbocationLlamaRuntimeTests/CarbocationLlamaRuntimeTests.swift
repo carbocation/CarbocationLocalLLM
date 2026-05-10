@@ -13,6 +13,124 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(LlamaRuntimeSmoke.defaultContextBatchSize(), 0)
     }
 
+    func testGenerateWithoutLoadedModelReportsNoModelLoaded() async throws {
+        let engine = LlamaEngine()
+
+        do {
+            _ = try await engine.generate(
+                system: "System",
+                prompt: "User",
+                options: GenerationOptions(),
+                onPhaseAwareEvent: { _ in }
+            )
+            XCTFail("Expected unloaded generation to fail.")
+        } catch let error as LLMEngineError {
+            guard case .noModelLoaded = error else {
+                return XCTFail("Expected noModelLoaded, got \(error)")
+            }
+        }
+    }
+
+    func testGenerateWithToolsWithoutLoadedModelReportsNoModelLoaded() async throws {
+        let engine = LlamaEngine()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test data.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        do {
+            _ = try await engine.generateWithTools(LLMToolGenerationRequest(
+                prompt: "Use lookup.",
+                tools: [tool]
+            ))
+            XCTFail("Expected unloaded tool generation to fail.")
+        } catch let error as LLMEngineError {
+            guard case .noModelLoaded = error else {
+                return XCTFail("Expected noModelLoaded, got \(error)")
+            }
+        }
+    }
+
+    func testUnloadDuringSuspendedToolGenerationDefersUntilContinuation() async throws {
+        let engine = LlamaEngine()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "Gemma 4 Vocab",
+            requestedContext: 1_024
+        )
+
+        let segmentScript = ToolGenerationSegmentScript()
+        await engine.setToolAwareGenerationSegmentOverrideForTesting { input in
+            await segmentScript.nextSegment(for: input)
+        }
+
+        let toolGate = SuspendedToolGate()
+        let lookupTool = LLMTool(
+            definition: LLMToolDefinition(
+                name: "lookup",
+                description: "Lookup test data.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "query": ["type": "string"]
+                    ],
+                    "required": ["query"]
+                ]
+            )
+        ) { _ in
+            await toolGate.suspendUntilReleased()
+            return ["answer": "tool output"]
+        }
+
+        let generationTask = Task {
+            try await engine.generateWithTools(LLMToolGenerationRequest(
+                system: "System",
+                prompt: "Use lookup.",
+                tools: [lookupTool],
+                maxToolRounds: 1
+            ))
+        }
+
+        try await withTimeout(seconds: 5) {
+            await toolGate.waitUntilStarted()
+        }
+
+        await engine.unload()
+        let loadedInfoAfterUnloadRequest = await engine.currentLoadedModelInfo()
+        XCTAssertNotNil(
+            loadedInfoAfterUnloadRequest,
+            "unload() should be deferred while a tool generation is active."
+        )
+
+        await toolGate.release()
+        let result = try await withTimeout(seconds: 5) {
+            try await generationTask.value
+        }
+
+        XCTAssertEqual(result.finalText, "Final answer after tool.")
+        XCTAssertEqual(result.stopReason, "complete")
+        XCTAssertEqual(result.roundsCompleted, 1)
+        XCTAssertEqual(result.toolCalls.map(\.name), ["lookup"])
+        XCTAssertEqual(result.toolOutputs.map(\.content), [["answer": "tool output"]])
+        let loadedInfoAfterGeneration = await engine.currentLoadedModelInfo()
+        XCTAssertNil(
+            loadedInfoAfterGeneration,
+            "Deferred unload should run after the active generation completes."
+        )
+
+        let snapshot = await segmentScript.snapshot()
+        XCTAssertEqual(snapshot.count, 2)
+        XCTAssertFalse(snapshot.prompts[0].contains("<|tool_response>"))
+        XCTAssertTrue(snapshot.prompts[0].contains("<|tool>"))
+        XCTAssertTrue(snapshot.prompts[0].contains("declaration:lookup"))
+        XCTAssertTrue(snapshot.prompts[1].contains(#"<|tool_call>call:lookup{query:<|"|>sp500<|"|>}<tool_call|>"#))
+        XCTAssertTrue(snapshot.prompts[1].contains("<|turn>tool\n<turn|>"))
+        XCTAssertTrue(snapshot.prompts[1].contains("Use the tool outputs above to continue the answer."))
+        XCTAssertEqual(snapshot.templateModes, [.embedded, .embedded])
+        XCTAssertEqual(snapshot.isInternalContinuationFlags, [false, true])
+    }
+
     func testPrefillRangesSplitByBatchSize() {
         let ranges = LlamaEngine.prefillRanges(tokenCount: 10, maxBatchSize: 4)
             .map { [$0.lowerBound, $0.upperBound] }
@@ -1321,8 +1439,125 @@ private extension CarbocationLlamaRuntimeTests {
             .appendingPathComponent("Vendor/llama.cpp/models/templates/google-gemma-4-31B-it.jinja")
     }
 
+    static var gemma4VocabModelURL: URL {
+        packageRoot
+            .appendingPathComponent("Vendor/llama.cpp/models/ggml-vocab-gemma-4.gguf")
+    }
+
     static var qwen35TemplateURL: URL {
         packageRoot
             .appendingPathComponent("Vendor/llama.cpp/models/templates/Qwen3.5-4B.jinja")
+    }
+}
+
+private actor SuspendedToolGate {
+    private var started = false
+    private var released = false
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                startedContinuation = continuation
+            }
+        } onCancel: {
+            Task { await self.cancelStartedWait() }
+        }
+    }
+
+    func suspendUntilReleased() async {
+        started = true
+        startedContinuation?.resume()
+        startedContinuation = nil
+
+        if released { return }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        } onCancel: {
+            Task { await self.release() }
+        }
+    }
+
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    private func cancelStartedWait() {
+        startedContinuation?.resume()
+        startedContinuation = nil
+    }
+}
+
+private actor ToolGenerationSegmentScript {
+    private var prompts: [String] = []
+    private var templateModes: [LLMChatTemplateMode] = []
+    private var isInternalContinuationFlags: [Bool] = []
+
+    func nextSegment(
+        for input: LlamaEngine.ToolAwareGenerationSegmentOverrideInput
+    ) -> LlamaEngine.ToolAwareGenerationSegmentOverrideOutput {
+        prompts.append(input.renderedPrompt)
+        templateModes.append(input.templateMode)
+        isInternalContinuationFlags.append(input.isInternalContinuation)
+
+        if prompts.count == 1 {
+            return LlamaEngine.ToolAwareGenerationSegmentOverrideOutput(
+                toolCalls: [
+                    LLMToolCall(
+                        executionID: "model_lookup",
+                        name: "lookup",
+                        arguments: ["query": "sp500"],
+                        triggerPhase: .final
+                    )
+                ],
+                stopReason: "tool-call-complete",
+                triggerPhase: .final
+            )
+        }
+
+        return LlamaEngine.ToolAwareGenerationSegmentOverrideOutput(
+            finalText: "Final answer after tool.",
+            stopReason: "eog",
+            triggerPhase: .final,
+            generatedTokens: 4
+        )
+    }
+
+    func snapshot() -> (
+        count: Int,
+        prompts: [String],
+        templateModes: [LLMChatTemplateMode],
+        isInternalContinuationFlags: [Bool]
+    ) {
+        (prompts.count, prompts, templateModes, isInternalContinuationFlags)
+    }
+}
+
+private enum TestTimeoutError: Error {
+    case timedOut
+}
+
+private func withTimeout<T: Sendable>(
+    seconds: UInt64,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            throw TestTimeoutError.timedOut
+        }
+
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
     }
 }

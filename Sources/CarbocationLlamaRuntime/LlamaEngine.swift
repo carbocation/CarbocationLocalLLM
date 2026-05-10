@@ -193,6 +193,41 @@ public actor LlamaEngine: LLMEngine {
         var outputProfile: OutputSanitizationProfile
     }
 
+    struct ToolAwareGenerationSegmentOverrideInput: Sendable {
+        var renderedPrompt: String
+        var templateMode: LLMChatTemplateMode
+        var isInternalContinuation: Bool
+    }
+
+    struct ToolAwareGenerationSegmentOverrideOutput: Sendable {
+        var finalText: String?
+        var toolCalls: [LLMToolCall]
+        var stopReason: String
+        var triggerPhase: LLMStreamContentPhase?
+        var remainingThinkingBudgetTokens: Int?
+        var generatedTokens: Int
+
+        init(
+            finalText: String? = nil,
+            toolCalls: [LLMToolCall] = [],
+            stopReason: String,
+            triggerPhase: LLMStreamContentPhase? = nil,
+            remainingThinkingBudgetTokens: Int? = nil,
+            generatedTokens: Int = 0
+        ) {
+            self.finalText = finalText
+            self.toolCalls = toolCalls
+            self.stopReason = stopReason
+            self.triggerPhase = triggerPhase
+            self.remainingThinkingBudgetTokens = remainingThinkingBudgetTokens
+            self.generatedTokens = generatedTokens
+        }
+    }
+
+    typealias ToolAwareGenerationSegmentOverride = @Sendable (
+        ToolAwareGenerationSegmentOverrideInput
+    ) async throws -> ToolAwareGenerationSegmentOverrideOutput
+
     enum PreparedChatTemplate {
         case swiftJinja(ChatTemplatePromptFormatter)
         case unavailable(String)
@@ -209,6 +244,9 @@ public actor LlamaEngine: LLMEngine {
     var preparedChatTemplate: PreparedChatTemplate?
     var outputSanitizationProfile: OutputSanitizationProfile = .empty
     var cachedPromptTokens: [llama_token]?
+    var toolAwareGenerationSegmentOverride: ToolAwareGenerationSegmentOverride?
+    private var activeGenerationCount = 0
+    private var unloadAfterActiveGeneration = false
 
     public init(configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()) {
         self.configuration = configuration
@@ -374,7 +412,11 @@ public actor LlamaEngine: LLMEngine {
             }
         }
 
-        unload()
+        guard activeGenerationCount == 0 else {
+            throw LLMEngineError.modelLoadFailed("Cannot load a new model while generation is active.")
+        }
+
+        performUnload()
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = configuration.gpuLayerCount
@@ -458,10 +500,105 @@ public actor LlamaEngine: LLMEngine {
         return info
     }
 
+    @discardableResult
+    func loadVocabularyOnlyForTesting(
+        modelAt url: URL,
+        displayName: String? = nil,
+        filename: String? = nil,
+        requestedContext: Int
+    ) throws -> LlamaLoadedModelInfo {
+        let descriptor = LlamaModelDescriptor(
+            url: url,
+            displayName: displayName,
+            filename: filename
+        )
+        let path = descriptor.url.path
+
+        guard activeGenerationCount == 0 else {
+            throw LLMEngineError.modelLoadFailed("Cannot load a new model while generation is active.")
+        }
+
+        performUnload()
+
+        var modelParams = llama_model_default_params()
+        modelParams.vocab_only = true
+        modelParams.use_mmap = true
+        modelParams.configureForCPUOnly()
+
+        guard let loadedModel = path.withCString({ cPath in
+            llama_model_load_from_file(cPath, modelParams)
+        }) else {
+            throw LLMEngineError.modelLoadFailed("llama_model_load_from_file returned null")
+        }
+
+        guard let loadedVocabulary = llama_model_get_vocab(loadedModel) else {
+            llama_model_free(loadedModel)
+            throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
+        }
+
+        let trainingContext = Int(llama_model_n_ctx_train(loadedModel))
+        let chosenContext = Self.clampedContextSize(
+            requestedContext: requestedContext,
+            trainingContext: trainingContext
+        )
+        let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
+        let preparedTemplate = Self.prepareChatTemplate(template)
+        let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+        let info = LlamaLoadedModelInfo(
+            modelID: nil,
+            modelPath: path,
+            displayName: descriptor.displayName,
+            filename: descriptor.filename,
+            contextSize: chosenContext,
+            trainingContextSize: max(0, trainingContext),
+            hasEmbeddedChatTemplate: template != nil
+        )
+
+        self.model = loadedModel
+        self.context = nil
+        self.vocabulary = loadedVocabulary
+        self.loadedDescriptor = descriptor
+        self.loadedInfo = info
+        self.chatTemplate = template
+        self.preparedChatTemplate = preparedTemplate
+        self.outputSanitizationProfile = outputProfile
+        self.cachedPromptTokens = nil
+
+        Self.logOutputSanitizationProfile(outputProfile, descriptor: descriptor, hasEmbeddedTemplate: template != nil)
+
+        return info
+    }
+
+    func setToolAwareGenerationSegmentOverrideForTesting(
+        _ override: ToolAwareGenerationSegmentOverride?
+    ) {
+        toolAwareGenerationSegmentOverride = override
+    }
+
     public func unload() {
+        guard activeGenerationCount == 0 else {
+            unloadAfterActiveGeneration = true
+            return
+        }
+        performUnload()
+    }
+
+    func beginGenerationLease() {
+        activeGenerationCount += 1
+    }
+
+    func endGenerationLease() {
+        activeGenerationCount = max(0, activeGenerationCount - 1)
+        if activeGenerationCount == 0, unloadAfterActiveGeneration {
+            performUnload()
+        }
+    }
+
+    private func performUnload() {
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
 
+        unloadAfterActiveGeneration = false
         self.model = nil
         self.context = nil
         self.vocabulary = nil
@@ -498,6 +635,13 @@ public actor LlamaEngine: LLMEngine {
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
+        guard context != nil, vocabulary != nil, loadedInfo != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        beginGenerationLease()
+        defer { endGenerationLease() }
+
         let promptFormatting: PromptFormattingResult
         do {
             promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)

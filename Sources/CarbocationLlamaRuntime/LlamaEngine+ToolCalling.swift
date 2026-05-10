@@ -8,6 +8,14 @@ extension LlamaEngine {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolGenerationResult {
+        guard vocabulary != nil,
+              context != nil || toolAwareGenerationSegmentOverride != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        beginGenerationLease()
+        defer { endGenerationLease() }
+
         try LLMToolRuntime.validate(request)
         let stats = LlamaToolGenerationStatsAccumulator()
 
@@ -438,6 +446,20 @@ private extension LlamaEngine {
         emitDoneOnToolInterception: Bool = false,
         onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
     ) async throws -> ToolAwareGenerationSegment {
+        if let override = toolAwareGenerationSegmentOverride {
+            streamState.beginSegment()
+            return try await generateToolAwareSegmentOverride(
+                override,
+                promptFormatting: promptFormatting,
+                streamState: streamState,
+                stats: stats,
+                isInternalContinuation: isInternalContinuation,
+                emitDoneOnCompletion: emitDoneOnCompletion,
+                emitDoneOnToolInterception: emitDoneOnToolInterception,
+                onPhaseAwareEvent: onPhaseAwareEvent
+            )
+        }
+
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
@@ -908,6 +930,80 @@ private extension LlamaEngine {
             stopReason: stopReason,
             triggerPhase: interceptedToolCalls.first?.triggerPhase,
             remainingThinkingBudgetTokens: activeToolCaptureRemainingBudget.flatMap { $0 >= 0 ? $0 : nil }
+        )
+    }
+
+    func generateToolAwareSegmentOverride(
+        _ override: ToolAwareGenerationSegmentOverride,
+        promptFormatting: PromptFormattingResult,
+        streamState: LlamaToolFinalAnswerStreamState,
+        stats: LlamaToolGenerationStatsAccumulator,
+        isInternalContinuation: Bool,
+        emitDoneOnCompletion: Bool,
+        emitDoneOnToolInterception: Bool,
+        onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    ) async throws -> ToolAwareGenerationSegment {
+        let startedAt = Date()
+        var currentPhase = streamState.phase
+
+        func emit(_ event: LLMPhaseAwareStreamEvent) {
+            stats.record(event)
+            onPhaseAwareEvent(.finalAnswerEvent(event))
+        }
+
+        if !streamState.didEmitRequestSent {
+            streamState.didEmitRequestSent = true
+            emit(.requestSent(phase: currentPhase))
+        }
+
+        let output = try await override(ToolAwareGenerationSegmentOverrideInput(
+            renderedPrompt: promptFormatting.text,
+            templateMode: promptFormatting.mode,
+            isInternalContinuation: isInternalContinuation
+        ))
+
+        if let triggerPhase = output.triggerPhase {
+            currentPhase = triggerPhase
+            streamState.phase = triggerPhase
+        }
+
+        if output.finalText != nil, !streamState.didEmitFirstByte {
+            streamState.didEmitFirstByte = true
+            emit(.firstByteReceived(
+                after: Date().timeIntervalSince(startedAt),
+                phase: currentPhase
+            ))
+        }
+
+        if let finalText = output.finalText {
+            streamState.emit(
+                finalText,
+                snapshotReason: output.toolCalls.isEmpty ? .completed : .streamCorrection
+            )
+        }
+
+        emit(.generationStats(
+            promptTokens: 0,
+            generatedTokens: output.generatedTokens,
+            stopReason: output.stopReason,
+            templateMode: promptFormatting.mode,
+            phase: currentPhase
+        ))
+
+        if emitDoneOnCompletion,
+           output.toolCalls.isEmpty || emitDoneOnToolInterception {
+            emit(.done(
+                totalBytes: streamState.text.utf8.count,
+                duration: Date().timeIntervalSince(startedAt),
+                phase: currentPhase
+            ))
+        }
+
+        return ToolAwareGenerationSegment(
+            toolCalls: output.toolCalls,
+            stopReason: output.stopReason,
+            triggerPhase: output.triggerPhase,
+            remainingThinkingBudgetTokens: output.remainingThinkingBudgetTokens
         )
     }
 }
