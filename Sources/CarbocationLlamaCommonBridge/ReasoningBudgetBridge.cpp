@@ -144,3 +144,12 @@ extern "C" carbocation_llama_reasoning_budget_state carbocation_llama_reasoning_
 ) {
     return to_bridge_state(common_reasoning_budget_get_state(sampler));
 }
+
+extern "C" int32_t carbocation_llama_reasoning_budget_sampler_remaining(
+    const llama_sampler * sampler
+) {
+    if (sampler == nullptr) {
+        return -1;
+    }
+    return ((const common_reasoning_budget_ctx *) sampler->ctx)->remaining;
+}

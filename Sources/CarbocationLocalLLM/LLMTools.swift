@@ -70,17 +70,21 @@ public struct LLMToolCall: Codable, Hashable, Sendable, Identifiable {
     public var rawID: String?
     public var name: String
     public var arguments: LLMJSONValue
+    /// Phase of the raw assistant stream where this tool call began, when the provider exposes that signal.
+    public var triggerPhase: LLMStreamContentPhase?
 
     public init(
         executionID: String,
         rawID: String? = nil,
         name: String,
-        arguments: LLMJSONValue
+        arguments: LLMJSONValue,
+        triggerPhase: LLMStreamContentPhase? = nil
     ) {
         self.executionID = executionID
         self.rawID = Self.normalizedRawID(rawID)
         self.name = name
         self.arguments = arguments
+        self.triggerPhase = triggerPhase
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -89,6 +93,7 @@ public struct LLMToolCall: Codable, Hashable, Sendable, Identifiable {
         case legacyID = "id"
         case name
         case arguments
+        case triggerPhase
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,7 +104,8 @@ public struct LLMToolCall: Codable, Hashable, Sendable, Identifiable {
             executionID: executionID,
             rawID: try container.decodeIfPresent(String.self, forKey: .rawID),
             name: try container.decode(String.self, forKey: .name),
-            arguments: try container.decode(LLMJSONValue.self, forKey: .arguments)
+            arguments: try container.decode(LLMJSONValue.self, forKey: .arguments),
+            triggerPhase: try container.decodeIfPresent(LLMStreamContentPhase.self, forKey: .triggerPhase)
         )
     }
 
@@ -109,6 +115,7 @@ public struct LLMToolCall: Codable, Hashable, Sendable, Identifiable {
         try container.encodeIfPresent(rawID, forKey: .rawID)
         try container.encode(name, forKey: .name)
         try container.encode(arguments, forKey: .arguments)
+        try container.encodeIfPresent(triggerPhase, forKey: .triggerPhase)
     }
 
     private static func normalizedRawID(_ rawID: String?) -> String? {
@@ -220,10 +227,8 @@ extension LLMToolChoice: Codable {
 public struct LLMToolGenerationRequest: Sendable {
     public var system: String
     public var prompt: String
-    /// Options for the user-visible final answer turn.
+    /// Options for the single tool-aware generation flow.
     public var options: GenerationOptions
-    /// Options for hidden tool-decision turns. Defaults to a fast, bounded, no-thinking policy.
-    public var toolCandidateOptions: GenerationOptions
     public var tools: [LLMTool]
     public var toolChoice: LLMToolChoice
     public var maxToolRounds: Int
@@ -232,7 +237,6 @@ public struct LLMToolGenerationRequest: Sendable {
         system: String = "",
         prompt: String,
         options: GenerationOptions = GenerationOptions(),
-        toolCandidateOptions: GenerationOptions = .toolCandidateDefault,
         tools: [LLMTool] = [],
         toolChoice: LLMToolChoice = .auto,
         maxToolRounds: Int = 4
@@ -240,7 +244,6 @@ public struct LLMToolGenerationRequest: Sendable {
         self.system = system
         self.prompt = prompt
         self.options = options
-        self.toolCandidateOptions = toolCandidateOptions
         self.tools = tools
         self.toolChoice = toolChoice
         self.maxToolRounds = maxToolRounds
@@ -270,9 +273,7 @@ public struct LLMToolGenerationResult: Codable, Hashable, Sendable {
 }
 
 public enum LLMToolPhaseAwareStreamEvent: Sendable {
-    /// Phase-aware model telemetry from hidden tool-candidate turns. This may include thinking text or tool-call JSON and is not safe for chat display.
-    case toolCandidateEvent(round: Int, event: LLMPhaseAwareStreamEvent)
-    /// Phase-aware events from the dedicated final-answer turn. Apps can render final-answer deltas and snapshots from this event.
+    /// Phase-aware events for user-visible assistant output. Apps can render final-answer deltas and snapshots from this event.
     case finalAnswerEvent(LLMPhaseAwareStreamEvent)
     case toolRoundStarted(round: Int)
     case toolCallStarted(LLMToolCall)
@@ -285,6 +286,7 @@ public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {
     case duplicateToolName(String)
     case invalidDefinition(String)
     case invalidRequest(String)
+    case unsupportedToolMode(String)
 
     public var errorDescription: String? {
         switch self {
@@ -294,7 +296,142 @@ public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {
             return "Invalid tool definition: \(detail)"
         case .invalidRequest(let detail):
             return "Invalid tool request: \(detail)"
+        case .unsupportedToolMode(let detail):
+            return "Tool generation is unsupported: \(detail)"
         }
+    }
+}
+
+public struct LLMToolCallIDAllocator: Sendable {
+    private var usedToolCallIDs = Set<String>()
+    private var nextFallbackToolCallNumber = 1
+
+    public init() {}
+
+    public mutating func materialize(_ parsedCalls: [LLMToolCall]) -> [LLMToolCall] {
+        let reservedRawIDs = Set(parsedCalls.compactMap(\.rawID).filter { !usedToolCallIDs.contains($0) })
+        return parsedCalls.map { parsedCall in
+            if let rawID = parsedCall.rawID,
+               !usedToolCallIDs.contains(rawID) {
+                usedToolCallIDs.insert(rawID)
+                return LLMToolCall(
+                    executionID: rawID,
+                    rawID: rawID,
+                    name: parsedCall.name,
+                    arguments: parsedCall.arguments,
+                    triggerPhase: parsedCall.triggerPhase
+                )
+            }
+
+            return LLMToolCall(
+                executionID: nextUniqueFallbackToolCallID(reserving: reservedRawIDs),
+                rawID: parsedCall.rawID,
+                name: parsedCall.name,
+                arguments: parsedCall.arguments,
+                triggerPhase: parsedCall.triggerPhase
+            )
+        }
+    }
+
+    private mutating func nextUniqueFallbackToolCallID(reserving reservedIDs: Set<String>) -> String {
+        while true {
+            let candidate = "call_\(nextFallbackToolCallNumber)"
+            nextFallbackToolCallNumber += 1
+            guard !usedToolCallIDs.contains(candidate),
+                  !reservedIDs.contains(candidate) else {
+                continue
+            }
+            usedToolCallIDs.insert(candidate)
+            return candidate
+        }
+    }
+}
+
+public enum LLMToolRuntime {
+    public static func validate(_ request: LLMToolGenerationRequest) throws {
+        guard request.maxToolRounds >= 0 else {
+            throw LLMToolError.invalidRequest("maxToolRounds must be nonnegative.")
+        }
+        if case .required = request.toolChoice, request.tools.isEmpty {
+            throw LLMToolError.invalidRequest("toolChoice required cannot be used without tools.")
+        }
+        if case .named(let name) = request.toolChoice,
+           !request.tools.contains(where: { $0.definition.name == name }) {
+            throw LLMToolError.invalidRequest("toolChoice named an unavailable tool: \(name).")
+        }
+
+        var seen = Set<String>()
+        for tool in request.tools {
+            try tool.definition.validate()
+            guard seen.insert(tool.definition.name).inserted else {
+                throw LLMToolError.duplicateToolName(tool.definition.name)
+            }
+        }
+    }
+
+    public static func index(_ tools: [LLMTool]) -> [String: LLMTool] {
+        Dictionary(uniqueKeysWithValues: tools.map { ($0.definition.name, $0) })
+    }
+
+    public static func execute(
+        calls: [LLMToolCall],
+        toolsByName: [String: LLMTool],
+        onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    ) async throws -> [LLMToolOutput] {
+        var outputs: [LLMToolOutput] = []
+        for call in calls {
+            try Task.checkCancellation()
+            onPhaseAwareEvent(.toolCallStarted(call))
+            let output: LLMToolOutput
+            if let tool = toolsByName[call.name] {
+                do {
+                    let content = try await tool.call(arguments: call.arguments)
+                    output = LLMToolOutput(
+                        callID: call.executionID,
+                        name: call.name,
+                        content: content,
+                        isError: false
+                    )
+                    onPhaseAwareEvent(.toolCallCompleted(output))
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    output = LLMToolOutput(
+                        callID: call.executionID,
+                        name: call.name,
+                        content: toolErrorContent(
+                            message: error.localizedDescription,
+                            code: "tool_execution_failed"
+                        ),
+                        isError: true
+                    )
+                    onPhaseAwareEvent(.toolCallFailed(output))
+                }
+            } else {
+                output = LLMToolOutput(
+                    callID: call.executionID,
+                    name: call.name,
+                    content: toolErrorContent(
+                        message: "Unknown tool: \(call.name)",
+                        code: "unknown_tool"
+                    ),
+                    isError: true
+                )
+                onPhaseAwareEvent(.toolCallFailed(output))
+            }
+            outputs.append(output)
+        }
+        return outputs
+    }
+
+    public static func toolErrorContent(message: String, code: String) -> LLMJSONValue {
+        .object([
+            "ok": .bool(false),
+            "error": .object([
+                "code": .string(code),
+                "message": .string(message)
+            ])
+        ])
     }
 }
 

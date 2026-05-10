@@ -261,14 +261,6 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions())
     }
 
-    public static var toolCandidateDefault: GenerationOptions {
-        LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions(
-            maxOutputTokens: 256,
-            stopAtBalancedJSON: true,
-            enableThinking: false
-        ))
-    }
-
     public func with(grammar: String?) -> GenerationOptions {
         var copy = self
         copy.grammar = grammar

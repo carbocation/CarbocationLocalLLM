@@ -503,6 +503,65 @@ public actor AppleIntelligenceEngine: LLMEngine {
         throw AppleIntelligenceEngineError.unavailable(.unavailable(.sdkUnavailable))
         #endif
     }
+
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
+        try LLMToolRuntime.validate(request)
+        let stats = AppleToolGenerationStatsAccumulator()
+
+        func emitAggregateStats(stopReason: String) {
+            let snapshot = stats.snapshot(fallbackStopReason: stopReason)
+            onPhaseAwareEvent(.aggregateGenerationStats(
+                promptTokens: snapshot.promptTokens,
+                generatedTokens: snapshot.generatedTokens,
+                stopReason: snapshot.stopReason
+            ))
+        }
+
+        guard !request.tools.isEmpty, request.toolChoice != .none else {
+            let text = try await generate(
+                system: request.system,
+                prompt: request.prompt,
+                options: request.options,
+                onPhaseAwareEvent: { event in
+                    stats.record(event)
+                    onPhaseAwareEvent(.finalAnswerEvent(event))
+                }
+            )
+            let snapshot = stats.snapshot(fallbackStopReason: "complete")
+            emitAggregateStats(stopReason: snapshot.stopReason)
+            return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)
+        }
+
+        let availability = Self.availability()
+        guard availability.isAvailable else {
+            throw AppleIntelligenceEngineError.unavailable(availability)
+        }
+
+        let resolvedOptions = AppleIntelligenceOptionsMapper.resolve(request.options)
+        if configuration.unsupportedFeatureBehavior == .fail,
+           !resolvedOptions.unsupportedFeatures.isEmpty {
+            throw AppleIntelligenceEngineError.unsupportedFeatures(resolvedOptions.unsupportedFeatures)
+        }
+
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw AppleIntelligenceEngineError.unavailable(.unavailable(.operatingSystemUnavailable))
+        }
+        let result = try await generateWithFoundationModelsTools(
+            request: request,
+            resolvedOptions: resolvedOptions,
+            stats: stats,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+        emitAggregateStats(stopReason: result.stopReason)
+        return result
+        #else
+        throw AppleIntelligenceEngineError.unavailable(.unavailable(.sdkUnavailable))
+        #endif
+    }
 }
 
 public actor AppleIntelligenceSession {
@@ -595,6 +654,30 @@ public actor AppleIntelligenceSession {
     }
 }
 
+private final class AppleToolGenerationStatsAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var promptTokens = 0
+    private var generatedTokens = 0
+    private var stopReason: String?
+
+    func record(_ event: LLMPhaseAwareStreamEvent) {
+        guard case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _) = event else {
+            return
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        self.promptTokens += promptTokens
+        self.generatedTokens += generatedTokens
+        self.stopReason = stopReason
+    }
+
+    func snapshot(fallbackStopReason: String) -> (promptTokens: Int, generatedTokens: Int, stopReason: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (promptTokens, generatedTokens, stopReason ?? fallbackStopReason)
+    }
+}
+
 #if canImport(FoundationModels)
 extension AppleIntelligenceEngine {
     @available(iOS 26.0, macOS 26.0, *)
@@ -612,6 +695,138 @@ extension AppleIntelligenceEngine {
         case .unavailable:
             return .unavailable(.unknown)
         }
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private func generateWithFoundationModelsTools(
+        request: LLMToolGenerationRequest,
+        resolvedOptions: AppleIntelligenceResolvedOptions,
+        stats: AppleToolGenerationStatsAccumulator,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    ) async throws -> LLMToolGenerationResult {
+        let phase = LLMStreamContentPhase.final
+        func emit(_ event: LLMPhaseAwareStreamEvent) {
+            stats.record(event)
+            onPhaseAwareEvent(.finalAnswerEvent(event))
+        }
+
+        emit(.requestSent(phase: phase))
+        let startedAt = Date()
+
+        let recorder = AppleNativeToolRecorder(
+            maxToolCalls: request.maxToolRounds,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+        let effectiveTools = Self.effectiveTools(
+            request.tools,
+            toolChoice: request.toolChoice
+        )
+        let adapters: [any Tool] = try effectiveTools.map {
+            try AppleNativeToolAdapter(tool: $0, recorder: recorder)
+        }
+        let instructions = Self.toolInstructions(
+            system: request.system,
+            options: request.options,
+            toolChoice: request.toolChoice
+        )
+        let session = LanguageModelSession(
+            model: .default,
+            tools: adapters,
+            instructions: instructions.isEmpty ? nil : instructions
+        )
+
+        var streamedText = ""
+        var sawFirstSnapshot = false
+        let stream = session.streamResponse(
+            to: request.prompt,
+            options: Self.foundationModelsOptions(from: resolvedOptions)
+        )
+
+        for try await snapshot in stream {
+            let nextText = snapshot.content
+            if !sawFirstSnapshot {
+                sawFirstSnapshot = true
+                emit(.firstByteReceived(
+                    after: Date().timeIntervalSince(startedAt),
+                    phase: phase
+                ))
+            }
+            guard nextText != streamedText else { continue }
+            if nextText.hasPrefix(streamedText) {
+                let delta = String(nextText.dropFirst(streamedText.count))
+                if !delta.isEmpty {
+                    emit(.finalAnswerDelta(text: delta, bytesSoFar: nextText.utf8.count))
+                }
+            } else {
+                emit(.finalAnswerSnapshot(
+                    text: nextText,
+                    bytesSoFar: nextText.utf8.count,
+                    reason: .streamCorrection
+                ))
+            }
+            streamedText = nextText
+            emit(.tokenChunk(
+                preview: String(streamedText.suffix(60)),
+                bytesSoFar: streamedText.utf8.count,
+                phase: phase
+            ))
+        }
+
+        if !sawFirstSnapshot {
+            emit(.firstByteReceived(
+                after: Date().timeIntervalSince(startedAt),
+                phase: phase
+            ))
+        }
+
+        let processed = AppleIntelligenceResponsePostProcessor.process(
+            streamedText,
+            options: request.options
+        )
+        if processed.text != streamedText {
+            streamedText = processed.text
+            emit(.finalAnswerSnapshot(
+                text: streamedText,
+                bytesSoFar: streamedText.utf8.count,
+                reason: .completed
+            ))
+        }
+
+        let duration = Date().timeIntervalSince(startedAt)
+        let promptTokens = AppleIntelligencePromptBudget.estimatedPromptTokens(
+            system: instructions,
+            prompt: request.prompt,
+            options: request.options
+        )
+        let generatedTokens = TokenEstimator.estimate(text: streamedText)
+        let stopReason = recorder.reachedToolLimit
+            ? "max-tool-rounds"
+            : (processed.stopReason ?? stopReasonForCompletedResponse(
+                result: streamedText,
+                generatedTokens: generatedTokens,
+                options: request.options
+            ))
+
+        emit(.generationStats(
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            stopReason: stopReason,
+            templateMode: .unavailable,
+            phase: phase
+        ))
+        emit(.done(
+            totalBytes: streamedText.utf8.count,
+            duration: duration,
+            phase: phase
+        ))
+
+        return LLMToolGenerationResult(
+            finalText: streamedText,
+            toolCalls: recorder.calls,
+            toolOutputs: recorder.outputs,
+            roundsCompleted: recorder.executedToolCallCount,
+            stopReason: stopReason
+        )
     }
 
     @available(iOS 26.0, macOS 26.0, *)
@@ -711,6 +926,40 @@ extension AppleIntelligenceEngine {
         AppleIntelligencePromptBudget.instructions(system: system, options: options)
     }
 
+    private nonisolated static func toolInstructions(
+        system: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        toolChoice: LLMToolChoice
+    ) -> String {
+        var parts: [String] = []
+        let base = instructions(system: system, options: options)
+        if !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append(base)
+        }
+
+        switch toolChoice {
+        case .auto:
+            parts.append("Use available tools only when they help answer the user.")
+        case .none:
+            parts.append("Do not call tools.")
+        case .required:
+            parts.append("Call at least one available tool before giving a final answer.")
+        case .named(let name):
+            parts.append("If a tool is needed, call only \(name).")
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private nonisolated static func effectiveTools(
+        _ tools: [LLMTool],
+        toolChoice: LLMToolChoice
+    ) -> [LLMTool] {
+        if case .named(let name) = toolChoice {
+            return tools.filter { $0.definition.name == name }
+        }
+        return tools
+    }
+
     private nonisolated func stopReasonForCompletedResponse(
         result: String,
         generatedTokens: Int,
@@ -722,6 +971,247 @@ extension AppleIntelligenceEngine {
             return "max-tokens"
         }
         return "complete"
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+struct AppleNativeToolAdapter: Tool {
+    typealias Arguments = GeneratedContent
+    typealias Output = GeneratedContent
+
+    let tool: LLMTool
+    let recorder: AppleNativeToolRecorder
+    let parameters: GenerationSchema
+
+    var name: String { tool.definition.name }
+    var description: String { tool.definition.description }
+    var includesSchemaInInstructions: Bool { true }
+
+    init(tool: LLMTool, recorder: AppleNativeToolRecorder) throws {
+        self.tool = tool
+        self.recorder = recorder
+        self.parameters = try AppleNativeToolSchemaMapper.generationSchema(for: tool.definition)
+    }
+
+    func call(arguments: GeneratedContent) async throws -> GeneratedContent {
+        try await recorder.execute(tool: tool, arguments: arguments)
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+final class AppleNativeToolRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let maxToolCalls: Int
+    private let onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    private var nextToolCallNumber = 1
+    private var storedCalls: [LLMToolCall] = []
+    private var storedOutputs: [LLMToolOutput] = []
+    private var executedCount = 0
+    private var hitToolLimit = false
+
+    init(
+        maxToolCalls: Int,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    ) {
+        self.maxToolCalls = maxToolCalls
+        self.onPhaseAwareEvent = onPhaseAwareEvent
+    }
+
+    var calls: [LLMToolCall] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCalls
+    }
+
+    var outputs: [LLMToolOutput] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedOutputs
+    }
+
+    var executedToolCallCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return executedCount
+    }
+
+    var reachedToolLimit: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return hitToolLimit
+    }
+
+    func execute(tool: LLMTool, arguments: GeneratedContent) async throws -> GeneratedContent {
+        let call = makeCall(tool: tool, arguments: arguments)
+        onPhaseAwareEvent(.toolCallStarted(call))
+
+        guard reserveExecutionSlotIfAvailable() else {
+            let output = LLMToolOutput(
+                callID: call.executionID,
+                name: call.name,
+                content: LLMToolRuntime.toolErrorContent(
+                    message: "Maximum tool round limit reached.",
+                    code: "max_tool_rounds"
+                ),
+                isError: true
+            )
+            store(output: output)
+            onPhaseAwareEvent(.toolCallFailed(output))
+            return try Self.generatedContent(from: output.content)
+        }
+
+        do {
+            let content = try await tool.call(arguments: call.arguments)
+            let output = LLMToolOutput(
+                callID: call.executionID,
+                name: call.name,
+                content: content,
+                isError: false
+            )
+            store(output: output)
+            onPhaseAwareEvent(.toolCallCompleted(output))
+            return try Self.generatedContent(from: content)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let output = LLMToolOutput(
+                callID: call.executionID,
+                name: call.name,
+                content: LLMToolRuntime.toolErrorContent(
+                    message: error.localizedDescription,
+                    code: "tool_execution_failed"
+                ),
+                isError: true
+            )
+            store(output: output)
+            onPhaseAwareEvent(.toolCallFailed(output))
+            return try Self.generatedContent(from: output.content)
+        }
+    }
+
+    private func makeCall(tool: LLMTool, arguments: GeneratedContent) -> LLMToolCall {
+        let parsedArguments = (try? LLMJSONValue(jsonString: arguments.jsonString))
+            ?? .object(["value": .string(arguments.debugDescription)])
+        lock.lock()
+        let executionID = "call_\(nextToolCallNumber)"
+        nextToolCallNumber += 1
+        let call = LLMToolCall(
+            executionID: executionID,
+            name: tool.definition.name,
+            arguments: parsedArguments
+        )
+        storedCalls.append(call)
+        lock.unlock()
+        return call
+    }
+
+    private func reserveExecutionSlotIfAvailable() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard executedCount < maxToolCalls else {
+            hitToolLimit = true
+            return false
+        }
+        executedCount += 1
+        return true
+    }
+
+    private func store(output: LLMToolOutput) {
+        lock.lock()
+        storedOutputs.append(output)
+        lock.unlock()
+    }
+
+    private static func generatedContent(from value: LLMJSONValue) throws -> GeneratedContent {
+        try GeneratedContent(json: value.jsonString(prettyPrinted: false))
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+enum AppleNativeToolSchemaMapper {
+    static func generationSchema(for tool: LLMToolDefinition) throws -> GenerationSchema {
+        let root = dynamicSchema(
+            name: safeSchemaName("\(tool.name)_arguments"),
+            description: nil,
+            jsonSchema: tool.parameters
+        )
+        return try GenerationSchema(root: root, dependencies: [])
+    }
+
+    private static func dynamicSchema(
+        name: String,
+        description: String?,
+        jsonSchema: LLMJSONValue
+    ) -> DynamicGenerationSchema {
+        guard let object = jsonSchema.objectValue else {
+            return DynamicGenerationSchema(type: String.self)
+        }
+
+        if let enumValues = object["enum"]?.arrayValue?.compactMap(\.stringValue),
+           !enumValues.isEmpty {
+            return DynamicGenerationSchema(
+                name: name,
+                description: description ?? object["description"]?.stringValue,
+                anyOf: enumValues
+            )
+        }
+
+        let type = object["type"]?.stringValue?.lowercased()
+        switch type {
+        case "object", nil:
+            let required = Set(object["required"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+            let propertiesObject = object["properties"]?.objectValue ?? [:]
+            let properties = propertiesObject.keys.sorted().map { propertyName in
+                let propertySchema = propertiesObject[propertyName] ?? .object([:])
+                return DynamicGenerationSchema.Property(
+                    name: propertyName,
+                    description: propertySchema.objectValue?["description"]?.stringValue,
+                    schema: dynamicSchema(
+                        name: safeSchemaName("\(name)_\(propertyName)"),
+                        description: propertySchema.objectValue?["description"]?.stringValue,
+                        jsonSchema: propertySchema
+                    ),
+                    isOptional: !required.contains(propertyName)
+                )
+            }
+            return DynamicGenerationSchema(
+                name: name,
+                description: description ?? object["description"]?.stringValue,
+                properties: properties
+            )
+        case "array":
+            let itemSchema = object["items"] ?? .object(["type": .string("string")])
+            return DynamicGenerationSchema(arrayOf: dynamicSchema(
+                name: safeSchemaName("\(name)_item"),
+                description: nil,
+                jsonSchema: itemSchema
+            ))
+        case "integer":
+            return DynamicGenerationSchema(type: Int.self)
+        case "number":
+            return DynamicGenerationSchema(type: Double.self)
+        case "boolean":
+            return DynamicGenerationSchema(type: Bool.self)
+        case "string":
+            fallthrough
+        default:
+            return DynamicGenerationSchema(type: String.self)
+        }
+    }
+
+    private static func safeSchemaName(_ raw: String) -> String {
+        var result = ""
+        for scalar in raw.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                result.unicodeScalars.append(scalar)
+            } else {
+                result.append("_")
+            }
+        }
+        if result.isEmpty || result.first?.isNumber == true {
+            result = "Tool_\(result)"
+        }
+        return result
     }
 }
 

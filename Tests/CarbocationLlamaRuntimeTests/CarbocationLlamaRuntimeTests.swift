@@ -737,6 +737,156 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(boundary?.reason, "tool-call-complete")
     }
 
+    func testToolStreamInterpreterHidesSplitNativeMarker() {
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: "I will check <|tool_"),
+            "I will check "
+        )
+    }
+
+    func testToolStreamInterpreterCapturesNativeCallAfterProse() {
+        let text = #"I will check. <|tool_call>call:lookup{query:"swift"}<tool_call|>"#
+        let interception = LlamaToolStreamInterpreter.completedToolCall(in: text)
+
+        XCTAssertEqual(interception?.calls.count, 1)
+        XCTAssertEqual(interception?.calls[0].name, "lookup")
+        XCTAssertEqual(interception?.calls[0].arguments.string(forKey: "query"), "swift")
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: text),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterDefersCompleteNativeCallAtStreamingTail() {
+        let text = #"I will check. <|tool_call>call:lookup{query:"swift"}<tool_call|>"#
+
+        XCTAssertNil(LlamaToolStreamInterpreter.completedToolCallForStreaming(in: text))
+        XCTAssertEqual(LlamaToolStreamInterpreter.pendingNativeToolCallBatch(in: text)?.calls.count, 1)
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: text),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterDefersCompleteNativeCallBeforeSplitSibling() {
+        let text = #"I will check. <|tool_call>call:lookup{query:"swift"}<tool_call|> <|tool_"#
+
+        XCTAssertNil(LlamaToolStreamInterpreter.completedToolCallForStreaming(in: text))
+        XCTAssertEqual(LlamaToolStreamInterpreter.pendingNativeToolCallBatch(in: text)?.calls.count, 1)
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: text),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterCapturesAdjacentNativeCallsWhenBoundaryIsProven() {
+        let text = #"I will check. <|tool_call>call:lookup{query:"swift"}<tool_call|> <|tool_call>call:lookup{query:"swift forums"}<tool_call|> done"#
+        let interception = LlamaToolStreamInterpreter.completedToolCallForStreaming(in: text)
+
+        XCTAssertEqual(interception?.calls.count, 2)
+        XCTAssertEqual(interception?.calls.map(\.name), ["lookup", "lookup"])
+        XCTAssertEqual(interception?.calls[0].arguments.string(forKey: "query"), "swift")
+        XCTAssertEqual(interception?.calls[1].arguments.string(forKey: "query"), "swift forums")
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: text),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterKeepsAdjacentNativeCallsPendingAtStreamingTail() {
+        let text = #"I will check. <|tool_call>call:lookup{query:"swift"}<tool_call|> <|tool_call>call:lookup{query:"swift forums"}<tool_call|>"#
+
+        XCTAssertNil(LlamaToolStreamInterpreter.completedToolCallForStreaming(in: text))
+        XCTAssertEqual(LlamaToolStreamInterpreter.pendingNativeToolCallBatch(in: text)?.calls.count, 2)
+    }
+
+    func testToolStreamInterpreterCapturesThinkingPhaseForNativeCall() {
+        let text = #"<think>I need current data. <|tool_call>call:lookup{query:"swift"}<tool_call|>"#
+        let interception = LlamaToolStreamInterpreter.completedToolCall(
+            in: text,
+            phasePlan: thinkingTagPhasePlan()
+        )
+
+        XCTAssertEqual(interception?.calls.count, 1)
+        XCTAssertEqual(interception?.calls[0].triggerPhase, .thinking)
+    }
+
+    func testToolStreamInterpreterCapturesFinalPhaseForNativeCallAfterThinkingClose() {
+        let text = #"<think>I need current data.</think><|tool_call>call:lookup{query:"swift"}<tool_call|>"#
+        let interception = LlamaToolStreamInterpreter.completedToolCall(
+            in: text,
+            phasePlan: thinkingTagPhasePlan()
+        )
+
+        XCTAssertEqual(interception?.calls.count, 1)
+        XCTAssertEqual(interception?.calls[0].triggerPhase, .final)
+    }
+
+    func testToolStreamInterpreterCapturesSplitNativeMarkerAtOpenerStart() {
+        let text = #"<think>I need current data. <|tool_"#
+        let capture = LlamaToolStreamInterpreter.startedToolCall(in: text)
+        let phase = capture.map {
+            LlamaEngine.streamContentPhase(
+                in: String(text[..<$0.range.lowerBound]),
+                plan: thinkingTagPhasePlan()
+            )
+        }
+
+        XCTAssertEqual(capture.map { String(text[$0.range]) }, "<|tool_")
+        XCTAssertEqual(phase, .thinking)
+        XCTAssertEqual(LlamaToolStreamInterpreter.visibleRawPrefix(in: text), "<think>I need current data. ")
+    }
+
+    func testToolStreamInterpreterHidesSplitJSONToolObject() {
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: #"I will check. {"tool_"#),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterCapturesJSONToolObjectAfterProse() {
+        let text = #"I will check. {"tool_calls":[{"name":"lookup","arguments":{"query":"swift"}}]}"#
+        let interception = LlamaToolStreamInterpreter.completedToolCall(in: text)
+
+        XCTAssertEqual(interception?.calls.count, 1)
+        XCTAssertEqual(interception?.calls[0].name, "lookup")
+        XCTAssertEqual(interception?.calls[0].arguments.string(forKey: "query"), "swift")
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: text),
+            "I will check. "
+        )
+    }
+
+    func testToolStreamInterpreterCapturesSplitJSONToolObjectAtOpenerStart() {
+        let text = #"<think>I need current data. {"tool_"#
+        let capture = LlamaToolStreamInterpreter.startedToolCall(in: text)
+        let phase = capture.map {
+            LlamaEngine.streamContentPhase(
+                in: String(text[..<$0.range.lowerBound]),
+                plan: thinkingTagPhasePlan()
+            )
+        }
+
+        XCTAssertEqual(capture.map { String(text[$0.range]) }, #"{"tool_"#)
+        XCTAssertEqual(phase, .thinking)
+        XCTAssertEqual(LlamaToolStreamInterpreter.visibleRawPrefix(in: text), "<think>I need current data. ")
+    }
+
+    func testToolStreamInterpreterLeavesNormalProseVisible() {
+        XCTAssertEqual(
+            LlamaToolStreamInterpreter.visibleRawPrefix(in: "No tool call is needed."),
+            "No tool call is needed."
+        )
+        XCTAssertNil(LlamaToolStreamInterpreter.completedToolCall(in: "No tool call is needed."))
+    }
+
+    func testToolStreamInterpreterClearsFalseToolPrefixes() {
+        XCTAssertTrue(LlamaToolStreamInterpreter.isPotentialStartedToolCall(in: "<"))
+        XCTAssertFalse(LlamaToolStreamInterpreter.isPotentialStartedToolCall(in: "<not a tool"))
+        XCTAssertTrue(LlamaToolStreamInterpreter.isPotentialStartedToolCall(in: "{"))
+        XCTAssertFalse(LlamaToolStreamInterpreter.isPotentialStartedToolCall(in: "{not a tool"))
+    }
+
     func testGenerationBoundaryDoesNotTreatIncompleteGemmaNativeArgumentsAsJSON() {
         let text = #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}"#
 
@@ -1150,6 +1300,15 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 }
 
 private extension CarbocationLlamaRuntimeTests {
+    func thinkingTagPhasePlan() -> LlamaEngine.StreamPhasePlan {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        return LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+    }
+
     static var packageRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

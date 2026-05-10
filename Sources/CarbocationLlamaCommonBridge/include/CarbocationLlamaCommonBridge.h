@@ -35,6 +35,10 @@ carbocation_llama_reasoning_budget_state carbocation_llama_reasoning_budget_samp
     const struct llama_sampler * sampler
 );
 
+int32_t carbocation_llama_reasoning_budget_sampler_remaining(
+    const struct llama_sampler * sampler
+);
+
 #ifdef __cplusplus
 }
 #endif

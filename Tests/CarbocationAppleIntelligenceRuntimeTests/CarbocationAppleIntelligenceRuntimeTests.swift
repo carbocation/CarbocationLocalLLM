@@ -1,6 +1,10 @@
-import CarbocationAppleIntelligenceRuntime
 import CarbocationLocalLLM
 import XCTest
+@testable import CarbocationAppleIntelligenceRuntime
+
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
     func testAvailabilityReflectsBuildSDKWhenFoundationModelsIsMissing() {
@@ -166,6 +170,145 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         XCTAssertEqual(processed.stopReason, "stop-sequence")
     }
 
+    #if canImport(FoundationModels)
+    func testNativeToolSchemaMapperAcceptsSupportedJSONSchemaShapes() throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool schemas require OS 26.")
+        }
+
+        let tool = LLMToolDefinition(
+            name: "lookup",
+            description: "Lookup records.",
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "query": [
+                        "type": "string",
+                        "description": "Search query."
+                    ],
+                    "limit": ["type": "integer"],
+                    "include_archived": ["type": "boolean"],
+                    "scores": [
+                        "type": "array",
+                        "items": ["type": "number"]
+                    ],
+                    "mode": [
+                        "type": "string",
+                        "enum": ["fast", "deep"]
+                    ]
+                ],
+                "required": ["query"]
+            ]
+        )
+
+        XCTAssertNoThrow(try AppleNativeToolSchemaMapper.generationSchema(for: tool))
+    }
+
+    func testGeneratedContentRoundTripsToolJSON() throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw XCTSkip("GeneratedContent JSON bridging requires OS 26.")
+        }
+
+        let original: LLMJSONValue = [
+            "query": "swift",
+            "limit": 3,
+            "flags": ["exact": true]
+        ]
+        let content = try GeneratedContent(json: original.jsonString(prettyPrinted: false))
+        let decoded = try LLMJSONValue(jsonString: content.jsonString)
+
+        XCTAssertEqual(decoded.string(forKey: "query"), "swift")
+        XCTAssertEqual(decoded.double(forKey: "limit"), 3)
+        XCTAssertEqual(decoded.value(forKey: "flags")?.value(forKey: "exact"), .bool(true))
+    }
+
+    func testNativeToolRecorderRecordsLifecycleEvents() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool recording requires OS 26.")
+        }
+
+        let recorder = AppleToolEventRecorder()
+        let nativeRecorder = AppleNativeToolRecorder(
+            maxToolCalls: 2,
+            onPhaseAwareEvent: { recorder.append($0) }
+        )
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup records.")
+        ) { arguments in
+            ["ok": true, "query": arguments.value(forKey: "query") ?? .null]
+        }
+
+        let output = try await nativeRecorder.execute(
+            tool: tool,
+            arguments: GeneratedContent(json: #"{"query":"swift"}"#)
+        )
+        let decoded = try LLMJSONValue(jsonString: output.jsonString)
+
+        XCTAssertEqual(decoded.string(forKey: "query"), "swift")
+        XCTAssertEqual(nativeRecorder.calls.map(\.executionID), ["call_1"])
+        XCTAssertNil(nativeRecorder.calls.first?.triggerPhase)
+        XCTAssertEqual(nativeRecorder.outputs.map(\.callID), ["call_1"])
+        XCTAssertEqual(recorder.events.startedToolCallIDs, ["call_1"])
+        XCTAssertEqual(recorder.events.completedToolCallIDs, ["call_1"])
+    }
+
+    func testNativeToolRecorderReturnsToolErrorsAsGeneratedContent() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool recording requires OS 26.")
+        }
+
+        let recorder = AppleToolEventRecorder()
+        let nativeRecorder = AppleNativeToolRecorder(
+            maxToolCalls: 1,
+            onPhaseAwareEvent: { recorder.append($0) }
+        )
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "failing", description: "Always fails.")
+        ) { _ in
+            throw AppleNativeToolTestError.expected
+        }
+
+        let output = try await nativeRecorder.execute(
+            tool: tool,
+            arguments: GeneratedContent(json: #"{"query":"swift"}"#)
+        )
+        let decoded = try LLMJSONValue(jsonString: output.jsonString)
+
+        XCTAssertEqual(decoded.value(forKey: "error")?.string(forKey: "code"), "tool_execution_failed")
+        XCTAssertEqual(nativeRecorder.outputs.first?.isError, true)
+        XCTAssertEqual(recorder.events.startedToolCallIDs, ["call_1"])
+        XCTAssertEqual(recorder.events.failedToolCallIDs, ["call_1"])
+    }
+
+    func testNativeToolRecorderReturnsLimitErrorsAsGeneratedContent() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool recording requires OS 26.")
+        }
+
+        let recorder = AppleToolEventRecorder()
+        let nativeRecorder = AppleNativeToolRecorder(
+            maxToolCalls: 0,
+            onPhaseAwareEvent: { recorder.append($0) }
+        )
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup records.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        let output = try await nativeRecorder.execute(
+            tool: tool,
+            arguments: GeneratedContent(json: #"{"query":"swift"}"#)
+        )
+        let decoded = try LLMJSONValue(jsonString: output.jsonString)
+
+        XCTAssertEqual(decoded.value(forKey: "error")?.string(forKey: "code"), "max_tool_rounds")
+        XCTAssertEqual(nativeRecorder.executedToolCallCount, 0)
+        XCTAssertTrue(nativeRecorder.reachedToolLimit)
+        XCTAssertEqual(recorder.events.failedToolCallIDs, ["call_1"])
+    }
+    #endif
+
     func testLiveGenerationWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
             throw XCTSkip("Set CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 to run the live Apple Intelligence smoke test.")
@@ -268,4 +411,54 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
 private struct AppleIntelligenceLivePayload: Decodable {
     var ok: Bool?
     var message: String?
+}
+
+private final class AppleToolEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [LLMToolPhaseAwareStreamEvent] = []
+
+    func append(_ event: LLMToolPhaseAwareStreamEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    var events: [LLMToolPhaseAwareStreamEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+private extension Array where Element == LLMToolPhaseAwareStreamEvent {
+    var startedToolCallIDs: [String] {
+        compactMap { event in
+            if case .toolCallStarted(let call) = event {
+                return call.id
+            }
+            return nil
+        }
+    }
+
+    var failedToolCallIDs: [String] {
+        compactMap { event in
+            if case .toolCallFailed(let output) = event {
+                return output.callID
+            }
+            return nil
+        }
+    }
+
+    var completedToolCallIDs: [String] {
+        compactMap { event in
+            if case .toolCallCompleted(let output) = event {
+                return output.callID
+            }
+            return nil
+        }
+    }
+}
+
+private enum AppleNativeToolTestError: Error {
+    case expected
 }

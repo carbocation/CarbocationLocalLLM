@@ -48,6 +48,22 @@ final class ReasoningBudgetBridgeTests: XCTestCase {
         XCTAssertLessThan(candidates[1].logit, 0)
     }
 
+    func testRemainingBudgetReportsCountdown() {
+        let sampler = makeSampler(budget: 3)
+        defer { llama_sampler_free(sampler) }
+
+        XCTAssertEqual(carbocation_llama_reasoning_budget_sampler_remaining(sampler), 3)
+
+        llama_sampler_accept(sampler, 1)
+        XCTAssertEqual(carbocation_llama_reasoning_budget_sampler_remaining(sampler), 3)
+
+        llama_sampler_accept(sampler, 10)
+        XCTAssertEqual(carbocation_llama_reasoning_budget_sampler_remaining(sampler), 2)
+
+        llama_sampler_accept(sampler, 11)
+        XCTAssertEqual(carbocation_llama_reasoning_budget_sampler_remaining(sampler), 1)
+    }
+
     func testNaturalCloseBeforeBudgetExhaustionLeavesSamplerDone() {
         let sampler = makeSampler(budget: 4)
         defer { llama_sampler_free(sampler) }

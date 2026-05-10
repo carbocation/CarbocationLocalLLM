@@ -34,7 +34,6 @@ enum DemoRunMode: String, CaseIterable, Identifiable {
 enum DemoStreamActivity: Equatable {
     case idle
     case detecting
-    case toolCandidate(round: Int)
     case toolExecution(name: String?)
     case finalAnswer
 }
@@ -212,11 +211,6 @@ final class DemoState {
             return "Idle"
         case .detecting:
             return "Preparing request"
-        case .toolCandidate(let round):
-            if round > 1 {
-                return "Checking tools (round \(round))"
-            }
-            return "Checking tools"
         case .toolExecution(let name):
             if let name, !name.isEmpty {
                 return "Running \(name)"
@@ -233,8 +227,6 @@ final class DemoState {
             return "circle"
         case .detecting:
             return "questionmark.circle"
-        case .toolCandidate:
-            return "wrench.and.screwdriver"
         case .toolExecution:
             return "gearshape"
         case .finalAnswer:
@@ -246,8 +238,6 @@ final class DemoState {
         switch streamActivity {
         case .idle, .detecting:
             return .secondary
-        case .toolCandidate:
-            return .blue
         case .toolExecution:
             return .purple
         case .finalAnswer:
@@ -261,15 +251,6 @@ final class DemoState {
             return "No active stream"
         case .detecting:
             return "Waiting for stream phase"
-        case .toolCandidate:
-            switch streamPhase {
-            case .unknown:
-                return "Preparing tool decision"
-            case .thinking:
-                return "Candidate thinking"
-            case .final:
-                return "Generating tool JSON"
-            }
         case .toolExecution:
             return "Host tool execution"
         case .finalAnswer:
@@ -277,9 +258,9 @@ final class DemoState {
             case .unknown:
                 return "Preparing answer"
             case .thinking:
-                return "Answer thinking"
+                return isRunning ? "Answer thinking" : "Thinking complete"
             case .final:
-                return "Generating response"
+                return isRunning ? "Generating response" : "Response complete"
             }
         }
     }
@@ -290,15 +271,6 @@ final class DemoState {
             return "circle"
         case .detecting:
             return "waveform.path"
-        case .toolCandidate:
-            switch streamPhase {
-            case .unknown:
-                return "questionmark.circle"
-            case .thinking:
-                return "brain.head.profile"
-            case .final:
-                return "curlybraces"
-            }
         case .toolExecution:
             return "terminal"
         case .finalAnswer:
@@ -319,15 +291,6 @@ final class DemoState {
             return .secondary
         case .toolExecution:
             return .purple
-        case .toolCandidate:
-            switch streamPhase {
-            case .unknown:
-                return .secondary
-            case .thinking:
-                return .orange
-            case .final:
-                return .blue
-            }
         case .finalAnswer:
             switch streamPhase {
             case .unknown:
@@ -344,8 +307,6 @@ final class DemoState {
         guard streamBytesSoFar > 0 else { return nil }
 
         switch streamActivity {
-        case .toolCandidate:
-            return "\(streamBytesSoFar) candidate bytes"
         case .finalAnswer:
             return "\(streamBytesSoFar) answer bytes"
         case .idle, .detecting, .toolExecution:
@@ -672,7 +633,6 @@ final class DemoState {
                     system: systemPrompt,
                     prompt: prompt,
                     options: options,
-                    toolCandidateOptions: .toolCandidateDefault,
                     tools: tools,
                     toolChoice: .auto,
                     maxToolRounds: 4
@@ -831,19 +791,16 @@ final class DemoState {
         switch event {
         case .finalAnswerEvent(let event):
             handle(event: event)
-        case .toolCandidateEvent(let round, let event):
-            streamActivity = .toolCandidate(round: round)
-            updateToolCandidateProgress(for: event)
-            appendEvent("tool-candidate \(round): \(Self.formatCandidate(event: event))")
         case .toolRoundStarted(let round):
             streamActivity = .toolExecution(name: nil)
             appendEvent("tool-round: \(round)")
             appendToolTranscript("round \(round)")
         case .toolCallStarted(let call):
             streamActivity = .toolExecution(name: call.name)
-            appendEvent("tool-call: \(call.name) id=\(call.id)")
+            let phase = call.triggerPhase?.rawValue ?? "opaque"
+            appendEvent("tool-call: \(call.name) id=\(call.id) phase=\(phase)")
             appendToolTranscript(
-                "call \(call.id) \(call.name) arguments=\(Self.compactJSON(call.arguments))"
+                "call \(call.id) \(call.name) phase=\(phase) arguments=\(Self.compactJSON(call.arguments))"
             )
         case .toolCallCompleted(let output):
             streamActivity = .toolExecution(name: output.name)
@@ -888,7 +845,7 @@ final class DemoState {
     private func resetStreamState() {
         streamPhase = .unknown
         if isRunning {
-            streamActivity = runMode == .tools ? .toolCandidate(round: 1) : .detecting
+            streamActivity = .detecting
         } else {
             streamActivity = .idle
         }
@@ -904,32 +861,6 @@ final class DemoState {
             streamActivity = .finalAnswer
         case .thinking:
             streamActivity = .finalAnswer
-        }
-    }
-
-    private func updateToolCandidateProgress(for event: LLMPhaseAwareStreamEvent) {
-        switch event {
-        case .requestSent(let phase):
-            streamPhase = phase
-            streamBytesSoFar = 0
-        case .firstByteReceived(_, let phase):
-            streamPhase = phase
-        case .phaseChanged(_, let phase):
-            streamPhase = phase
-        case .tokenChunk(_, let bytesSoFar, let phase):
-            streamPhase = phase
-            streamBytesSoFar = bytesSoFar
-        case .finalAnswerDelta(_, let bytesSoFar):
-            streamPhase = .final
-            streamBytesSoFar = bytesSoFar
-        case .finalAnswerSnapshot(_, let bytesSoFar, _):
-            streamPhase = .final
-            streamBytesSoFar = bytesSoFar
-        case .generationStats(_, _, _, _, let phase):
-            streamPhase = phase
-        case .done(let totalBytes, _, let phase):
-            streamPhase = phase
-            streamBytesSoFar = totalBytes
         }
     }
 
@@ -973,7 +904,7 @@ final class DemoState {
         case .phaseChanged(let previousPhase, let phase):
             return "event: phase \(previousPhase.rawValue) -> \(phase.rawValue)"
         case .tokenChunk(let preview, let bytesSoFar, let phase):
-            return "event: token-chunk phase=\(phase.rawValue) bytes=\(bytesSoFar) preview=\(preview)"
+            return "event: token-chunk phase=\(phase.rawValue) bytes=\(bytesSoFar) preview=\(Self.logPreview(preview))"
         case .finalAnswerDelta(let text, let bytesSoFar):
             return "event: final-answer-delta bytes=\(bytesSoFar) text=\(text)"
         case .finalAnswerSnapshot(let text, let bytesSoFar, let reason):
@@ -985,27 +916,6 @@ final class DemoState {
         }
     }
 
-    private static func formatCandidate(event: LLMPhaseAwareStreamEvent) -> String {
-        switch event {
-        case .requestSent(let phase):
-            return "event: candidate-request-sent phase=\(phase.rawValue)"
-        case .firstByteReceived(let seconds, let phase):
-            return String(format: "event: candidate-first-byte %.3fs phase=%@", seconds, phase.rawValue)
-        case .phaseChanged(let previousPhase, let phase):
-            return "event: candidate-phase \(previousPhase.rawValue) -> \(phase.rawValue)"
-        case .tokenChunk(let preview, let bytesSoFar, let phase):
-            return "event: candidate-token-chunk phase=\(phase.rawValue) bytes=\(bytesSoFar) preview=\(preview)"
-        case .finalAnswerDelta(let text, let bytesSoFar):
-            return "event: candidate-output-delta bytes=\(bytesSoFar) text=\(text)"
-        case .finalAnswerSnapshot(let text, let bytesSoFar, let reason):
-            return "event: candidate-output-snapshot reason=\(reason.rawValue) bytes=\(bytesSoFar) text=\(text)"
-        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
-            return "event: candidate-stats phase=\(phase.rawValue) promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
-        case .done(let totalBytes, let duration, let phase):
-            return String(format: "event: candidate-done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
-        }
-    }
-
     private static func format(event: LLMStreamEvent) -> String {
         switch event {
         case .requestSent:
@@ -1013,11 +923,18 @@ final class DemoState {
         case .firstByteReceived(let seconds):
             return String(format: "event: first-byte %.3fs", seconds)
         case .tokenChunk(let preview, let bytesSoFar):
-            return "event: token-chunk bytes=\(bytesSoFar) preview=\(preview)"
+            return "event: token-chunk bytes=\(bytesSoFar) preview=\(Self.logPreview(preview))"
         case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode):
             return "event: stats promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
         case .done(let totalBytes, let duration):
             return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
         }
+    }
+
+    private static func logPreview(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
     }
 }

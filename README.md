@@ -269,7 +269,6 @@ let request = LLMToolGenerationRequest(
     system: "You are a helpful assistant.",
     prompt: userPrompt,
     options: GenerationOptions(maxOutputTokens: 512),
-    toolCandidateOptions: .toolCandidateDefault,
     tools: LLMStandardTools.initialTools(),
     toolChoice: .auto,
     maxToolRounds: 4
@@ -288,10 +287,6 @@ let result = try await LocalLLMEngine.shared.generateWithTools(
         case .toolCallStarted(let call):
             // Observe tool lifecycle events separately from display text.
             _ = call
-        case .toolCandidateEvent(_, let event):
-            // Hidden phase-aware diagnostic telemetry; do not render as assistant text.
-            _ = event
-            break
         default:
             break
         }
@@ -301,9 +296,10 @@ let result = try await LocalLLMEngine.shared.generateWithTools(
 let response = result.finalText
 ```
 
-`generateWithTools(...)` runs hidden tool-candidate turns, executes parsed tool calls, appends tool outputs back into the prompt, then runs a dedicated phase-aware final-answer turn. `options` controls the user-visible final answer, matching `generate(...)`. `toolCandidateOptions` controls hidden tool-decision turns and defaults to `.toolCandidateDefault`, a fast bounded no-thinking policy for tool-call JSON. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)`. `.toolCandidateEvent` is phase-aware diagnostic telemetry from hidden tool-decision turns and may include thinking text or tool-call JSON.
+`generateWithTools(...)` uses provider-native tool handling rather than a hidden planner pass. llama.cpp-backed models stream one normal tool-aware response, intercept tool-call protocol text before it reaches the UI, execute requested tools, then continue generation with the tool results in context. Apple Intelligence uses Foundation Models native tools. `options` controls the tool-aware generation flow, matching `generate(...)`. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)` as assistant text; tool-call syntax and thinking text are not user-visible final-answer deltas.
 
 `LLMToolCall.id` is the stable execution identity for UI and persistence. If the model supplied its own call ID, it is available as `LLMToolCall.rawID`; `LLMToolCall.executionID` is always the value used by `LLMToolOutput.callID`.
+For llama.cpp-backed models, `LLMToolCall.triggerPhase` records whether the tool protocol began during `.thinking` or `.final`; Apple Intelligence leaves this value `nil` because Foundation Models does not expose an internal stream phase for native tools.
 
 `LLMStandardTools.initialTools()` enables all three bundled tools. Its default `load_webpage` uses `URLSessionWebpageFetcher`, so build an explicit tool list or pass a custom `webpageFetcher` when a request should not be able to touch the live network.
 

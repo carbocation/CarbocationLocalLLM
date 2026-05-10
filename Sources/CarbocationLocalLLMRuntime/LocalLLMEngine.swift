@@ -424,80 +424,24 @@ public actor LocalLLMEngine: LLMEngine {
         }
     }
 
-    public func generateToolCandidate(
-        system: String,
-        originalPrompt: String,
-        tools: [LLMToolDefinition],
-        toolChoice: LLMToolChoice,
-        history: [LLMToolInteractionRound],
-        options: GenerationOptions,
-        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
-    ) async throws -> String {
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
         guard let loadedInfo else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.generateToolCandidate(
-                system: system,
-                originalPrompt: originalPrompt,
-                tools: tools,
-                toolChoice: toolChoice,
-                history: history,
-                options: options,
+            return try await llamaEngine.generateWithTools(
+                request,
                 onPhaseAwareEvent: onPhaseAwareEvent
             )
         case .system(.appleIntelligence):
             do {
-                return try await appleIntelligenceEngine.generateToolCandidate(
-                    system: system,
-                    originalPrompt: originalPrompt,
-                    tools: tools,
-                    toolChoice: toolChoice,
-                    history: history,
-                    options: options,
-                    onPhaseAwareEvent: onPhaseAwareEvent
-                )
-            } catch {
-                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
-            }
-        }
-    }
-
-    public func generateToolFinalAnswer(
-        system: String,
-        originalPrompt: String,
-        history: [LLMToolInteractionRound],
-        unexecutedCalls: [LLMToolCall],
-        maxToolRoundsReached: Bool,
-        options: GenerationOptions,
-        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
-    ) async throws -> String {
-        guard let loadedInfo else {
-            throw LocalLLMEngineError.noSelectionLoaded
-        }
-
-        switch loadedInfo.selection {
-        case .installed:
-            return try await llamaEngine.generateToolFinalAnswer(
-                system: system,
-                originalPrompt: originalPrompt,
-                history: history,
-                unexecutedCalls: unexecutedCalls,
-                maxToolRoundsReached: maxToolRoundsReached,
-                options: options,
-                onPhaseAwareEvent: onPhaseAwareEvent
-            )
-        case .system(.appleIntelligence):
-            do {
-                return try await appleIntelligenceEngine.generateToolFinalAnswer(
-                    system: system,
-                    originalPrompt: originalPrompt,
-                    history: history,
-                    unexecutedCalls: unexecutedCalls,
-                    maxToolRoundsReached: maxToolRoundsReached,
-                    options: options,
+                return try await appleIntelligenceEngine.generateWithTools(
+                    request,
                     onPhaseAwareEvent: onPhaseAwareEvent
                 )
             } catch {
