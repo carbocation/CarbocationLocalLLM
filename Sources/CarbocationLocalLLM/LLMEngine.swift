@@ -273,6 +273,34 @@ extension LLMEngine {
         var allCalls: [LLMToolCall] = []
         var allOutputs: [LLMToolOutput] = []
         var roundsCompleted = 0
+        var usedToolCallIDs = Set<String>()
+        var nextFallbackToolCallNumber = 1
+
+        func nextUniqueFallbackToolCallID(reserving reservedIDs: Set<String>) -> String {
+            while true {
+                let candidate = "call_\(nextFallbackToolCallNumber)"
+                nextFallbackToolCallNumber += 1
+                guard !usedToolCallIDs.contains(candidate),
+                      !reservedIDs.contains(candidate) else {
+                    continue
+                }
+                usedToolCallIDs.insert(candidate)
+                return candidate
+            }
+        }
+
+        func materializeToolCalls(_ parsedCalls: [LLMToolCallParser.ParsedToolCall]) -> [LLMToolCall] {
+            let reservedRawIDs = Set(parsedCalls.compactMap(\.rawID).filter { !usedToolCallIDs.contains($0) })
+            return parsedCalls.map { parsedCall in
+                if let rawID = parsedCall.rawID,
+                   !usedToolCallIDs.contains(rawID) {
+                    usedToolCallIDs.insert(rawID)
+                    return parsedCall.toolCall(executionID: rawID)
+                }
+
+                return parsedCall.toolCall(executionID: nextUniqueFallbackToolCallID(reserving: reservedRawIDs))
+            }
+        }
 
         while true {
             let candidateRound = roundsCompleted + 1
@@ -288,7 +316,7 @@ extension LLMEngine {
                     onPhaseAwareEvent(.toolCandidateEvent(round: candidateRound, event: event))
                 }
             )
-            let calls = LLMToolCallParser.parseToolCalls(in: text)
+            let calls = materializeToolCalls(LLMToolCallParser.parsedToolCalls(in: text))
             guard !calls.isEmpty else {
                 let finalText = try await generateToolFinalAnswer(
                     system: request.system,
@@ -347,7 +375,7 @@ extension LLMEngine {
                     do {
                         let content = try await tool.call(arguments: call.arguments)
                         output = LLMToolOutput(
-                            callID: call.id,
+                            callID: call.executionID,
                             name: call.name,
                             content: content,
                             isError: false
@@ -357,7 +385,7 @@ extension LLMEngine {
                         throw CancellationError()
                     } catch {
                         output = LLMToolOutput(
-                            callID: call.id,
+                            callID: call.executionID,
                             name: call.name,
                             content: Self.toolErrorContent(
                                 message: error.localizedDescription,
@@ -369,7 +397,7 @@ extension LLMEngine {
                     }
                 } else {
                     output = LLMToolOutput(
-                        callID: call.id,
+                        callID: call.executionID,
                         name: call.name,
                         content: Self.toolErrorContent(
                             message: "Unknown tool: \(call.name)",
@@ -555,11 +583,16 @@ public enum LLMToolPromptRenderer {
     }
 
     public static func jsonValue(for call: LLMToolCall) -> LLMJSONValue {
-        .object([
-            "id": .string(call.id),
+        var object: [String: LLMJSONValue] = [
+            "id": .string(call.executionID),
+            "execution_id": .string(call.executionID),
             "name": .string(call.name),
             "arguments": call.arguments
-        ])
+        ]
+        if let rawID = call.rawID {
+            object["raw_id"] = .string(rawID)
+        }
+        return .object(object)
     }
 
     public static func jsonValue(for output: LLMToolOutput) -> LLMJSONValue {

@@ -341,7 +341,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
         let formatter = try ChatTemplatePromptFormatter(template: template)
         let call = LLMToolCall(
-            id: "call_1",
+            executionID: "call_1",
+            rawID: "call_1",
             name: "bing_search",
             arguments: ["queries": ["is Ted Turner still alive"]]
         )

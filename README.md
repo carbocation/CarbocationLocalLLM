@@ -303,6 +303,8 @@ let response = result.finalText
 
 `generateWithTools(...)` runs hidden tool-candidate turns, executes parsed tool calls, appends tool outputs back into the prompt, then runs a dedicated phase-aware final-answer turn. `options` controls the user-visible final answer, matching `generate(...)`. `toolCandidateOptions` controls hidden tool-decision turns and defaults to `.toolCandidateDefault`, a fast bounded no-thinking policy for tool-call JSON. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)`. `.toolCandidateEvent` is phase-aware diagnostic telemetry from hidden tool-decision turns and may include thinking text or tool-call JSON.
 
+`LLMToolCall.id` is the stable execution identity for UI and persistence. If the model supplied its own call ID, it is available as `LLMToolCall.rawID`; `LLMToolCall.executionID` is always the value used by `LLMToolOutput.callID`.
+
 `LLMStandardTools.initialTools()` enables all three bundled tools. Its default `load_webpage` uses `URLSessionWebpageFetcher`, so build an explicit tool list or pass a custom `webpageFetcher` when a request should not be able to touch the live network.
 
 Tool failures are returned to the model as structured error outputs unless the task is cancelled. Tool outputs are untrusted data; do not treat webpage text or tool results as system instructions in your own prompts or UI.

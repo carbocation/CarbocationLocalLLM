@@ -62,19 +62,68 @@ public struct LLMTool: Sendable {
 }
 
 public struct LLMToolCall: Codable, Hashable, Sendable, Identifiable {
-    public var id: String
+    /// Stable identity for this tool execution. Use this for UI diffing, persistence, and matching tool outputs.
+    public var id: String { executionID }
+    /// Library-generated execution identity, unique within a `generateWithTools` result.
+    public var executionID: String
+    /// Raw model-provided call ID, when the model supplied a non-empty ID.
+    public var rawID: String?
     public var name: String
     public var arguments: LLMJSONValue
 
-    public init(id: String, name: String, arguments: LLMJSONValue) {
-        self.id = id
+    public init(
+        executionID: String,
+        rawID: String? = nil,
+        name: String,
+        arguments: LLMJSONValue
+    ) {
+        self.executionID = executionID
+        self.rawID = Self.normalizedRawID(rawID)
         self.name = name
         self.arguments = arguments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case executionID
+        case rawID
+        case legacyID = "id"
+        case name
+        case arguments
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let executionID = try container.decodeIfPresent(String.self, forKey: .executionID)
+            ?? container.decode(String.self, forKey: .legacyID)
+        self.init(
+            executionID: executionID,
+            rawID: try container.decodeIfPresent(String.self, forKey: .rawID),
+            name: try container.decode(String.self, forKey: .name),
+            arguments: try container.decode(LLMJSONValue.self, forKey: .arguments)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(executionID, forKey: .executionID)
+        try container.encodeIfPresent(rawID, forKey: .rawID)
+        try container.encode(name, forKey: .name)
+        try container.encode(arguments, forKey: .arguments)
+    }
+
+    private static func normalizedRawID(_ rawID: String?) -> String? {
+        guard let rawID,
+              !rawID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return rawID
     }
 }
 
 public struct LLMToolOutput: Codable, Hashable, Sendable, Identifiable {
+    /// Same value as `callID`, used for `Identifiable` conformance.
     public var id: String { callID }
+    /// Execution ID of the `LLMToolCall` that produced this output.
     public var callID: String
     public var name: String
     public var content: LLMJSONValue
@@ -250,10 +299,34 @@ public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {
 }
 
 public enum LLMToolCallParser {
+    struct ParsedToolCall: Hashable, Sendable {
+        var rawID: String?
+        var fallbackIndex: Int
+        var name: String
+        var arguments: LLMJSONValue
+
+        var defaultID: String {
+            rawID ?? "call_\(fallbackIndex + 1)"
+        }
+
+        func toolCall(executionID: String? = nil) -> LLMToolCall {
+            LLMToolCall(
+                executionID: executionID ?? defaultID,
+                rawID: rawID,
+                name: name,
+                arguments: arguments
+            )
+        }
+    }
+
     public static func parseToolCalls(in text: String) -> [LLMToolCall] {
+        parsedToolCalls(in: text).map { $0.toolCall() }
+    }
+
+    static func parsedToolCalls(in text: String) -> [ParsedToolCall] {
         for candidate in jsonCandidates(in: text) {
             guard let value = try? LLMJSONValue(jsonString: candidate),
-                  let calls = toolCalls(from: value),
+                  let calls = parsedToolCalls(from: value),
                   !calls.isEmpty else {
                 continue
             }
@@ -266,35 +339,36 @@ public enum LLMToolCallParser {
         return []
     }
 
-    private static func toolCalls(from value: LLMJSONValue) -> [LLMToolCall]? {
+    private static func parsedToolCalls(from value: LLMJSONValue) -> [ParsedToolCall]? {
         switch value {
         case .object(let object):
             if let toolCalls = object["tool_calls"]?.arrayValue {
                 return toolCalls.enumerated().compactMap { index, value in
-                    toolCall(from: value, fallbackIndex: index)
+                    parsedToolCall(from: value, fallbackIndex: index)
                 }
             }
-            if let toolCall = toolCall(from: value, fallbackIndex: 0) {
+            if let toolCall = parsedToolCall(from: value, fallbackIndex: 0) {
                 return [toolCall]
             }
             return nil
         case .array(let values):
             return values.enumerated().compactMap { index, value in
-                toolCall(from: value, fallbackIndex: index)
+                parsedToolCall(from: value, fallbackIndex: index)
             }
         case .null, .bool, .number, .string:
             return nil
         }
     }
 
-    private static func toolCall(from value: LLMJSONValue, fallbackIndex: Int) -> LLMToolCall? {
+    private static func parsedToolCall(from value: LLMJSONValue, fallbackIndex: Int) -> ParsedToolCall? {
         guard case .object(let object) = value else { return nil }
 
-        let id = object["id"]?.stringValue ?? "call_\(fallbackIndex + 1)"
+        let rawID = nonEmptyRawID(from: object)
         if let function = object["function"]?.objectValue {
             guard let name = function["name"]?.stringValue else { return nil }
-            return LLMToolCall(
-                id: id,
+            return ParsedToolCall(
+                rawID: rawID,
+                fallbackIndex: fallbackIndex,
                 name: name,
                 arguments: normalizedArguments(function["arguments"])
             )
@@ -303,11 +377,20 @@ public enum LLMToolCallParser {
         guard let name = object["name"]?.stringValue ?? object["tool_name"]?.stringValue else {
             return nil
         }
-        return LLMToolCall(
-            id: id,
+        return ParsedToolCall(
+            rawID: rawID,
+            fallbackIndex: fallbackIndex,
             name: name,
             arguments: normalizedArguments(object["arguments"] ?? object["args"])
         )
+    }
+
+    private static func nonEmptyRawID(from object: [String: LLMJSONValue]) -> String? {
+        guard let id = object["id"]?.stringValue,
+              !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return id
     }
 
     private static func normalizedArguments(_ value: LLMJSONValue?) -> LLMJSONValue {
@@ -391,10 +474,10 @@ public enum LLMToolCallParser {
         return nil
     }
 
-    private static func gemmaToolCalls(in text: String) -> [LLMToolCall] {
+    private static func gemmaToolCalls(in text: String) -> [ParsedToolCall] {
         let startMarker = "<|tool_call>call:"
         var searchStart = text.startIndex
-        var calls: [LLMToolCall] = []
+        var calls: [ParsedToolCall] = []
 
         while let markerRange = text.range(of: startMarker, range: searchStart..<text.endIndex) {
             var scanner = GemmaToolCallScanner(text: text, index: markerRange.upperBound)
@@ -416,7 +499,7 @@ public enum LLMToolCallParser {
         let text: String
         var index: String.Index
 
-        mutating func parseCall(fallbackIndex: Int) -> LLMToolCall? {
+        mutating func parseCall(fallbackIndex: Int) -> ParsedToolCall? {
             skipWhitespace()
             guard let openBrace = text[index..<text.endIndex].firstIndex(of: "{") else {
                 return nil
@@ -434,8 +517,9 @@ public enum LLMToolCallParser {
             let name = rawName.hasPrefix("functions.")
                 ? String(rawName.dropFirst("functions.".count))
                 : rawName
-            return LLMToolCall(
-                id: "call_\(fallbackIndex + 1)",
+            return ParsedToolCall(
+                rawID: nil,
+                fallbackIndex: fallbackIndex,
                 name: name,
                 arguments: arguments
             )

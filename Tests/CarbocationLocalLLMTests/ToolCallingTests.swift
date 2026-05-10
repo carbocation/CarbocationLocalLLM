@@ -30,9 +30,26 @@ final class ToolCallingTests: XCTestCase {
 
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].id, "call_7")
+        XCTAssertEqual(calls[0].executionID, "call_7")
+        XCTAssertEqual(calls[0].rawID, "call_7")
         XCTAssertEqual(calls[0].name, "calculate")
         XCTAssertEqual(calls[0].arguments.string(forKey: "operation"), "add")
         XCTAssertEqual(calls[0].arguments.array(forKey: "operands")?.count, 2)
+    }
+
+    func testToolCallParserTreatsEmptyIDsAsMissing() {
+        let text = """
+        {"tool_calls":[
+            {"id":"","name":"lookup","arguments":{"query":"first"}},
+            {"id":"   ","name":"lookup","arguments":{"query":"second"}}
+        ]}
+        """
+
+        let calls = LLMToolCallParser.parseToolCalls(in: text)
+
+        XCTAssertEqual(calls.map(\.id), ["call_1", "call_2"])
+        XCTAssertEqual(calls.map(\.executionID), ["call_1", "call_2"])
+        XCTAssertEqual(calls.map(\.rawID), [String?](repeating: nil, count: 2))
     }
 
     func testToolCallParserReadsGemmaStyleNativeCalls() {
@@ -42,6 +59,8 @@ final class ToolCallingTests: XCTestCase {
 
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].id, "call_1")
+        XCTAssertEqual(calls[0].executionID, "call_1")
+        XCTAssertNil(calls[0].rawID)
         XCTAssertEqual(calls[0].name, "calculate")
         XCTAssertEqual(calls[0].arguments.string(forKey: "operation"), "multiply")
         XCTAssertEqual(calls[0].arguments.array(forKey: "operands") ?? [], [.number(17.5), .number(23)])
@@ -85,6 +104,38 @@ final class ToolCallingTests: XCTestCase {
 
         XCTAssertEqual(decoded, output)
         XCTAssertEqual(decoded.content.string(forKey: "result"), "3")
+    }
+
+    func testToolCallSerializesExecutionAndRawIDs() throws {
+        let call = LLMToolCall(
+            executionID: "call_2",
+            rawID: "call_1",
+            name: "lookup",
+            arguments: ["query": "swift"]
+        )
+
+        let data = try JSONEncoder().encode(call)
+        let value = try LLMJSONValue(jsonString: String(decoding: data, as: UTF8.self))
+        let decoded = try JSONDecoder().decode(LLMToolCall.self, from: data)
+
+        XCTAssertEqual(value.string(forKey: "executionID"), "call_2")
+        XCTAssertEqual(value.string(forKey: "rawID"), "call_1")
+        XCTAssertNil(value.string(forKey: "id"))
+        XCTAssertEqual(decoded.id, "call_2")
+        XCTAssertEqual(decoded.executionID, "call_2")
+        XCTAssertEqual(decoded.rawID, "call_1")
+        XCTAssertEqual(decoded.name, "lookup")
+        XCTAssertEqual(decoded.arguments.string(forKey: "query"), "swift")
+    }
+
+    func testToolCallDecodesLegacyIDAsExecutionID() throws {
+        let data = #"{"id":"call_legacy","name":"lookup","arguments":{"query":"swift"}}"#.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LLMToolCall.self, from: data)
+
+        XCTAssertEqual(decoded.id, "call_legacy")
+        XCTAssertEqual(decoded.executionID, "call_legacy")
+        XCTAssertNil(decoded.rawID)
     }
 
     func testToolChoiceUsesStableCodableShape() throws {
@@ -241,6 +292,78 @@ final class ToolCallingTests: XCTestCase {
         XCTAssertEqual(events.finalAnswerDeltaText, "17.5 times 23 is 402.5.")
         XCTAssertFalse(events.finalAnswerTextContains("<|tool_call>"))
         XCTAssertTrue(events.containsAggregateStats(stopReason: "complete"))
+    }
+
+    func testToolGenerationAssignsUniqueFallbackCallIDsAcrossRounds() async throws {
+        let firstToolCall = #"{"tool_calls":[{"name":"lookup","arguments":{"query":"first"}}]}"#
+        let secondToolCall = #"{"tool_calls":[{"name":"lookup","arguments":{"query":"second"}}]}"#
+        let engine = ScriptedEngine(responses: [firstToolCall, secondToolCall, #"{"tool_calls":[]}"#, "Done."])
+        let recorder = ToolEventRecorder()
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test tool.")
+        ) { arguments in
+            ["ok": true, "query": arguments.value(forKey: "query") ?? .null]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Use lookup twice.",
+                tools: [tool]
+            ),
+            onPhaseAwareEvent: { event in recorder.append(event) }
+        )
+
+        XCTAssertEqual(result.finalText, "Done.")
+        XCTAssertEqual(result.toolCalls.map(\.id), ["call_1", "call_2"])
+        XCTAssertEqual(result.toolCalls.map(\.executionID), ["call_1", "call_2"])
+        XCTAssertEqual(result.toolCalls.map(\.rawID), [String?](repeating: nil, count: 2))
+        XCTAssertEqual(result.toolOutputs.map(\.callID), ["call_1", "call_2"])
+        XCTAssertEqual(result.toolOutputs.map { $0.content.string(forKey: "query") }, ["first", "second"])
+        XCTAssertEqual(recorder.events.startedToolCallIDs, ["call_1", "call_2"])
+        XCTAssertEqual(recorder.events.completedToolCallIDs, ["call_1", "call_2"])
+    }
+
+    func testToolGenerationFallbackCallIDsDoNotCollideWithRawIDs() async throws {
+        let mixedToolCalls = #"{"tool_calls":[{"name":"lookup","arguments":{"query":"fallback"}},{"id":"call_1","name":"lookup","arguments":{"query":"raw"}}]}"#
+        let engine = ScriptedEngine(responses: [mixedToolCalls, #"{"tool_calls":[]}"#, "Done."])
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test tool.")
+        ) { arguments in
+            ["ok": true, "query": arguments.value(forKey: "query") ?? .null]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Use lookup.",
+                tools: [tool]
+            )
+        )
+
+        XCTAssertEqual(result.toolCalls.map(\.id), ["call_2", "call_1"])
+        XCTAssertEqual(result.toolCalls.map(\.executionID), ["call_2", "call_1"])
+        XCTAssertEqual(result.toolCalls.map(\.rawID), [nil, "call_1"])
+        XCTAssertEqual(result.toolOutputs.map(\.callID), ["call_2", "call_1"])
+    }
+
+    func testToolGenerationPreservesCollidingRawIDsSeparatelyFromExecutionIDs() async throws {
+        let repeatedRawIDCalls = #"{"tool_calls":[{"id":"call_1","name":"lookup","arguments":{"query":"first"}},{"id":"call_1","name":"lookup","arguments":{"query":"second"}}]}"#
+        let engine = ScriptedEngine(responses: [repeatedRawIDCalls, #"{"tool_calls":[]}"#, "Done."])
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test tool.")
+        ) { arguments in
+            ["ok": true, "query": arguments.value(forKey: "query") ?? .null]
+        }
+
+        let result = try await engine.generateWithTools(
+            LLMToolGenerationRequest(
+                prompt: "Use lookup.",
+                tools: [tool]
+            )
+        )
+
+        XCTAssertEqual(result.toolCalls.map(\.executionID), ["call_1", "call_2"])
+        XCTAssertEqual(result.toolCalls.map(\.rawID), ["call_1", "call_1"])
+        XCTAssertEqual(result.toolOutputs.map(\.callID), ["call_1", "call_2"])
     }
 
     func testToolGenerationWithoutEnabledToolsUsesFinalAnswerEvents() async throws {
@@ -536,6 +659,24 @@ private extension Array where Element == LLMToolPhaseAwareStreamEvent {
                 return false
             }
             return promptTokens > 0 && generatedTokens > 0 && actualStopReason == stopReason
+        }
+    }
+
+    var startedToolCallIDs: [String] {
+        compactMap { event in
+            if case .toolCallStarted(let call) = event {
+                return call.id
+            }
+            return nil
+        }
+    }
+
+    var completedToolCallIDs: [String] {
+        compactMap { event in
+            if case .toolCallCompleted(let output) = event {
+                return output.callID
+            }
+            return nil
         }
     }
 }

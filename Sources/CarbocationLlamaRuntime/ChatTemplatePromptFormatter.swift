@@ -152,7 +152,7 @@ struct ChatTemplatePromptFormatter {
 
     private static func value(for call: LLMToolCall) -> Value {
         .object([
-            "id": .string(call.id),
+            "id": .string(call.executionID),
             "type": .string("function"),
             "function": .object([
                 "name": .string(call.name),
