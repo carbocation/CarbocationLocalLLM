@@ -246,6 +246,25 @@ extension LlamaEngine {
             : .awaitingFinal
     }
 
+    static func shouldEmitFinalAnswerProgress(
+        currentPhase: LLMStreamContentPhase,
+        structuredPhase: StructuredOutputPhase?
+    ) -> Bool {
+        guard currentPhase == .final else {
+            return false
+        }
+        guard let structuredPhase else {
+            return true
+        }
+
+        switch structuredPhase {
+        case .thinking, .awaitingFinal:
+            return false
+        case .final, .complete:
+            return true
+        }
+    }
+
     private static func structuredOutputIsInsideThinking(
         in text: String,
         plan: StructuredOutputPlan

@@ -810,6 +810,9 @@ public actor LlamaEngine: LLMEngine {
 
         var lastHeartbeat = Date()
         var streamedFinalAnswer = ""
+        var structuredPhase = structuredOutputPlan.map {
+            Self.structuredOutputPhase(in: accumulatedText, plan: $0)
+        }
         func emitFinalAnswer(_ nextFinalAnswer: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
             guard nextFinalAnswer != streamedFinalAnswer else { return }
 
@@ -833,7 +836,10 @@ public actor LlamaEngine: LLMEngine {
         }
 
         func emitFinalAnswerProgressIfNeeded() {
-            guard currentPhase == .final,
+            guard Self.shouldEmitFinalAnswerProgress(
+                currentPhase: currentPhase,
+                structuredPhase: structuredPhase
+            ),
                   let nextFinalAnswer = try? Self.sanitizedGeneratedText(
                     accumulatedText,
                     profile: activeOutputProfile,
@@ -845,9 +851,6 @@ public actor LlamaEngine: LLMEngine {
             emitFinalAnswer(nextFinalAnswer, snapshotReason: .streamCorrection)
         }
 
-        var structuredPhase = structuredOutputPlan.map {
-            Self.structuredOutputPhase(in: accumulatedText, plan: $0)
-        }
         let contextMaxNew = Self.maxGenerationTokens(
             contextSize: currentContextSize(),
             promptTokenCount: promptTokens.count,

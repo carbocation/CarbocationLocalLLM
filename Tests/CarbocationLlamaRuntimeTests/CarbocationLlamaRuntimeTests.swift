@@ -839,6 +839,88 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(boundary?.reason, "json-complete")
     }
 
+    func testFinalAnswerProgressGateBlocksLazyStructuredPreambleAfterThinkingClose() throws {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let structuredPlan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: []
+                )
+            )
+        )
+        let streamPlan = LlamaEngine.StreamPhasePlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let text = "<think>draft</think>I will now return JSON."
+
+        let structuredPhase = LlamaEngine.structuredOutputPhase(in: text, plan: structuredPlan)
+        let streamPhase = LlamaEngine.streamContentPhase(in: text, plan: streamPlan)
+
+        XCTAssertEqual(structuredPhase, .awaitingFinal)
+        XCTAssertEqual(streamPhase, .final)
+        XCTAssertFalse(LlamaEngine.shouldEmitFinalAnswerProgress(
+            currentPhase: streamPhase,
+            structuredPhase: structuredPhase
+        ))
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                text,
+                profile: profile,
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "I will now return JSON."
+        )
+    }
+
+    func testFinalAnswerProgressGateAllowsLazyStructuredJSONAfterTrigger() throws {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let structuredPlan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: []
+                )
+            )
+        )
+        let streamPlan = LlamaEngine.StreamPhasePlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let text = #"<think>draft</think>{"title":"x"}"#
+
+        let structuredPhase = LlamaEngine.structuredOutputPhase(in: text, plan: structuredPlan)
+        let streamPhase = LlamaEngine.streamContentPhase(in: text, plan: streamPlan)
+
+        XCTAssertEqual(structuredPhase, .final)
+        XCTAssertEqual(streamPhase, .final)
+        XCTAssertTrue(LlamaEngine.shouldEmitFinalAnswerProgress(
+            currentPhase: streamPhase,
+            structuredPhase: structuredPhase
+        ))
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                text,
+                profile: profile,
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            #"{"title":"x"}"#
+        )
+    }
+
     func testGenerationBoundaryPreservesGemmaNativeToolCallEnvelope() {
         let text = #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}<tool_call|> trailing"#
 

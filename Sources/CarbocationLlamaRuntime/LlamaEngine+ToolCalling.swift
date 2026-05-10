@@ -620,17 +620,21 @@ private extension LlamaEngine {
             )
         }
 
+        var structuredPhase = structuredOutputPlan.map {
+            Self.structuredOutputPhase(in: accumulatedText, plan: $0)
+        }
+
         func emitVisibleProgress(raw: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
-            guard currentPhase == .final,
+            guard Self.shouldEmitFinalAnswerProgress(
+                currentPhase: currentPhase,
+                structuredPhase: structuredPhase
+            ),
                   let visible = sanitizedVisibleText(raw: raw) else {
                 return
             }
             streamState.emit(visible, snapshotReason: snapshotReason)
         }
 
-        var structuredPhase = structuredOutputPlan.map {
-            Self.structuredOutputPhase(in: accumulatedText, plan: $0)
-        }
         let contextMaxNew = Self.maxGenerationTokens(
             contextSize: currentContextSize(),
             promptTokenCount: promptTokens.count,
@@ -899,7 +903,10 @@ private extension LlamaEngine {
 
         if interceptedToolCalls.isEmpty {
             streamState.emit(returnedText, snapshotReason: .completed)
-        } else {
+        } else if Self.shouldEmitFinalAnswerProgress(
+            currentPhase: currentPhase,
+            structuredPhase: structuredPhase
+        ) {
             streamState.emit(returnedText, snapshotReason: .streamCorrection)
         }
 
