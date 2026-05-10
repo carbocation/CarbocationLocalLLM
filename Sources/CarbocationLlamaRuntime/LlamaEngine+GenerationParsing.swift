@@ -485,6 +485,9 @@ extension LlamaEngine {
         var boundaryIndex: String.Index?
         var boundaryText: String?
         var reason: String?
+        let nativeToolRange = stopAtBalancedJSON
+            ? nativeToolCallEnvelopeRange(in: text)
+            : nil
 
         if let stopRange = firstStopSequenceRange(in: text, stopSequences: stopSequences) {
             boundaryIndex = stopRange.lowerBound
@@ -493,7 +496,17 @@ extension LlamaEngine {
         }
 
         if stopAtBalancedJSON,
+           let nativeToolRange,
+           boundaryIndex.map({ nativeToolRange.upperBound < $0 }) ?? true {
+            boundaryIndex = nativeToolRange.upperBound
+            boundaryText = String(text[..<nativeToolRange.upperBound])
+            reason = "tool-call-complete"
+        }
+
+        if stopAtBalancedJSON,
+           !hasUnclosedNativeToolCallEnvelope(in: text),
            let jsonRange = balancedJSONValueRange(in: text),
+           nativeToolRange.map({ !$0.contains(jsonRange.lowerBound) }) ?? true,
            boundaryIndex.map({ jsonRange.upperBound < $0 }) ?? true {
             boundaryIndex = jsonRange.upperBound
             boundaryText = String(text[jsonRange])
@@ -573,6 +586,42 @@ extension LlamaEngine {
         }
 
         return nil
+    }
+
+    static func nativeToolCallEnvelopeRange(in text: String) -> Range<String.Index>? {
+        let startMarker = "<|tool_call>call:"
+        let endMarker = "<tool_call|>"
+        guard let firstStart = text.range(of: startMarker)?.lowerBound else {
+            return nil
+        }
+
+        var searchStart = firstStart
+        var lastCompleteEnd: String.Index?
+        while let startRange = text.range(of: startMarker, range: searchStart..<text.endIndex) {
+            guard let endRange = text.range(of: endMarker, range: startRange.upperBound..<text.endIndex) else {
+                break
+            }
+
+            lastCompleteEnd = endRange.upperBound
+            let nextNonWhitespace = indexAfterWhitespace(in: text, from: endRange.upperBound)
+            guard nextNonWhitespace < text.endIndex,
+                  text[nextNonWhitespace..<text.endIndex].hasPrefix(startMarker) else {
+                break
+            }
+            searchStart = nextNonWhitespace
+        }
+
+        guard let lastCompleteEnd else { return nil }
+        return firstStart..<lastCompleteEnd
+    }
+
+    static func hasUnclosedNativeToolCallEnvelope(in text: String) -> Bool {
+        let startMarker = "<|tool_call>call:"
+        let endMarker = "<tool_call|>"
+        guard let lastStart = text.range(of: startMarker, options: .backwards) else {
+            return false
+        }
+        return text.range(of: endMarker, range: lastStart.upperBound..<text.endIndex) == nil
     }
 
 }

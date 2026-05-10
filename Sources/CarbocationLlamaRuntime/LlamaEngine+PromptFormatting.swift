@@ -120,6 +120,53 @@ extension LlamaEngine {
         )
     }
 
+    func applyChatTemplate(
+        messages: [ChatTemplateMessage],
+        tools: [LLMToolDefinition],
+        options: GenerationOptions
+    ) throws -> PromptFormattingResult {
+        guard chatTemplate != nil else {
+            throw LLMEngineError.chatTemplateUnavailable(Self.templateUnavailableDescription(
+                embeddedTemplate: nil,
+                descriptor: loadedDescriptor
+            ))
+        }
+
+        switch preparedChatTemplate {
+        case .swiftJinja(let formatter):
+            do {
+                let formatted = try formatMessagesViaSwiftJinja(
+                    formatter: formatter,
+                    messages: messages,
+                    tools: tools,
+                    options: options
+                )
+                Self.logChatTemplateSelection(
+                    mode: .embedded,
+                    descriptor: loadedDescriptor,
+                    hasEmbeddedTemplate: true,
+                    formatter: "swift-jinja"
+                )
+                return PromptFormattingResult(
+                    text: formatted,
+                    mode: .embedded,
+                    outputProfile: outputSanitizationProfile
+                )
+            } catch {
+                llamaRuntimeLog.info(
+                    "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
+                )
+                throw error
+            }
+        case .unavailable(let detail):
+            throw LLMEngineError.chatTemplateUnavailable("Swift Jinja chat template unavailable: \(detail)")
+        case nil:
+            throw LLMEngineError.chatTemplateUnavailable(Self.embeddedTemplateFailureDescription(
+                descriptor: loadedDescriptor
+            ))
+        }
+    }
+
     static func fallbackPrompt(
         system: String,
         user: String,
@@ -207,6 +254,24 @@ extension LlamaEngine {
         return try formatter.format(
             system: system,
             user: user,
+            bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
+            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
+            enableThinking: options.enableThinking
+        )
+    }
+
+    private func formatMessagesViaSwiftJinja(
+        formatter: ChatTemplatePromptFormatter,
+        messages: [ChatTemplateMessage],
+        tools: [LLMToolDefinition],
+        options: GenerationOptions
+    ) throws -> String {
+        guard let vocabulary else {
+            throw LLMEngineError.noModelLoaded
+        }
+        return try formatter.format(
+            messages: messages,
+            tools: tools,
             bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
             eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
             enableThinking: options.enableThinking

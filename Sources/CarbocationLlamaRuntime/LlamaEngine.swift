@@ -498,6 +498,34 @@ public actor LlamaEngine: LLMEngine {
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
+        let promptFormatting: PromptFormattingResult
+        do {
+            promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
+        } catch let error as LLMEngineError {
+            if case .chatTemplateUnavailable = error {
+                onPhaseAwareEvent(.requestSent(phase: .unknown))
+                onPhaseAwareEvent(.generationStats(
+                    promptTokens: 0,
+                    generatedTokens: 0,
+                    stopReason: "template-unavailable",
+                    templateMode: .unavailable,
+                    phase: .unknown
+                ))
+            }
+            throw error
+        }
+        return try await generate(
+            promptFormatting: promptFormatting,
+            options: options,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+    }
+
+    func generate(
+        promptFormatting: PromptFormattingResult,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
@@ -536,18 +564,8 @@ public actor LlamaEngine: LLMEngine {
             }
         }
 
-        let promptFormatting: PromptFormattingResult
-        let renderedPrompt: String
-        do {
-            promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
-            renderedPrompt = promptFormatting.text
-            templateMode = promptFormatting.mode
-        } catch let error as LLMEngineError {
-            if case .chatTemplateUnavailable = error {
-                stopReason = "template-unavailable"
-            }
-            throw error
-        }
+        let renderedPrompt = promptFormatting.text
+        templateMode = promptFormatting.mode
 
         let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
             renderedPrompt,
@@ -780,7 +798,7 @@ public actor LlamaEngine: LLMEngine {
 
                 updatePhase(Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
 
-                if stopReason == "json-complete" || stopReason == "stop-sequence" {
+                if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
                     emitFinalAnswerProgressIfNeeded()
                     if stopReason == "json-complete", structuredOutputPlan != nil {

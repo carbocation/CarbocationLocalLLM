@@ -93,6 +93,16 @@ public struct LLMToolOutput: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+public struct LLMToolInteractionRound: Codable, Hashable, Sendable {
+    public var calls: [LLMToolCall]
+    public var outputs: [LLMToolOutput]
+
+    public init(calls: [LLMToolCall], outputs: [LLMToolOutput]) {
+        self.calls = calls
+        self.outputs = outputs
+    }
+}
+
 public enum LLMToolChoice: Hashable, Sendable {
     case auto
     case none

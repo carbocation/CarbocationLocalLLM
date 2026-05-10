@@ -178,6 +178,26 @@ public protocol LLMEngine: Sendable {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
     ) async throws -> LLMToolGenerationResult
+
+    func generateToolCandidate(
+        system: String,
+        originalPrompt: String,
+        tools: [LLMToolDefinition],
+        toolChoice: LLMToolChoice,
+        history: [LLMToolInteractionRound],
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String
+
+    func generateToolFinalAnswer(
+        system: String,
+        originalPrompt: String,
+        history: [LLMToolInteractionRound],
+        unexecutedCalls: [LLMToolCall],
+        maxToolRoundsReached: Bool,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String
 }
 
 extension LLMEngine {
@@ -247,49 +267,40 @@ extension LLMEngine {
         }
 
         let toolIndex = Dictionary(uniqueKeysWithValues: request.tools.map { ($0.definition.name, $0) })
-        let system = Self.toolAwareSystemPrompt(
-            system: request.system,
-            tools: request.tools.map(\.definition),
-            toolChoice: request.toolChoice
-        )
+        let toolDefinitions = request.tools.map(\.definition)
 
-        var history: [(calls: [LLMToolCall], outputs: [LLMToolOutput])] = []
+        var history: [LLMToolInteractionRound] = []
         var allCalls: [LLMToolCall] = []
         var allOutputs: [LLMToolOutput] = []
         var roundsCompleted = 0
 
         while true {
-            let prompt = Self.toolAwareUserPrompt(
-                originalPrompt: request.prompt,
-                history: history
-            )
             let candidateRound = roundsCompleted + 1
-            let text = try await generate(
-                system: system,
-                prompt: prompt,
+            let text = try await generateToolCandidate(
+                system: request.system,
+                originalPrompt: request.prompt,
+                tools: toolDefinitions,
+                toolChoice: request.toolChoice,
+                history: history,
                 options: request.toolCandidateOptions,
                 onPhaseAwareEvent: { event in
                     stats.record(event)
                     onPhaseAwareEvent(.toolCandidateEvent(round: candidateRound, event: event))
-                },
-                ()
+                }
             )
             let calls = LLMToolCallParser.parseToolCalls(in: text)
             guard !calls.isEmpty else {
-                let finalText = try await generate(
+                let finalText = try await generateToolFinalAnswer(
                     system: request.system,
-                    prompt: Self.toolFinalUserPrompt(
-                        originalPrompt: request.prompt,
-                        history: history,
-                        unexecutedCalls: [],
-                        maxToolRoundsReached: false
-                    ),
+                    originalPrompt: request.prompt,
+                    history: history,
+                    unexecutedCalls: [],
+                    maxToolRoundsReached: false,
                     options: request.options,
                     onPhaseAwareEvent: { event in
                         stats.record(event)
                         onPhaseAwareEvent(.finalAnswerEvent(event))
-                    },
-                    ()
+                    }
                 )
                 emitAggregateStats(stopReason: "complete")
                 return LLMToolGenerationResult(
@@ -302,20 +313,17 @@ extension LLMEngine {
             }
 
             guard roundsCompleted < request.maxToolRounds else {
-                let finalText = try await generate(
+                let finalText = try await generateToolFinalAnswer(
                     system: request.system,
-                    prompt: Self.toolFinalUserPrompt(
-                        originalPrompt: request.prompt,
-                        history: history,
-                        unexecutedCalls: calls,
-                        maxToolRoundsReached: true
-                    ),
+                    originalPrompt: request.prompt,
+                    history: history,
+                    unexecutedCalls: calls,
+                    maxToolRoundsReached: true,
                     options: request.options,
                     onPhaseAwareEvent: { event in
                         stats.record(event)
                         onPhaseAwareEvent(.finalAnswerEvent(event))
-                    },
-                    ()
+                    }
                 )
                 emitAggregateStats(stopReason: "max-tool-rounds")
                 return LLMToolGenerationResult(
@@ -377,8 +385,56 @@ extension LLMEngine {
             roundsCompleted = round
             allCalls.append(contentsOf: calls)
             allOutputs.append(contentsOf: outputs)
-            history.append((calls: calls, outputs: outputs))
+            history.append(LLMToolInteractionRound(calls: calls, outputs: outputs))
         }
+    }
+
+    public func generateToolCandidate(
+        system: String,
+        originalPrompt: String,
+        tools: [LLMToolDefinition],
+        toolChoice: LLMToolChoice,
+        history: [LLMToolInteractionRound],
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            system: LLMToolPromptRenderer.toolAwareSystemPrompt(
+                system: system,
+                tools: tools,
+                toolChoice: toolChoice
+            ),
+            prompt: LLMToolPromptRenderer.toolAwareUserPrompt(
+                originalPrompt: originalPrompt,
+                history: history
+            ),
+            options: options,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            ()
+        )
+    }
+
+    public func generateToolFinalAnswer(
+        system: String,
+        originalPrompt: String,
+        history: [LLMToolInteractionRound],
+        unexecutedCalls: [LLMToolCall],
+        maxToolRoundsReached: Bool,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: LLMToolPromptRenderer.toolFinalUserPrompt(
+                originalPrompt: originalPrompt,
+                history: history,
+                unexecutedCalls: unexecutedCalls,
+                maxToolRoundsReached: maxToolRoundsReached
+            ),
+            options: options,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            ()
+        )
     }
 
     private static func validateToolRequest(_ request: LLMToolGenerationRequest) throws {
@@ -402,7 +458,19 @@ extension LLMEngine {
         }
     }
 
-    private static func toolAwareSystemPrompt(
+    private static func toolErrorContent(message: String, code: String) -> LLMJSONValue {
+        .object([
+            "ok": .bool(false),
+            "error": .object([
+                "code": .string(code),
+                "message": .string(message)
+            ])
+        ])
+    }
+}
+
+public enum LLMToolPromptRenderer {
+    public static func toolAwareSystemPrompt(
         system: String,
         tools: [LLMToolDefinition],
         toolChoice: LLMToolChoice
@@ -439,9 +507,9 @@ extension LLMEngine {
         return parts.joined(separator: "\n\n")
     }
 
-    private static func toolAwareUserPrompt(
+    public static func toolAwareUserPrompt(
         originalPrompt: String,
-        history: [(calls: [LLMToolCall], outputs: [LLMToolOutput])]
+        history: [LLMToolInteractionRound]
     ) -> String {
         guard !history.isEmpty else { return originalPrompt }
 
@@ -459,9 +527,9 @@ extension LLMEngine {
         return prompt
     }
 
-    private static func toolFinalUserPrompt(
+    public static func toolFinalUserPrompt(
         originalPrompt: String,
-        history: [(calls: [LLMToolCall], outputs: [LLMToolOutput])],
+        history: [LLMToolInteractionRound],
         unexecutedCalls: [LLMToolCall],
         maxToolRoundsReached: Bool
     ) -> String {
@@ -486,7 +554,7 @@ extension LLMEngine {
         return prompt
     }
 
-    private static func jsonValue(for call: LLMToolCall) -> LLMJSONValue {
+    public static func jsonValue(for call: LLMToolCall) -> LLMJSONValue {
         .object([
             "id": .string(call.id),
             "name": .string(call.name),
@@ -494,22 +562,12 @@ extension LLMEngine {
         ])
     }
 
-    private static func jsonValue(for output: LLMToolOutput) -> LLMJSONValue {
+    public static func jsonValue(for output: LLMToolOutput) -> LLMJSONValue {
         .object([
             "call_id": .string(output.callID),
             "name": .string(output.name),
             "is_error": .bool(output.isError),
             "content": output.content
-        ])
-    }
-
-    private static func toolErrorContent(message: String, code: String) -> LLMJSONValue {
-        .object([
-            "ok": .bool(false),
-            "error": .object([
-                "code": .string(code),
-                "message": .string(message)
-            ])
         ])
     }
 }

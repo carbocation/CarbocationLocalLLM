@@ -303,6 +303,70 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(prompt.contains("<end_of_turn>"))
     }
 
+    func testSwiftJinjaGemma4RendersNativeTools() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let tool = LLMToolDefinition(
+            name: "bing_search",
+            description: "Search the web.",
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "queries": [
+                        "type": "array",
+                        "items": ["type": "string"]
+                    ]
+                ],
+                "required": ["queries"]
+            ]
+        )
+
+        let prompt = try formatter.format(
+            messages: [
+                ChatTemplateMessage(role: "system", content: "System"),
+                ChatTemplateMessage(role: "user", content: "Is Ted Turner still alive?")
+            ],
+            tools: [tool],
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+
+        XCTAssertTrue(prompt.contains("<|tool>"))
+        XCTAssertTrue(prompt.contains("declaration:bing_search"))
+        XCTAssertTrue(prompt.contains("description:<|\"|>Search the web.<|\"|>"))
+        XCTAssertTrue(prompt.contains("<tool|>"))
+    }
+
+    func testSwiftJinjaGemma4RendersNativeToolHistory() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let call = LLMToolCall(
+            id: "call_1",
+            name: "bing_search",
+            arguments: ["queries": ["is Ted Turner still alive"]]
+        )
+
+        let prompt = try formatter.format(
+            messages: [
+                ChatTemplateMessage(role: "user", content: "Is Ted Turner still alive?"),
+                ChatTemplateMessage(role: "assistant", content: "", toolCalls: [call]),
+                ChatTemplateMessage(
+                    role: "tool",
+                    content: ["ok": true, "answer": "Ted Turner is alive."],
+                    toolCallID: "call_1",
+                    name: "bing_search"
+                )
+            ],
+            bosToken: "<bos>",
+            eosToken: "<eos>"
+        )
+
+        XCTAssertTrue(prompt.contains(#"<|tool_call>call:bing_search{queries:[<|"|>is Ted Turner still alive<|"|>]}<tool_call|>"#))
+        XCTAssertTrue(prompt.contains(#"<|tool_response>response:bing_search{"#))
+        XCTAssertTrue(prompt.contains(#"answer:<|"|>Ted Turner is alive.<|"|>"#))
+        XCTAssertTrue(prompt.contains("<tool_response|>"))
+    }
+
     func testSwiftJinjaQwenThinkingEnabledLeavesThinkingOpen() throws {
         let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
         let prompt = try ChatTemplatePromptFormatter.format(
@@ -654,6 +718,34 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             #"analysis {"draft":true}<|channel|>final<|message|>{"title":"x"}"#
         )
         XCTAssertEqual(boundary?.reason, "json-complete")
+    }
+
+    func testGenerationBoundaryPreservesGemmaNativeToolCallEnvelope() {
+        let text = #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}<tool_call|> trailing"#
+
+        let boundary = LlamaEngine.firstGenerationBoundary(
+            in: text,
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+
+        XCTAssertEqual(
+            boundary?.text,
+            #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}<tool_call|>"#
+        )
+        XCTAssertEqual(boundary?.reason, "tool-call-complete")
+    }
+
+    func testGenerationBoundaryDoesNotTreatIncompleteGemmaNativeArgumentsAsJSON() {
+        let text = #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}"#
+
+        let boundary = LlamaEngine.firstGenerationBoundary(
+            in: text,
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+
+        XCTAssertNil(boundary)
     }
 
     func testStructuredSanitizerThrowsWhenPromptOpenThinkingNeverCloses() {

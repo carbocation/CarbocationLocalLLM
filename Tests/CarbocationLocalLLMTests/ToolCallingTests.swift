@@ -47,6 +47,16 @@ final class ToolCallingTests: XCTestCase {
         XCTAssertEqual(calls[0].arguments.array(forKey: "operands") ?? [], [.number(17.5), .number(23)])
     }
 
+    func testToolCallParserReadsObservedGemma4SearchCall() {
+        let text = #"<|tool_call>call:bing_search{queries:["is Ted Turner still alive"]}<tool_call|>"#
+
+        let calls = LLMToolCallParser.parseToolCalls(in: text)
+
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "bing_search")
+        XCTAssertEqual(calls[0].arguments.array(forKey: "queries"), ["is Ted Turner still alive"])
+    }
+
     func testToolCallParserReadsGemmaStyleNestedAndParallelCalls() {
         let text = #"<|tool_call>call:set_config{config:{theme:<|"|>dark<|"|>,count:3},enabled:true,items:[null,false,1.5e10]}<tool_call|><|tool_call>call:empty_args{}<tool_call|>"#
 
