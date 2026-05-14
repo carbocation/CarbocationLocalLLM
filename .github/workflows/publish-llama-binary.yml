@@ -47,13 +47,36 @@ jobs:
 
           selected=""
           selected_ver=""
-          for app in /Applications/Xcode_*.app; do
+          for app in /Applications/Xcode.app /Applications/Xcode_*.app; do
             [ -d "$app" ] || continue
-            ver="${app##*/Xcode_}"
-            ver="${ver%.app}"
+            app_name="${app##*/}"
+            if [ "$app_name" = "Xcode.app" ]; then
+              ver="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/version.plist" 2>/dev/null || echo "")"
+            else
+              ver="${app_name#Xcode_}"
+              ver="${ver%.app}"
+            fi
 
-            # Reject obvious beta naming (e.g. Xcode_26.5_beta_2.app).
-            case "$ver" in *[!0-9.]*) continue ;; esac
+            # Reject prerelease naming explicitly before accepting version-like names.
+            lower_app_name="$(printf '%s' "$app_name" | tr '[:upper:]' '[:lower:]')"
+            case "$lower_app_name" in
+              *beta*|*seed*|*release*candidate*|*_rc*|*-rc*)
+                echo "Skipping $app_name: prerelease Xcode name"
+                continue
+                ;;
+            esac
+
+            # Reject any remaining non-final naming (e.g. Xcode_26.5_beta_2.app).
+            case "$ver" in
+              "")
+                echo "Skipping $app_name: unable to read CFBundleShortVersionString"
+                continue
+                ;;
+              *[!0-9.]*)
+                echo "Skipping $app_name: non-final Xcode version name"
+                continue
+                ;;
+            esac
 
             # Require version >= 26.4
             major="${ver%%.*}"
@@ -67,7 +90,44 @@ jobs:
             # shipping build 17F5022i). Apple's seed/beta build numbers always end in
             # a letter; final builds end in a digit.
             build=$(plutil -extract ProductBuildVersion raw "$app/Contents/version.plist" 2>/dev/null || echo "")
-            case "$build" in *[A-Za-z]) continue ;; esac
+            if [ -z "$build" ]; then
+              echo "Skipping $app_name: unable to read ProductBuildVersion"
+              continue
+            fi
+            case "$build" in
+              *[A-Za-z])
+                echo "Skipping $app_name: seed ProductBuildVersion $build"
+                continue
+                ;;
+            esac
+
+            developer_dir="$app/Contents/Developer"
+            if [ ! -d "$developer_dir/Platforms/iPhoneOS.platform" ]; then
+              echo "Skipping $app_name: iPhoneOS platform is not installed"
+              continue
+            fi
+            if [ ! -d "$developer_dir/Platforms/iPhoneSimulator.platform" ]; then
+              echo "Skipping $app_name: iPhoneSimulator platform is not installed"
+              continue
+            fi
+            if ! DEVELOPER_DIR="$developer_dir" xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+              echo "Skipping $app_name: iphoneos SDK is not usable"
+              continue
+            fi
+            if ! DEVELOPER_DIR="$developer_dir" xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then
+              echo "Skipping $app_name: iphonesimulator SDK is not usable"
+              continue
+            fi
+
+            sdk_list="$(DEVELOPER_DIR="$developer_dir" xcodebuild -showsdks 2>/dev/null || true)"
+            if ! printf '%s\n' "$sdk_list" | grep -q -- '-sdk iphoneos'; then
+              echo "Skipping $app_name: xcodebuild -showsdks does not report iphoneos"
+              continue
+            fi
+            if ! printf '%s\n' "$sdk_list" | grep -q -- '-sdk iphonesimulator'; then
+              echo "Skipping $app_name: xcodebuild -showsdks does not report iphonesimulator"
+              continue
+            fi
 
             # Pick the highest qualifying version.
             if [ -z "$selected_ver" ] \
@@ -78,7 +138,7 @@ jobs:
           done
 
           if [ -z "$selected" ]; then
-            echo "::error::No stable Xcode 26.4 or newer is pre-installed on this runner" >&2
+            echo "::error::No stable Xcode 26.4 or newer with usable iOS device and simulator SDKs is pre-installed on this runner" >&2
             exit 1
           fi
 
