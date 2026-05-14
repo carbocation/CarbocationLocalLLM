@@ -303,6 +303,14 @@ private struct PromptPane: View {
             .buttonStyle(.bordered)
             .disabled(!state.isRunning)
 
+            Button {
+                state.stopThinking()
+            } label: {
+                Label("Stop Thinking", systemImage: "brain.head.profile")
+            }
+            .buttonStyle(.bordered)
+            .disabled(!state.canStopThinking)
+
             Spacer()
 
             Button {

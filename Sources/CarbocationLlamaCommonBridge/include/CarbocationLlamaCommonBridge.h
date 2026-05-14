@@ -39,6 +39,12 @@ int32_t carbocation_llama_reasoning_budget_sampler_remaining(
     const struct llama_sampler * sampler
 );
 
+int32_t carbocation_llama_reasoning_budget_sampler_force(
+    struct llama_sampler * sampler,
+    const llama_token * forced_tokens,
+    size_t forced_token_count
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -620,6 +620,23 @@ public actor LlamaEngine: LLMEngine {
             system: system,
             prompt: prompt,
             options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: control,
             onPhaseAwareEvent: { event in
                 if let streamEvent = event.streamEvent {
                     onEvent(streamEvent)
@@ -635,12 +652,36 @@ public actor LlamaEngine: LLMEngine {
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
         guard context != nil, vocabulary != nil, loadedInfo != nil else {
             throw LLMEngineError.noModelLoaded
         }
 
         beginGenerationLease()
         defer { endGenerationLease() }
+        let controlGenerationID = control?.beginGeneration()
+        defer {
+            if let controlGenerationID {
+                control?.finishGeneration(controlGenerationID)
+            }
+        }
 
         let promptFormatting: PromptFormattingResult
         do {
@@ -661,6 +702,8 @@ public actor LlamaEngine: LLMEngine {
         return try await generate(
             promptFormatting: promptFormatting,
             options: options,
+            control: control,
+            controlGenerationID: controlGenerationID,
             onPhaseAwareEvent: onPhaseAwareEvent
         )
     }
@@ -668,6 +711,8 @@ public actor LlamaEngine: LLMEngine {
     func generate(
         promptFormatting: PromptFormattingResult,
         options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        controlGenerationID: UInt64? = nil,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
     ) async throws -> String {
         guard let context, let vocabulary else {
@@ -755,7 +800,8 @@ public actor LlamaEngine: LLMEngine {
             for: options,
             profile: activeOutputProfile,
             continuingOpenThinkingPairs: continuingOpenThinkingPairs,
-            startsInThinking: streamPhasePlan.startsInThinking == true
+            startsInThinking: streamPhasePlan.startsInThinking == true,
+            requiresSampler: control != nil
         )
         llamaRuntimeLog.info(
             "Generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public) thinkingBudgetActive=\(reasoningBudgetPlan != nil, privacy: .public)"
@@ -878,6 +924,16 @@ public actor LlamaEngine: LLMEngine {
 
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
+            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+                applyThinkingTerminationIfRequested(
+                    control: control,
+                    generationID: controlGenerationID,
+                    currentPhase: currentPhase,
+                    samplerRuntime: samplerRuntime,
+                    reasoningBudgetPlan: reasoningBudgetPlan,
+                    vocab: vocabulary
+                )
+            }
 
             let next = llama_sampler_sample(sampler, context, -1)
             let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {

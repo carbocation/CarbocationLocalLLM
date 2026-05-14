@@ -158,6 +158,7 @@ final class DemoState {
 
     private var generationTask: Task<Void, Never>?
     private let appSamplingOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
+    private let generationControl = LLMGenerationControl()
     private let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
         heartbeatInterval: 0.5
     ))
@@ -191,6 +192,10 @@ final class DemoState {
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && generationOptionsValidationMessage == nil
             && toolValidationMessage == nil
+    }
+
+    var canStopThinking: Bool {
+        isRunning && enableThinking && streamPhase == .thinking
     }
 
     var generationOptionsValidationMessage: String? {
@@ -567,6 +572,14 @@ final class DemoState {
         }
     }
 
+    func stopThinking() {
+        if generationControl.requestThinkingTermination() {
+            appendEvent("thinking-termination-requested")
+        } else {
+            appendEvent("thinking-termination-unavailable")
+        }
+    }
+
     func clear() {
         output = ""
         events = ""
@@ -611,6 +624,7 @@ final class DemoState {
                     system: systemPrompt,
                     prompt: prompt,
                     options: options,
+                    control: generationControl,
                     onPhaseAwareEvent: { [weak self] event in
                         Task { @MainActor [weak self] in
                             self?.handle(event: event)
@@ -639,6 +653,7 @@ final class DemoState {
                 )
                 let result = try await engine.generateWithTools(
                     request,
+                    control: generationControl,
                     onPhaseAwareEvent: { [weak self] event in
                         Task { @MainActor [weak self] in
                             self?.handle(event: event)

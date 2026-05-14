@@ -579,6 +579,36 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(GenerationOptions.self, from: data))
     }
 
+    func testGenerationControlScopesThinkingTerminationRequestsToActiveGeneration() {
+        let control = LLMGenerationControl()
+
+        XCTAssertFalse(control.requestThinkingTermination())
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 0)
+
+        let firstGeneration = control.beginGeneration()
+        XCTAssertTrue(control.requestThinkingTermination(message: "Stop."))
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 1)
+        XCTAssertEqual(
+            control.takePendingThinkingTerminationRequest(for: firstGeneration),
+            LLMThinkingTerminationRequest(
+                generationID: firstGeneration,
+                requestID: 1,
+                message: "Stop."
+            )
+        )
+        XCTAssertNil(control.takePendingThinkingTerminationRequest(for: firstGeneration))
+
+        XCTAssertTrue(control.requestThinkingTermination())
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 2)
+        control.finishGeneration(firstGeneration)
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 0)
+
+        let secondGeneration = control.beginGeneration()
+        XCTAssertNil(control.takePendingThinkingTerminationRequest(for: secondGeneration))
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 0)
+        control.finishGeneration(secondGeneration)
+    }
+
     func testGenerationPreflightComputesOutputBudget() {
         let uncapped = LLMGenerationPreflight(
             loadedContextSize: 4_096,

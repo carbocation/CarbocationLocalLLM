@@ -82,6 +82,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             await toolGate.suspendUntilReleased()
             return ["answer": "tool output"]
         }
+        let control = LLMGenerationControl()
 
         let generationTask = Task {
             try await engine.generateWithTools(LLMToolGenerationRequest(
@@ -89,12 +90,14 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 prompt: "Use lookup.",
                 tools: [lookupTool],
                 maxToolRounds: 1
-            ))
+            ), control: control)
         }
 
         try await withTimeout(seconds: 5) {
             await toolGate.waitUntilStarted()
         }
+        XCTAssertTrue(control.requestThinkingTermination())
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 1)
 
         await engine.unload()
         let loadedInfoAfterUnloadRequest = await engine.currentLoadedModelInfo()
@@ -113,6 +116,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(result.roundsCompleted, 1)
         XCTAssertEqual(result.toolCalls.map(\.name), ["lookup"])
         XCTAssertEqual(result.toolOutputs.map(\.content), [["answer": "tool output"]])
+        XCTAssertEqual(control.thinkingTerminationRequestCount, 0)
         let loadedInfoAfterGeneration = await engine.currentLoadedModelInfo()
         XCTAssertNil(
             loadedInfoAfterGeneration,
@@ -578,6 +582,40 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         XCTAssertEqual(plan?.pair, pair)
+        XCTAssertEqual(plan?.initialState, .counting)
+    }
+
+    func testReasoningBudgetPlanCreatesControlSamplerWithoutFixedBudget() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+
+        XCTAssertNil(LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true),
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: []
+        ))
+
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true),
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            requiresSampler: true
+        )
+
+        XCTAssertEqual(plan?.pair, pair)
+        XCTAssertEqual(plan?.budgetTokens, Int(Int32.max))
+        XCTAssertEqual(plan?.initialState, .idle)
+    }
+
+    func testReasoningBudgetPlanUsesFinalMarkerForControlSampler() {
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true),
+            profile: OutputSanitizationProfile(finalMarkers: ["<final>"]),
+            continuingOpenThinkingPairs: [],
+            requiresSampler: true
+        )
+
+        XCTAssertEqual(plan?.pair, OutputDelimiterPair(open: "", close: "<final>"))
+        XCTAssertEqual(plan?.budgetTokens, Int(Int32.max))
         XCTAssertEqual(plan?.initialState, .counting)
     }
 

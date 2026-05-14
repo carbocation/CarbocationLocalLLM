@@ -153,3 +153,24 @@ extern "C" int32_t carbocation_llama_reasoning_budget_sampler_remaining(
     }
     return ((const common_reasoning_budget_ctx *) sampler->ctx)->remaining;
 }
+
+extern "C" int32_t carbocation_llama_reasoning_budget_sampler_force(
+    llama_sampler * sampler,
+    const llama_token * forced_tokens,
+    size_t forced_token_count
+) {
+    if (sampler == nullptr || forced_tokens == nullptr || forced_token_count == 0) {
+        return 0;
+    }
+
+    auto * ctx = (common_reasoning_budget_ctx *) sampler->ctx;
+    if (ctx->state != REASONING_BUDGET_COUNTING && ctx->state != REASONING_BUDGET_WAITING_UTF8) {
+        return 0;
+    }
+
+    ctx->forced_tokens = token_vector(forced_tokens, forced_token_count);
+    ctx->state = REASONING_BUDGET_FORCING;
+    ctx->force_pos = 0;
+    ctx->end_matcher.reset();
+    return 1;
+}

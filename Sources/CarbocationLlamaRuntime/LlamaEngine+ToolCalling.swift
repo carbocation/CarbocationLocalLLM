@@ -8,6 +8,18 @@ extension LlamaEngine {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolGenerationResult {
+        try await generateWithTools(
+            request,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+    }
+
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
         guard vocabulary != nil,
               context != nil || toolAwareGenerationSegmentOverride != nil else {
             throw LLMEngineError.noModelLoaded
@@ -33,6 +45,7 @@ extension LlamaEngine {
                 system: request.system,
                 prompt: request.prompt,
                 options: request.options,
+                control: control,
                 onPhaseAwareEvent: { event in
                     stats.record(event)
                     onPhaseAwareEvent(.finalAnswerEvent(event))
@@ -41,6 +54,13 @@ extension LlamaEngine {
             let snapshot = stats.snapshot(fallbackStopReason: "complete")
             emitAggregateStats(stopReason: snapshot.stopReason)
             return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)
+        }
+
+        let controlGenerationID = control?.beginGeneration()
+        defer {
+            if let controlGenerationID {
+                control?.finishGeneration(controlGenerationID)
+            }
         }
 
         let toolsByName = LLMToolRuntime.index(request.tools)
@@ -74,6 +94,8 @@ extension LlamaEngine {
                 isInternalContinuation: continuation != nil,
                 phaseLock: continuation?.triggerPhase == .final ? .final : nil,
                 emitDoneOnCompletion: true,
+                control: control,
+                controlGenerationID: controlGenerationID,
                 onPhaseAwareEvent: onPhaseAwareEvent
             )
 
@@ -122,6 +144,8 @@ extension LlamaEngine {
                     phaseLock: segment.triggerPhase == .final ? .final : nil,
                     emitDoneOnCompletion: true,
                     emitDoneOnToolInterception: true,
+                    control: control,
+                    controlGenerationID: controlGenerationID,
                     onPhaseAwareEvent: onPhaseAwareEvent
                 )
                 emitAggregateStats(stopReason: "max-tool-rounds")
@@ -444,6 +468,8 @@ private extension LlamaEngine {
         phaseLock: LLMStreamContentPhase? = nil,
         emitDoneOnCompletion: Bool,
         emitDoneOnToolInterception: Bool = false,
+        control: LLMGenerationControl? = nil,
+        controlGenerationID: UInt64? = nil,
         onPhaseAwareEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
     ) async throws -> ToolAwareGenerationSegment {
         if let override = toolAwareGenerationSegmentOverride {
@@ -558,7 +584,8 @@ private extension LlamaEngine {
             for: options,
             profile: activeOutputProfile,
             continuingOpenThinkingPairs: continuingOpenThinkingPairs,
-            startsInThinking: streamPhasePlan.startsInThinking == true
+            startsInThinking: streamPhasePlan.startsInThinking == true,
+            requiresSampler: control != nil
         )
         llamaRuntimeLog.info(
             "Tool-aware generation grammar mode selected: mode=\(grammarMode.logLabel, privacy: .public) enableThinking=\(options.enableThinking, privacy: .public) continuingOpenThinkingPairs=\(continuingOpenThinkingPairs.count, privacy: .public) thinkingBudgetActive=\(reasoningBudgetPlan != nil, privacy: .public)"
@@ -691,6 +718,16 @@ private extension LlamaEngine {
 
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
+            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+                applyThinkingTerminationIfRequested(
+                    control: control,
+                    generationID: controlGenerationID,
+                    currentPhase: currentPhase,
+                    samplerRuntime: samplerRuntime,
+                    reasoningBudgetPlan: reasoningBudgetPlan,
+                    vocab: vocabulary
+                )
+            }
 
             let next = llama_sampler_sample(sampler, context, -1)
             let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {

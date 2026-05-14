@@ -170,6 +170,23 @@ public protocol LLMEngine: Sendable {
         system: String,
         prompt: String,
         options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String
+
+    func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void
+    ) async throws -> String
+
+    func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void
     ) async throws -> String
@@ -178,9 +195,30 @@ public protocol LLMEngine: Sendable {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
     ) async throws -> LLMToolGenerationResult
+
+    func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl?,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
+    ) async throws -> LLMToolGenerationResult
 }
 
 extension LLMEngine {
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            onEvent: onEvent
+        )
+    }
+
     public func generate(
         system: String,
         prompt: String,
@@ -212,6 +250,23 @@ extension LLMEngine {
                     onPhaseAwareEvent(.done(totalBytes: totalBytes, duration: duration, phase: .final))
                 }
             }
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
         )
     }
 
@@ -250,6 +305,14 @@ extension LLMEngine {
         throw LLMToolError.unsupportedToolMode(
             "\(Self.self) does not implement single-pass or native tool generation."
         )
+    }
+
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl?,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
+        try await generateWithTools(request, onPhaseAwareEvent: onPhaseAwareEvent)
     }
 }
 

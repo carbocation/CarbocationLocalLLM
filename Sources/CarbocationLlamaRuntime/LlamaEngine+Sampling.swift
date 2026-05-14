@@ -93,6 +93,58 @@ extension LlamaEngine {
         )
     }
 
+    func applyThinkingTerminationIfRequested(
+        control: LLMGenerationControl?,
+        generationID: UInt64?,
+        currentPhase: LLMStreamContentPhase,
+        samplerRuntime: SamplerRuntime,
+        reasoningBudgetPlan: ReasoningBudgetPlan?,
+        vocab: OpaquePointer
+    ) {
+        guard let control,
+              let generationID,
+              let request = control.takePendingThinkingTerminationRequest(for: generationID) else {
+            return
+        }
+        guard currentPhase == .thinking,
+              let reasoningBudgetSampler = samplerRuntime.reasoningBudgetSampler,
+              let reasoningBudgetPlan else {
+            llamaRuntimeLog.info(
+                "Thinking termination request ignored outside an active thinking sampler: requestID=\(request.requestID, privacy: .public) phase=\(currentPhase.rawValue, privacy: .public)"
+            )
+            return
+        }
+
+        do {
+            let forcedTokens = try tokenize(
+                vocab: vocab,
+                text: request.message + reasoningBudgetPlan.pair.close,
+                addSpecial: false
+            )
+            guard !forcedTokens.isEmpty else {
+                llamaRuntimeLog.info(
+                    "Thinking termination request ignored because forced marker tokenization was empty: requestID=\(request.requestID, privacy: .public)"
+                )
+                return
+            }
+
+            let didForce = forcedTokens.withUnsafeBufferPointer { buffer in
+                carbocation_llama_reasoning_budget_sampler_force(
+                    reasoningBudgetSampler,
+                    buffer.baseAddress,
+                    buffer.count
+                ) != 0
+            }
+            llamaRuntimeLog.info(
+                "Thinking termination request \(didForce ? "accepted" : "ignored", privacy: .public): requestID=\(request.requestID, privacy: .public) forcedTokens=\(forcedTokens.count, privacy: .public) phase=\(currentPhase.rawValue, privacy: .public)"
+            )
+        } catch {
+            llamaRuntimeLog.error(
+                "Thinking termination request ignored after tokenization failure: requestID=\(request.requestID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     static func reasoningBudgetStateIsExhausted(
         _ state: carbocation_llama_reasoning_budget_state
     ) -> Bool {

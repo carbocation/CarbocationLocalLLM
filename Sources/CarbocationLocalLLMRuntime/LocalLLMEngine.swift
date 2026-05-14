@@ -365,6 +365,22 @@ public actor LocalLLMEngine: LLMEngine {
         options: GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
         guard let loadedInfo else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
@@ -375,6 +391,7 @@ public actor LocalLLMEngine: LLMEngine {
                 system: system,
                 prompt: prompt,
                 options: options,
+                control: control,
                 onEvent: onEvent
             )
         case .system(.appleIntelligence):
@@ -383,6 +400,7 @@ public actor LocalLLMEngine: LLMEngine {
                     system: system,
                     prompt: prompt,
                     options: options,
+                    control: control,
                     onEvent: onEvent
                 )
             } catch {
@@ -398,6 +416,24 @@ public actor LocalLLMEngine: LLMEngine {
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
         guard let loadedInfo else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
@@ -408,6 +444,7 @@ public actor LocalLLMEngine: LLMEngine {
                 system: system,
                 prompt: prompt,
                 options: options,
+                control: control,
                 onPhaseAwareEvent: onPhaseAwareEvent
             )
         case .system(.appleIntelligence):
@@ -416,6 +453,7 @@ public actor LocalLLMEngine: LLMEngine {
                     system: system,
                     prompt: prompt,
                     options: options,
+                    control: control,
                     onPhaseAwareEvent: onPhaseAwareEvent
                 )
             } catch {
@@ -428,6 +466,18 @@ public actor LocalLLMEngine: LLMEngine {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolGenerationResult {
+        try await generateWithTools(
+            request,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+    }
+
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
         guard let loadedInfo else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
@@ -436,12 +486,14 @@ public actor LocalLLMEngine: LLMEngine {
         case .installed:
             return try await llamaEngine.generateWithTools(
                 request,
+                control: control,
                 onPhaseAwareEvent: onPhaseAwareEvent
             )
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generateWithTools(
                     request,
+                    control: control,
                     onPhaseAwareEvent: onPhaseAwareEvent
                 )
             } catch {
@@ -570,6 +622,20 @@ public actor LocalLLMSession {
         options: GenerationOptions,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
         guard let loadedInfo else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
@@ -583,6 +649,7 @@ public actor LocalLLMSession {
                 system: system,
                 prompt: prompt,
                 options: options,
+                control: control,
                 onEvent: onEvent
             )
         case .system(.appleIntelligence):
@@ -593,6 +660,7 @@ public actor LocalLLMSession {
                 return try await appleIntelligenceSession.generate(
                     prompt: prompt,
                     options: options,
+                    control: control,
                     onEvent: onEvent
                 )
             } catch {
@@ -604,6 +672,22 @@ public actor LocalLLMSession {
     public func generate(
         prompt: String,
         options: GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
@@ -620,6 +704,7 @@ public actor LocalLLMSession {
                 system: system,
                 prompt: prompt,
                 options: options,
+                control: control,
                 onPhaseAwareEvent: onPhaseAwareEvent
             )
         case .system(.appleIntelligence):
@@ -630,6 +715,7 @@ public actor LocalLLMSession {
                 return try await appleIntelligenceSession.generate(
                     prompt: prompt,
                     options: options,
+                    control: control,
                     onPhaseAwareEvent: onPhaseAwareEvent
                 )
             } catch {

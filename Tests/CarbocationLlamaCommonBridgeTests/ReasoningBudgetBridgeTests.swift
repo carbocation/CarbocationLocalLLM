@@ -101,6 +101,67 @@ final class ReasoningBudgetBridgeTests: XCTestCase {
         )
     }
 
+    func testForceRequestSwitchesCountingSamplerToForcedSequence() {
+        let sampler = makeSampler(budget: 10)
+        defer { llama_sampler_free(sampler) }
+
+        llama_sampler_accept(sampler, 1)
+
+        let forced: [llama_token] = [20, 2]
+        let didForce = forced.withUnsafeBufferPointer { buffer in
+            carbocation_llama_reasoning_budget_sampler_force(
+                sampler,
+                buffer.baseAddress,
+                buffer.count
+            )
+        }
+
+        XCTAssertEqual(didForce, 1)
+        XCTAssertEqual(
+            carbocation_llama_reasoning_budget_sampler_state(sampler),
+            CARBOCATION_LLAMA_REASONING_BUDGET_FORCING
+        )
+
+        let firstCandidates = appliedCandidates(sampler: sampler, ids: [2, 20, 21])
+        XCTAssertTrue(firstCandidates[0].logit.isInfinite)
+        XCTAssertLessThan(firstCandidates[0].logit, 0)
+        XCTAssertEqual(firstCandidates[1].logit, 0)
+        XCTAssertTrue(firstCandidates[2].logit.isInfinite)
+        XCTAssertLessThan(firstCandidates[2].logit, 0)
+
+        llama_sampler_accept(sampler, 20)
+        let secondCandidates = appliedCandidates(sampler: sampler, ids: [2, 20])
+        XCTAssertEqual(secondCandidates[0].logit, 0)
+        XCTAssertTrue(secondCandidates[1].logit.isInfinite)
+        XCTAssertLessThan(secondCandidates[1].logit, 0)
+    }
+
+    func testForceRequestOutsideThinkingIsNoOp() {
+        let sampler = makeSampler(budget: 10)
+        defer { llama_sampler_free(sampler) }
+
+        let forced: [llama_token] = [20, 2]
+        let idleForce = forced.withUnsafeBufferPointer { buffer in
+            carbocation_llama_reasoning_budget_sampler_force(
+                sampler,
+                buffer.baseAddress,
+                buffer.count
+            )
+        }
+        XCTAssertEqual(idleForce, 0)
+
+        llama_sampler_accept(sampler, 1)
+        llama_sampler_accept(sampler, 2)
+        let doneForce = forced.withUnsafeBufferPointer { buffer in
+            carbocation_llama_reasoning_budget_sampler_force(
+                sampler,
+                buffer.baseAddress,
+                buffer.count
+            )
+        }
+        XCTAssertEqual(doneForce, 0)
+    }
+
     private func makeSampler(
         budget: Int32,
         initialState: carbocation_llama_reasoning_budget_state = CARBOCATION_LLAMA_REASONING_BUDGET_IDLE

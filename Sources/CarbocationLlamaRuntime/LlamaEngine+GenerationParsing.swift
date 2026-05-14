@@ -30,13 +30,16 @@ extension LlamaEngine {
         for options: GenerationOptions,
         profile: OutputSanitizationProfile,
         continuingOpenThinkingPairs: [OutputDelimiterPair],
-        startsInThinking: Bool = false
+        startsInThinking: Bool = false,
+        requiresSampler: Bool = false
     ) -> ReasoningBudgetPlan? {
         guard options.enableThinking,
-              let budgetTokens = options.thinkingBudgetTokens,
-              budgetTokens >= 0 else {
+              options.thinkingBudgetTokens.map({ $0 >= 0 }) ?? true else {
             return nil
         }
+        let budgetTokens = options.thinkingBudgetTokens
+            ?? (requiresSampler ? Int(Int32.max) : nil)
+        guard let budgetTokens else { return nil }
 
         if let continuingPair = continuingOpenThinkingPairs.first,
            !continuingPair.close.isEmpty {
@@ -48,26 +51,35 @@ extension LlamaEngine {
             )
         }
 
-        guard let pair = profile.thinkingPairs.first,
-              !pair.open.isEmpty,
-              !pair.close.isEmpty else {
-            return nil
-        }
+        if let pair = profile.thinkingPairs.first,
+           !pair.open.isEmpty,
+           !pair.close.isEmpty {
+            if startsInThinking {
+                return ReasoningBudgetPlan(
+                    pair: pair,
+                    budgetTokens: budgetTokens,
+                    message: options.thinkingBudgetMessage,
+                    initialState: .counting
+                )
+            }
 
-        if startsInThinking {
             return ReasoningBudgetPlan(
                 pair: pair,
                 budgetTokens: budgetTokens,
                 message: options.thinkingBudgetMessage,
-                initialState: .counting
+                initialState: .idle
             )
         }
 
+        guard let finalMarker = profile.allFinalMarkers.first,
+              !finalMarker.isEmpty else {
+            return nil
+        }
         return ReasoningBudgetPlan(
-            pair: pair,
+            pair: OutputDelimiterPair(open: "", close: finalMarker),
             budgetTokens: budgetTokens,
             message: options.thinkingBudgetMessage,
-            initialState: .idle
+            initialState: .counting
         )
     }
 

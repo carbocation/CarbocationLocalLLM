@@ -462,6 +462,23 @@ public actor AppleIntelligenceEngine: LLMEngine {
             system: system,
             prompt: prompt,
             options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: control,
             onPhaseAwareEvent: { event in
                 if let streamEvent = event.streamEvent {
                     onEvent(streamEvent)
@@ -474,6 +491,24 @@ public actor AppleIntelligenceEngine: LLMEngine {
         system: String,
         prompt: String,
         options: CarbocationLocalLLM.GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        system: String,
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        control: LLMGenerationControl? = nil,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
@@ -508,6 +543,18 @@ public actor AppleIntelligenceEngine: LLMEngine {
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolGenerationResult {
+        try await generateWithTools(
+            request,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+    }
+
+    public func generateWithTools(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolGenerationResult {
         try LLMToolRuntime.validate(request)
         let stats = AppleToolGenerationStatsAccumulator()
 
@@ -525,6 +572,7 @@ public actor AppleIntelligenceEngine: LLMEngine {
                 system: request.system,
                 prompt: request.prompt,
                 options: request.options,
+                control: control,
                 onPhaseAwareEvent: { event in
                     stats.record(event)
                     onPhaseAwareEvent(.finalAnswerEvent(event))
@@ -613,6 +661,21 @@ public actor AppleIntelligenceSession {
         try await generate(
             prompt: prompt,
             options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            options: options,
+            control: control,
             onPhaseAwareEvent: { event in
                 if let streamEvent = event.streamEvent {
                     onEvent(streamEvent)
@@ -624,6 +687,22 @@ public actor AppleIntelligenceSession {
     public func generate(
         prompt: String,
         options: CarbocationLocalLLM.GenerationOptions,
+        onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        options: CarbocationLocalLLM.GenerationOptions,
+        control: LLMGenerationControl? = nil,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
