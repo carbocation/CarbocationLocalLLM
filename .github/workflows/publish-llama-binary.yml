@@ -128,6 +128,27 @@ jobs:
               echo "Skipping $app_name: xcodebuild -showsdks does not report iphonesimulator"
               continue
             fi
+            probe_derived_data_path=".build/XcodeDerivedData-XcodeSelection-${app_name%.app}"
+            if ! DEVELOPER_DIR="$developer_dir" xcodebuild \
+              -project Apps.xcodeproj \
+              -scheme CLLMSmokeIOS \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$probe_derived_data_path-iOS" \
+              -showBuildSettings \
+              CODE_SIGNING_ALLOWED=NO >/dev/null 2>&1; then
+              echo "Skipping $app_name: generic iOS destination is not usable"
+              continue
+            fi
+            if ! DEVELOPER_DIR="$developer_dir" xcodebuild \
+              -project Apps.xcodeproj \
+              -scheme CLLMSmokeIOS \
+              -destination "generic/platform=iOS Simulator" \
+              -derivedDataPath "$probe_derived_data_path-iOSSimulator" \
+              -showBuildSettings \
+              CODE_SIGNING_ALLOWED=NO >/dev/null 2>&1; then
+              echo "Skipping $app_name: generic iOS Simulator destination is not usable"
+              continue
+            fi
 
             # Pick the highest qualifying version.
             if [ -z "$selected_ver" ] \
