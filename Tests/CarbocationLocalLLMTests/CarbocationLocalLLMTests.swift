@@ -1357,6 +1357,60 @@ final class CarbocationLocalLLMTests: XCTestCase {
         )))
     }
 
+    func testOutputProfileDerivationAdditionalThinkingDialects() {
+        let cases: [(template: String, pair: OutputDelimiterPair)] = [
+            (
+                "[THINK]{{ reasoning }}[/THINK]{{ content }}",
+                OutputDelimiterPair(open: "[THINK]", close: "[/THINK]")
+            ),
+            (
+                "<seed:think>{{ reasoning }}</seed:think>{{ content }}",
+                OutputDelimiterPair(open: "<seed:think>", close: "</seed:think>")
+            ),
+            (
+                "<|inner_prefix|>{{ reasoning }}<|inner_suffix|>{{ content }}",
+                OutputDelimiterPair(open: "<|inner_prefix|>", close: "<|inner_suffix|>")
+            ),
+            (
+                "<|begin|>assistant<|think|>{{ reasoning }}<|end|><|content|>{{ content }}",
+                OutputDelimiterPair(open: "<|think|>", close: "<|end|>")
+            )
+        ]
+
+        for testCase in cases {
+            let profile = OutputSanitizationProfile.derived(fromChatTemplate: testCase.template)
+
+            XCTAssertTrue(
+                profile.thinkingPairs.contains(testCase.pair),
+                "Expected \(testCase.pair) for template \(testCase.template)"
+            )
+        }
+    }
+
+    func testOutputProfileDerivationFinalMarkerThinkingDialect() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        Here are my reasoning steps:
+        [BEGIN FINAL RESPONSE]{{ content }}[END FINAL RESPONSE]
+        """)
+
+        XCTAssertEqual(profile.allFinalMarkers, ["[BEGIN FINAL RESPONSE]"])
+        XCTAssertEqual(profile.scrubTokens, ["[END FINAL RESPONSE]"])
+    }
+
+    func testOutputProfileDerivationSolarContentMarker() {
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: """
+        {{ "<|begin|>assistant<|think|>" + reasoning + "<|end|>" }}
+        {{ "<|begin|>assistant<|content|>" + content + "<|end|>" }}
+        """)
+
+        XCTAssertTrue(profile.thinkingPairs.contains(OutputDelimiterPair(
+            open: "<|think|>",
+            close: "<|end|>"
+        )))
+        XCTAssertEqual(profile.allFinalMarkers, ["<|content|>"])
+        XCTAssertEqual(profile.scrubTokens, ["<|end|>", "<|content|>"])
+    }
+
     func testOutputProfileDerivationUnknownModelIsEmpty() {
         let profile = OutputSanitizationProfile.derived(fromChatTemplate: "plain template")
 
@@ -1442,6 +1496,70 @@ final class CarbocationLocalLLMTests: XCTestCase {
                 "<|START_THINKING|>hidden notes<|END_THINKING|>visible answer",
                 using: profile
             ),
+            "visible answer"
+        )
+    }
+
+    func testProfileDrivenSanitizerStripsAdditionalThinkingDialects() {
+        let cases: [(pair: OutputDelimiterPair, raw: String)] = [
+            (
+                OutputDelimiterPair(open: "[THINK]", close: "[/THINK]"),
+                "[THINK]hidden notes[/THINK]visible answer"
+            ),
+            (
+                OutputDelimiterPair(open: "<seed:think>", close: "</seed:think>"),
+                "<seed:think>hidden notes</seed:think>visible answer"
+            ),
+            (
+                OutputDelimiterPair(open: "<|inner_prefix|>", close: "<|inner_suffix|>"),
+                "<|inner_prefix|>hidden notes<|inner_suffix|>visible answer"
+            ),
+            (
+                OutputDelimiterPair(open: "<|think|>", close: "<|end|>"),
+                "<|think|>hidden notes<|end|><|content|>visible answer<|end|>"
+            )
+        ]
+
+        for testCase in cases {
+            let profile = OutputSanitizationProfile(
+                thinkingPairs: [testCase.pair],
+                scrubTokens: ["<|end|>", "<|content|>"],
+                finalMarkers: testCase.pair.open == "<|think|>" ? ["<|content|>"] : []
+            )
+
+            XCTAssertEqual(
+                LLMResponseSanitizer.unwrapStructuredOutput(testCase.raw, using: profile),
+                "visible answer",
+                "Expected sanitizer to strip \(testCase.pair)"
+            )
+        }
+    }
+
+    func testProfileDrivenSanitizerSlicesFinalMarkerThinkingDialect() {
+        let profile = OutputSanitizationProfile(
+            scrubTokens: ["[END FINAL RESPONSE]"],
+            finalMarkers: ["[BEGIN FINAL RESPONSE]"]
+        )
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(
+                "hidden reasoning[BEGIN FINAL RESPONSE]visible answer[END FINAL RESPONSE]",
+                using: profile
+            ),
+            "visible answer"
+        )
+    }
+
+    func testLegacySanitizerStripsKnownThinkingDialects() {
+        let raw = """
+        [THINK]hidden[/THINK]
+        <seed:think>hidden</seed:think>
+        <|inner_prefix|>hidden<|inner_suffix|>
+        <|think|>hidden<|end|><|content|>visible answer<|end|>
+        """
+
+        XCTAssertEqual(
+            LLMResponseSanitizer.unwrapStructuredOutput(raw),
             "visible answer"
         )
     }

@@ -134,7 +134,7 @@ extension LlamaEngine {
         in renderedPrompt: String,
         profile: OutputSanitizationProfile
     ) -> [OutputDelimiterPair] {
-        profile.thinkingPairs.filter { pair in
+        let explicitPairs = profile.thinkingPairs.filter { pair in
             guard let openRange = renderedPrompt.range(of: pair.open, options: .backwards) else {
                 return false
             }
@@ -148,6 +148,34 @@ extension LlamaEngine {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .isEmpty
         }
+
+        if !explicitPairs.isEmpty {
+            return explicitPairs
+        }
+
+        if let implicitPair = implicitPromptDrivenThinkingPair(
+            in: renderedPrompt,
+            profile: profile
+        ) {
+            return [implicitPair]
+        }
+
+        return []
+    }
+
+    private static func implicitPromptDrivenThinkingPair(
+        in renderedPrompt: String,
+        profile: OutputSanitizationProfile
+    ) -> OutputDelimiterPair? {
+        guard renderedPrompt.contains("<|turn>system\n<|think|>\n"),
+              renderedPrompt.hasSuffix("<|turn>model\n"),
+              let pair = profile.thinkingPairs.first(where: {
+                $0.open == "<|channel>thought" && $0.close == "<channel|>"
+              }) else {
+            return nil
+        }
+
+        return OutputDelimiterPair(open: "", close: pair.close)
     }
 
     static func streamContentPhase(

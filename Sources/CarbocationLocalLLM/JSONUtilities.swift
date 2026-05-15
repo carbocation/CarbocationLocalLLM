@@ -69,9 +69,16 @@ public enum LLMResponsePreview {
 
 public enum LLMResponseSanitizer {
     public static func unwrapStructuredOutput(_ text: String) -> String {
-        var output = stripReasoningBlocks(from: text)
+        var output = stripThinkingBlocks(
+            from: text,
+            pairs: OutputSanitizationProfile.knownThinkingDelimiterPairs
+        )
 
         if let range = output.range(of: "<|channel|>final<|message|>", options: .backwards) {
+            output = String(output[range.upperBound...])
+        } else if let range = output.range(of: "[BEGIN FINAL RESPONSE]", options: .backwards) {
+            output = String(output[range.upperBound...])
+        } else if let range = output.range(of: "<|content|>", options: .backwards) {
             output = String(output[range.upperBound...])
         } else if let range = output.range(of: "<|message|>", options: .backwards) {
             let candidate = String(output[range.upperBound...])
@@ -82,6 +89,8 @@ public enum LLMResponseSanitizer {
 
         output = output.replacingOccurrences(of: "<|return|>", with: "")
         output = output.replacingOccurrences(of: "<|end|>", with: "")
+        output = output.replacingOccurrences(of: "[END FINAL RESPONSE]", with: "")
+        output = output.replacingOccurrences(of: "<|content|>", with: "")
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -120,17 +129,6 @@ public enum LLMResponseSanitizer {
             output = output.replacingOccurrences(of: token, with: "")
         }
 
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func stripReasoningBlocks(from text: String) -> String {
-        var output = text
-        for pattern in [
-            #"(?is)<think>\s*.*?\s*</think>\s*"#,
-            #"(?is)<\|channel(?:\|)?>thought\b[\s\S]*?(?:<channel\|>|<\|channel\|>)\s*"#
-        ] {
-            output = replacingMatches(in: output, pattern: pattern, with: "")
-        }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -175,13 +173,6 @@ public enum LLMResponseSanitizer {
         .max { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
     }
 
-    private static func replacingMatches(in text: String, pattern: String, with template: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return text
-        }
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
-    }
 }
 
 public enum JSONSalvage {

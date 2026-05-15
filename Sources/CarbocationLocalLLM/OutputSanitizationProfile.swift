@@ -62,18 +62,30 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
         return profile
     }
 
+    static let knownThinkingDelimiterPairs: [OutputDelimiterPair] = [
+        OutputDelimiterPair(open: "<think>", close: "</think>"),
+        OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>"),
+        OutputDelimiterPair(open: "<|channel|>thought", close: "<|channel|>"),
+        OutputDelimiterPair(open: "<|START_THINKING|>", close: "<|END_THINKING|>"),
+        OutputDelimiterPair(open: "[THINK]", close: "[/THINK]"),
+        OutputDelimiterPair(open: "<seed:think>", close: "</seed:think>"),
+        OutputDelimiterPair(open: "<|inner_prefix|>", close: "<|inner_suffix|>"),
+        OutputDelimiterPair(open: "<|think|>", close: "<|end|>")
+    ]
+
     public static func derived(fromChatTemplate template: String?) -> OutputSanitizationProfile {
         guard let template, !template.isEmpty else { return .empty }
 
         var profile = OutputSanitizationProfile.empty
 
-        for pair in [
-            OutputDelimiterPair(open: "<think>", close: "</think>"),
-            OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>"),
-            OutputDelimiterPair(open: "<|channel|>thought", close: "<|channel|>"),
-            OutputDelimiterPair(open: "<|START_THINKING|>", close: "<|END_THINKING|>")
-        ] where template.contains(pair.open) && template.contains(pair.close) {
+        for pair in knownThinkingDelimiterPairs where template.contains(pair.open) && template.contains(pair.close) {
             profile.appendThinkingPair(pair)
+        }
+
+        if template.contains("<thinking>"),
+           template.contains("</thinking>"),
+           !template.contains("[BEGIN FINAL RESPONSE]") {
+            profile.appendThinkingPair(OutputDelimiterPair(open: "<thinking>", close: "</thinking>"))
         }
 
         if template.contains("<|channel|>final<|message|>") {
@@ -81,11 +93,33 @@ public struct OutputSanitizationProfile: Equatable, Hashable, Sendable {
             profile.appendFinalMarker("<|channel|>final<|message|>")
         }
 
-        for token in ["<|return|>", "<|end|>"] where template.contains(token) {
+        if template.contains("[BEGIN FINAL RESPONSE]") {
+            profile.appendFinalMarker("[BEGIN FINAL RESPONSE]")
+        }
+
+        if template.contains("<|begin|>assistant<|think|>"),
+           template.contains("<|content|>") {
+            profile.appendFinalMarker("<|content|>")
+        }
+
+        for token in [
+            "<|return|>",
+            "<|end|>",
+            "[END FINAL RESPONSE]",
+            "<|content|>"
+        ] where template.contains(token) {
             profile.appendScrubToken(token)
         }
 
-        for stop in ["<turn|>", "<|turn>", "<|im_end|>", "<|im_start|>", "<end_of_turn>", "<start_of_turn>"]
+        for stop in [
+            "<turn|>",
+            "<|turn>",
+            "<|im_end|>",
+            "<|im_start|>",
+            "<end_of_turn>",
+            "<start_of_turn>",
+            "<|end_of_text|>"
+        ]
             where template.contains(stop) {
             profile.appendStopString(stop)
         }

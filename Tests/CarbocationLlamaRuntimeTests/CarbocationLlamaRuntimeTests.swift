@@ -425,6 +425,26 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(prompt.contains("<end_of_turn>"))
     }
 
+    func testSwiftJinjaGemma4ThinkingEnabledStartsImplicitThoughtChannel() throws {
+        let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "System",
+            user: "User",
+            bosToken: "<bos>",
+            eosToken: "<eos>",
+            enableThinking: true
+        )
+        let profile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(prompt.contains("<|turn>system\n<|think|>\n"))
+        XCTAssertTrue(prompt.hasSuffix("<|turn>model\n"))
+        XCTAssertEqual(
+            LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile),
+            [OutputDelimiterPair(open: "", close: "<channel|>")]
+        )
+    }
+
     func testSwiftJinjaGemma4RendersNativeTools() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
         let formatter = try ChatTemplatePromptFormatter(template: template)
@@ -585,6 +605,23 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(plan?.initialState, .counting)
     }
 
+    func testReasoningBudgetPlanStartsCountingForImplicitPromptThinkingPhase() {
+        let pair = OutputDelimiterPair(open: "", close: "<channel|>")
+
+        let plan = LlamaEngine.reasoningBudgetPlan(
+            for: GenerationOptions(enableThinking: true),
+            profile: OutputSanitizationProfile(thinkingPairs: [
+                OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
+            ]),
+            continuingOpenThinkingPairs: [pair],
+            requiresSampler: true
+        )
+
+        XCTAssertEqual(plan?.pair, pair)
+        XCTAssertEqual(plan?.budgetTokens, Int(Int32.max))
+        XCTAssertEqual(plan?.initialState, .counting)
+    }
+
     func testReasoningBudgetPlanCreatesControlSamplerWithoutFixedBudget() {
         let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
 
@@ -709,6 +746,92 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testStreamContentPhaseSupportsImplicitPromptDrivenThinking() {
+        let profilePair = OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
+        let implicitPair = OutputDelimiterPair(open: "", close: "<channel|>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [profilePair]),
+            continuingOpenThinkingPairs: [implicitPair],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "", plan: plan), .thinking)
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "private notes", plan: plan), .thinking)
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(in: "private notes<channel|>final answer", plan: plan),
+            .final
+        )
+    }
+
+    func testStreamContentPhaseDetectsAdditionalThinkingDialects() {
+        let pairs = [
+            OutputDelimiterPair(open: "[THINK]", close: "[/THINK]"),
+            OutputDelimiterPair(open: "<seed:think>", close: "</seed:think>"),
+            OutputDelimiterPair(open: "<|inner_prefix|>", close: "<|inner_suffix|>"),
+            OutputDelimiterPair(open: "<|think|>", close: "<|end|>")
+        ]
+
+        for pair in pairs {
+            let plan = LlamaEngine.StreamPhasePlan(
+                profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+                continuingOpenThinkingPairs: [],
+                startsInThinking: nil
+            )
+
+            XCTAssertEqual(LlamaEngine.streamContentPhase(in: pair.open + "private", plan: plan), .thinking)
+            XCTAssertEqual(
+                LlamaEngine.streamContentPhase(
+                    in: pair.open + "private" + pair.close + "final answer",
+                    plan: plan
+                ),
+                .final
+            )
+        }
+    }
+
+    func testStreamContentPhaseUsesFinalResponseMarkerForUndelimitedReasoning() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(finalMarkers: ["[BEGIN FINAL RESPONSE]"]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "private notes", plan: plan), .thinking)
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(
+                in: "private notes[BEGIN FINAL RESPONSE]visible answer",
+                plan: plan
+            ),
+            .final
+        )
+    }
+
+    func testStreamContentPhaseKeepsSolarContentMarkerAsFinalBoundary() {
+        let pair = OutputDelimiterPair(open: "<|think|>", close: "<|end|>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(
+                thinkingPairs: [pair],
+                scrubTokens: ["<|end|>", "<|content|>"],
+                finalMarkers: ["<|content|>"]
+            ),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        XCTAssertEqual(LlamaEngine.streamContentPhase(in: "<|think|>private", plan: plan), .thinking)
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(in: "<|think|>private<|end|>", plan: plan),
+            .unknown
+        )
+        XCTAssertEqual(
+            LlamaEngine.streamContentPhase(
+                in: "<|think|>private<|end|><|content|>visible answer",
+                plan: plan
+            ),
+            .final
+        )
+    }
+
     func testStreamContentPhaseUsesFinalMarkersForAnalysisChannels() {
         let plan = LlamaEngine.StreamPhasePlan(
             profile: OutputSanitizationProfile(finalMarkers: ["<|channel|>final<|message|>"]),
@@ -769,6 +892,54 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 requiresNonEmptyStructuredOutput: false
             ),
             "visible"
+        )
+    }
+
+    func testSanitizedGeneratedTextStripsImplicitGemma4ThinkingPrefix() throws {
+        let profilePair = OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
+        let implicitPair = OutputDelimiterPair(open: "", close: "<channel|>")
+
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                "private notes<channel|>visible answer",
+                profile: OutputSanitizationProfile(thinkingPairs: [profilePair]),
+                continuingOpenThinkingPairs: [implicitPair],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "visible answer"
+        )
+    }
+
+    func testSanitizedGeneratedTextHandlesFinalResponseMarkerThinking() throws {
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                "private notes[BEGIN FINAL RESPONSE]visible answer[END FINAL RESPONSE]",
+                profile: OutputSanitizationProfile(
+                    scrubTokens: ["[END FINAL RESPONSE]"],
+                    finalMarkers: ["[BEGIN FINAL RESPONSE]"]
+                ),
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "visible answer"
+        )
+    }
+
+    func testSanitizedGeneratedTextHandlesSolarThinkingAndContentMarkers() throws {
+        let pair = OutputDelimiterPair(open: "<|think|>", close: "<|end|>")
+
+        XCTAssertEqual(
+            try LlamaEngine.sanitizedGeneratedText(
+                "<|think|>private notes<|end|><|content|>visible answer<|end|>",
+                profile: OutputSanitizationProfile(
+                    thinkingPairs: [pair],
+                    scrubTokens: ["<|end|>", "<|content|>"],
+                    finalMarkers: ["<|content|>"]
+                ),
+                continuingOpenThinkingPairs: [],
+                requiresNonEmptyStructuredOutput: false
+            ),
+            "visible answer"
         )
     }
 
