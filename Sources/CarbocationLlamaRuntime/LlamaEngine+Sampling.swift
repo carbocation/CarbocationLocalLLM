@@ -3,13 +3,149 @@ import CarbocationLlamaCommonBridge
 import Foundation
 import llama
 
+package struct LlamaResolvedSamplerDiagnostics: Hashable, Sendable {
+    package var requestTemperature: Double?
+    package var requestTopK: Int?
+    package var requestTopP: Double?
+    package var requestMinP: Double?
+    package var requestPresencePenalty: Double?
+    package var requestRepetitionPenalty: Double?
+    package var requestSeed: UInt32?
+    package var chain: [String]
+    package var resolvedTemperature: Double
+    package var resolvedTopK: Int?
+    package var resolvedTopP: Double?
+    package var resolvedMinP: Double?
+    package var penaltyLastN: Int32
+    package var repetitionPenalty: Double
+    package var frequencyPenalty: Double
+    package var presencePenalty: Double
+    package var seed: UInt32?
+
+    package var requestLine: String {
+        [
+            "temperature=\(Self.formatOptional(requestTemperature))",
+            "topK=\(Self.formatOptional(requestTopK))",
+            "topP=\(Self.formatOptional(requestTopP))",
+            "minP=\(Self.formatOptional(requestMinP))",
+            "presencePenalty=\(Self.formatOptional(requestPresencePenalty))",
+            "repetitionPenalty=\(Self.formatOptional(requestRepetitionPenalty))",
+            "seed=\(Self.formatOptional(requestSeed))"
+        ].joined(separator: " ")
+    }
+
+    package var resolvedLine: String {
+        [
+            "chain=\(chain.joined(separator: ","))",
+            "temperature=\(Self.format(resolvedTemperature))",
+            "topK=\(Self.formatOptional(resolvedTopK, nilValue: "disabled"))",
+            "topP=\(Self.formatOptional(resolvedTopP, nilValue: "disabled"))",
+            "minP=\(Self.formatOptional(resolvedMinP, nilValue: "disabled"))",
+            "penaltyLastN=\(penaltyLastN)",
+            "repetitionPenalty=\(Self.format(repetitionPenalty))",
+            "frequencyPenalty=\(Self.format(frequencyPenalty))",
+            "presencePenalty=\(Self.format(presencePenalty))",
+            "seed=\(Self.formatOptional(seed, nilValue: "none"))"
+        ].joined(separator: " ")
+    }
+
+    private static func formatOptional<T>(_ value: T?, nilValue: String = "nil") -> String {
+        value.map { "\($0)" } ?? nilValue
+    }
+
+    private static func formatOptional(_ value: Double?, nilValue: String = "nil") -> String {
+        value.map(format) ?? nilValue
+    }
+
+    private static func format(_ value: Double) -> String {
+        if value.rounded(.towardZero) == value {
+            return String(Int(value))
+        }
+        return String(value)
+    }
+}
+
 extension LlamaEngine {
-    private static let penaltyLastN: Int32 = 16
-    private static let penaltyRepeat: Float = 1.3
+    fileprivate static let penaltyLastN: Int32 = 16
+    fileprivate static let penaltyRepeat: Float = 1.3
 
     struct SamplerRuntime {
         var chain: UnsafeMutablePointer<llama_sampler>
         var reasoningBudgetSampler: UnsafeMutablePointer<llama_sampler>?
+    }
+
+    package nonisolated static func resolvedSamplerDiagnostics(
+        options: GenerationOptions,
+        grammarSampler: String? = nil,
+        usesReasoningBudgetSampler: Bool = false
+    ) -> LlamaResolvedSamplerDiagnostics {
+        let temperature = options.temperature ?? 0
+        let repetitionPenalty = options.repetitionPenalty ?? Double(Self.penaltyRepeat)
+        let frequencyPenalty = 0.0
+        let presencePenalty = options.presencePenalty ?? 0
+
+        var chain: [String] = []
+        if usesReasoningBudgetSampler {
+            chain.append("reasoning-budget")
+        }
+        chain.append("penalties")
+        if let grammarSampler {
+            chain.append("grammar:\(grammarSampler)")
+        }
+
+        let resolvedTopK: Int?
+        let resolvedTopP: Double?
+        let resolvedMinP: Double?
+        let resolvedSeed: UInt32?
+        if temperature <= 0 {
+            chain.append("greedy")
+            resolvedTopK = nil
+            resolvedTopP = nil
+            resolvedMinP = nil
+            resolvedSeed = nil
+        } else {
+            if let topK = options.topK, topK > 0 {
+                chain.append("top-k")
+                resolvedTopK = topK
+            } else {
+                resolvedTopK = nil
+            }
+            if let topP = options.topP {
+                chain.append("top-p")
+                resolvedTopP = topP
+            } else {
+                resolvedTopP = nil
+            }
+            if let minP = options.minP, minP > 0 {
+                chain.append("min-p")
+                resolvedMinP = minP
+            } else {
+                resolvedMinP = nil
+            }
+            chain.append("temperature")
+            chain.append("distribution")
+            resolvedSeed = options.seed
+        }
+
+        return LlamaResolvedSamplerDiagnostics(
+            requestTemperature: options.temperature,
+            requestTopK: options.topK,
+            requestTopP: options.topP,
+            requestMinP: options.minP,
+            requestPresencePenalty: options.presencePenalty,
+            requestRepetitionPenalty: options.repetitionPenalty,
+            requestSeed: options.seed,
+            chain: chain,
+            resolvedTemperature: temperature,
+            resolvedTopK: resolvedTopK,
+            resolvedTopP: resolvedTopP,
+            resolvedMinP: resolvedMinP,
+            penaltyLastN: Self.penaltyLastN,
+            repetitionPenalty: repetitionPenalty,
+            frequencyPenalty: frequencyPenalty,
+            presencePenalty: presencePenalty,
+            seed: resolvedSeed
+        )
     }
 
     func buildSampler(

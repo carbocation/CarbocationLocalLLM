@@ -260,6 +260,9 @@ enum CLLMMTPReproCommand {
             enableThinking: false,
             thinkingBudgetMessage: "Thinking budget reached."
         ))
+        let samplerDiagnostics = LlamaEngine.resolvedSamplerDiagnostics(options: options)
+        print("sampler-request: \(samplerDiagnostics.requestLine)")
+        print("sampler-resolved: \(samplerDiagnostics.resolvedLine)")
 
         let reproCommandStore = ReproCommandStore()
         let tokenDiagnosticStore = TokenDiagnosticStore()

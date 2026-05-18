@@ -130,6 +130,42 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testResolvedSamplerDiagnosticsReportsGreedyRuntimeSettings() {
+        let options = LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions())
+        let diagnostics = LlamaEngine.resolvedSamplerDiagnostics(options: options)
+
+        XCTAssertEqual(
+            diagnostics.requestLine,
+            "temperature=0 topK=40 topP=0.9 minP=nil presencePenalty=nil repetitionPenalty=nil seed=nil"
+        )
+        XCTAssertEqual(
+            diagnostics.resolvedLine,
+            "chain=penalties,greedy temperature=0 topK=disabled topP=disabled minP=disabled penaltyLastN=16 repetitionPenalty=1.2999999523162842 frequencyPenalty=0 presencePenalty=0 seed=none"
+        )
+    }
+
+    func testResolvedSamplerDiagnosticsReportsSampledRuntimeSettings() {
+        let options = GenerationOptions(
+            temperature: 0.7,
+            topP: 0.9,
+            topK: 40,
+            minP: 0.05,
+            presencePenalty: 0.1,
+            repetitionPenalty: 1.1,
+            seed: 123
+        )
+        let diagnostics = LlamaEngine.resolvedSamplerDiagnostics(
+            options: options,
+            grammarSampler: "eager",
+            usesReasoningBudgetSampler: true
+        )
+
+        XCTAssertEqual(
+            diagnostics.resolvedLine,
+            "chain=reasoning-budget,penalties,grammar:eager,top-k,top-p,min-p,temperature,distribution temperature=0.7 topK=40 topP=0.9 minP=0.05 penaltyLastN=16 repetitionPenalty=1.1 frequencyPenalty=0 presencePenalty=0.1 seed=123"
+        )
+    }
+
     func testGenerateWithoutLoadedModelReportsNoModelLoaded() async throws {
         let engine = LlamaEngine()
 

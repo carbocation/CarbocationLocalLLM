@@ -400,6 +400,8 @@ public actor LlamaEngine: LLMEngine {
         guard architecture == "qwen35", nextNPredictLayers == 1 else {
             return clamped
         }
+        // llama.cpp draft-mtp can change committed tokens for this model family
+        // above width 2, so wider drafts stay behind an explicit debug opt-in.
         return min(clamped, 2)
     }
 
