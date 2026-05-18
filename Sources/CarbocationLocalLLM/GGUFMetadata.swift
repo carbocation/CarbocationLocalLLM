@@ -1,12 +1,45 @@
 import Foundation
 
 public enum GGUFMetadata {
+    public struct ModelMetadata: Hashable, Sendable {
+        public var trainingContextLength: Int?
+        public var nextNPredictLayers: Int?
+
+        public var supportsMTPAcceleration: Bool {
+            (nextNPredictLayers ?? 0) > 0
+        }
+
+        public init(
+            trainingContextLength: Int? = nil,
+            nextNPredictLayers: Int? = nil
+        ) {
+            self.trainingContextLength = trainingContextLength
+            self.nextNPredictLayers = nextNPredictLayers
+        }
+    }
+
+    public static func modelMetadata(at url: URL) -> ModelMetadata {
+        (try? GGUFMetadataReader(url: url).modelMetadata()) ?? ModelMetadata()
+    }
+
+    public static func modelMetadata(atPath path: String) -> ModelMetadata {
+        modelMetadata(at: URL(fileURLWithPath: path))
+    }
+
     public static func trainingContextLength(at url: URL) -> Int? {
-        (try? GGUFMetadataReader(url: url).trainingContextLength()).flatMap { $0 }
+        modelMetadata(at: url).trainingContextLength
     }
 
     public static func trainingContextLength(atPath path: String) -> Int? {
         trainingContextLength(at: URL(fileURLWithPath: path))
+    }
+
+    public static func supportsMTPAcceleration(at url: URL) -> Bool {
+        modelMetadata(at: url).supportsMTPAcceleration
+    }
+
+    public static func supportsMTPAcceleration(atPath path: String) -> Bool {
+        supportsMTPAcceleration(at: URL(fileURLWithPath: path))
     }
 }
 
@@ -73,18 +106,20 @@ private final class GGUFMetadataReader {
         try? handle.close()
     }
 
-    func trainingContextLength() throws -> Int? {
+    func modelMetadata() throws -> GGUFMetadata.ModelMetadata {
         guard try readData(count: 4) == Self.magic else {
-            return nil
+            return GGUFMetadata.ModelMetadata()
         }
 
         let version = try readUInt32()
         guard version >= 2, version <= Self.maxVersion else {
-            return nil
+            return GGUFMetadata.ModelMetadata()
         }
 
         _ = try readNonNegativeInt64()
         let keyValueCount = try readNonNegativeInt64()
+        var trainingContextLength: Int?
+        var nextNPredictLayers: Int?
 
         for _ in 0..<keyValueCount {
             let key = try readString(maxLength: Self.maxKeyLength)
@@ -99,11 +134,15 @@ private final class GGUFMetadataReader {
                 continue
             }
 
-            if key.hasSuffix(".context_length") {
+            if key.hasSuffix(".context_length") || key.hasSuffix(".nextn_predict_layers") {
                 if let value = try readIntegerValue(type: valueType),
                    value > 0,
                    value <= Int64(Int.max) {
-                    return Int(value)
+                    if key.hasSuffix(".context_length") {
+                        trainingContextLength = Int(value)
+                    } else {
+                        nextNPredictLayers = Int(value)
+                    }
                 }
                 if !valueType.isInteger {
                     try skipScalarValue(type: valueType)
@@ -114,7 +153,10 @@ private final class GGUFMetadataReader {
             try skipScalarValue(type: valueType)
         }
 
-        return nil
+        return GGUFMetadata.ModelMetadata(
+            trainingContextLength: trainingContextLength,
+            nextNPredictLayers: nextNPredictLayers
+        )
     }
 
     private static func int64Size(from value: Any?) -> UInt64 {

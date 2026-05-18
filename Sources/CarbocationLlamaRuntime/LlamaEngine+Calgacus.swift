@@ -10,7 +10,7 @@ extension LlamaEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
-        cachedPromptTokens = nil
+        clearPromptCaches()
 
         let startedAt = Date()
         onEvent(.started(operation: "encode"))
@@ -94,7 +94,7 @@ extension LlamaEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
-        cachedPromptTokens = nil
+        clearPromptCaches()
 
         let startedAt = Date()
         onEvent(.started(operation: "decode"))

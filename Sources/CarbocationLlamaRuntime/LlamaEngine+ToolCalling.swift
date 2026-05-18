@@ -522,7 +522,7 @@ private extension LlamaEngine {
 
         defer {
             if promptContextPrepared && !promptCacheCommitted {
-                cachedPromptTokens = nil
+                clearPromptCaches()
             }
             if !emittedStats {
                 emit(.generationStats(
@@ -874,7 +874,7 @@ private extension LlamaEngine {
                 return llama_decode(context, batch)
             }
             if decodeResult != 0 {
-                cachedPromptTokens = nil
+                clearPromptCaches()
                 throw LLMEngineError.decodeFailed
             }
 
@@ -951,7 +951,7 @@ private extension LlamaEngine {
             "Tool-aware generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(rawForReturn.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
 
-        cachedPromptTokens = promptTokens
+        commitPromptCache(promptTokens, mtpSynchronized: false)
         promptCacheCommitted = true
         emittedStats = true
         emit(.generationStats(

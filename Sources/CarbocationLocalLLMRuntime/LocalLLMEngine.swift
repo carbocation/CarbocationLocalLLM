@@ -10,6 +10,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     public var llamaThreadCount: Int32?
     public var promptReserveTokens: Int
     public var heartbeatInterval: TimeInterval
+    public var accelerationPolicy: LLMAccelerationPolicy
 
     public init(
         llamaGPULayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
@@ -17,7 +18,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         llamaBatchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
         llamaThreadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
-        heartbeatInterval: TimeInterval = 2
+        heartbeatInterval: TimeInterval = 2,
+        accelerationPolicy: LLMAccelerationPolicy = .automatic
     ) {
         self.llamaGPULayerCount = llamaGPULayerCount
         self.llamaUseMemoryMap = llamaUseMemoryMap
@@ -25,6 +27,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         self.llamaThreadCount = llamaThreadCount
         self.promptReserveTokens = promptReserveTokens
         self.heartbeatInterval = heartbeatInterval
+        self.accelerationPolicy = accelerationPolicy
     }
 
     func makeLlamaConfiguration() -> LlamaEngineConfiguration {
@@ -34,7 +37,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
             batchSizeLimit: llamaBatchSizeLimit,
             threadCount: llamaThreadCount,
             promptReserveTokens: promptReserveTokens,
-            heartbeatInterval: heartbeatInterval
+            heartbeatInterval: heartbeatInterval,
+            accelerationPolicy: accelerationPolicy
         )
     }
 
@@ -50,6 +54,7 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
     public var trainingContextSize: Int
     public var supportsGrammar: Bool
     public var usesExactTokenCounts: Bool
+    public var supportsMTPAcceleration: Bool
 
     public init(
         selection: LLMModelSelection,
@@ -57,7 +62,8 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         contextSize: Int,
         trainingContextSize: Int,
         supportsGrammar: Bool,
-        usesExactTokenCounts: Bool
+        usesExactTokenCounts: Bool,
+        supportsMTPAcceleration: Bool = false
     ) {
         self.selection = selection
         self.displayName = displayName
@@ -65,6 +71,7 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         self.trainingContextSize = trainingContextSize
         self.supportsGrammar = supportsGrammar
         self.usesExactTokenCounts = usesExactTokenCounts
+        self.supportsMTPAcceleration = supportsMTPAcceleration
     }
 }
 
@@ -72,15 +79,18 @@ public struct LocalLLMModelCapabilities: Hashable, Sendable {
     public var supportsGrammar: Bool
     public var usesExactTokenCounts: Bool
     public var contextSize: Int
+    public var supportsMTPAcceleration: Bool
 
     public init(
         supportsGrammar: Bool,
         usesExactTokenCounts: Bool,
-        contextSize: Int
+        contextSize: Int,
+        supportsMTPAcceleration: Bool = false
     ) {
         self.supportsGrammar = supportsGrammar
         self.usesExactTokenCounts = usesExactTokenCounts
         self.contextSize = contextSize
+        self.supportsMTPAcceleration = supportsMTPAcceleration
     }
 }
 
@@ -172,17 +182,25 @@ public actor LocalLLMEngine: LLMEngine {
     ) -> LocalLLMModelCapabilities {
         switch selection {
         case .installed(let id):
-            let contextSize = library?.model(id: id)?.contextLength ?? 0
+            let installedModel = library?.model(id: id)
+            let contextSize = installedModel?.contextLength ?? 0
+            let supportsMTPAcceleration = if let library, let installedModel {
+                GGUFMetadata.supportsMTPAcceleration(at: installedModel.weightsURL(in: library.root))
+            } else {
+                false
+            }
             return LocalLLMModelCapabilities(
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
-                contextSize: contextSize
+                contextSize: contextSize,
+                supportsMTPAcceleration: supportsMTPAcceleration
             )
         case .system(.appleIntelligence):
             return LocalLLMModelCapabilities(
                 supportsGrammar: false,
                 usesExactTokenCounts: false,
-                contextSize: AppleIntelligenceEngine.availability().contextSize
+                contextSize: AppleIntelligenceEngine.availability().contextSize,
+                supportsMTPAcceleration: false
             )
         }
     }
@@ -268,7 +286,8 @@ public actor LocalLLMEngine: LLMEngine {
                 contextSize: loaded.contextSize,
                 trainingContextSize: loaded.trainingContextSize,
                 supportsGrammar: true,
-                usesExactTokenCounts: true
+                usesExactTokenCounts: true,
+                supportsMTPAcceleration: loaded.supportsMTPAcceleration
             )
             loadedInfo = info
             return info
@@ -283,7 +302,8 @@ public actor LocalLLMEngine: LLMEngine {
                 contextSize: availability.contextSize,
                 trainingContextSize: availability.contextSize,
                 supportsGrammar: false,
-                usesExactTokenCounts: false
+                usesExactTokenCounts: false,
+                supportsMTPAcceleration: false
             )
             loadedInfo = info
             await llamaEngine.unload()

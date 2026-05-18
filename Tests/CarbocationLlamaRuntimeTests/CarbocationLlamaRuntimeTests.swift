@@ -13,6 +13,34 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(LlamaRuntimeSmoke.defaultContextBatchSize(), 0)
     }
 
+    func testMTPAccelerationPolicyAllowsEagerGrammarButNotLazyGrammarOrControl() {
+        let opaqueMTPContext = UnsafeMutableRawPointer(bitPattern: 0x1)
+        XCTAssertTrue(LlamaEngine.shouldUseMTPAcceleration(
+            policy: .automatic,
+            mtpContext: opaqueMTPContext,
+            grammarMode: .eager(grammar: "root ::= object"),
+            control: nil
+        ))
+        XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
+            policy: .automatic,
+            mtpContext: opaqueMTPContext,
+            grammarMode: .lazy(grammar: "root ::= object", triggerPatterns: ["{"]),
+            control: nil
+        ))
+        XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
+            policy: .automatic,
+            mtpContext: opaqueMTPContext,
+            grammarMode: .none,
+            control: LLMGenerationControl()
+        ))
+        XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
+            policy: .disabled,
+            mtpContext: opaqueMTPContext,
+            grammarMode: .none,
+            control: nil
+        ))
+    }
+
     func testGenerateWithoutLoadedModelReportsNoModelLoaded() async throws {
         let engine = LlamaEngine()
 

@@ -346,6 +346,18 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(GGUFMetadata.trainingContextLength(at: url), 32_768)
     }
 
+    func testGGUFMetadataDetectsMTPAccelerationSupport() throws {
+        let root = try makeTemporaryDirectory()
+        let url = root.appendingPathComponent("metadata-only.gguf")
+        try makeMinimalGGUF(contextLength: 32_768, nextNPredictLayers: 4).write(to: url)
+
+        let metadata = GGUFMetadata.modelMetadata(at: url)
+        XCTAssertEqual(metadata.trainingContextLength, 32_768)
+        XCTAssertEqual(metadata.nextNPredictLayers, 4)
+        XCTAssertTrue(metadata.supportsMTPAcceleration)
+        XCTAssertTrue(GGUFMetadata.supportsMTPAcceleration(at: url))
+    }
+
     func testGenerationOptionsResolverUsesSafeDefaultsUnlessCustom() {
         let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -1706,11 +1718,11 @@ final class CarbocationLocalLLMTests: XCTestCase {
         """#
     }
 
-    private func makeMinimalGGUF(contextLength: UInt32) -> Data {
+    private func makeMinimalGGUF(contextLength: UInt32, nextNPredictLayers: UInt32? = nil) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
         appendUInt32(3, to: &data)
         appendInt64(0, to: &data)
-        appendInt64(2, to: &data)
+        appendInt64(nextNPredictLayers == nil ? 2 : 3, to: &data)
 
         appendGGUFString("general.architecture", to: &data)
         appendInt32(8, to: &data)
@@ -1719,6 +1731,12 @@ final class CarbocationLocalLLMTests: XCTestCase {
         appendGGUFString("llama.context_length", to: &data)
         appendInt32(4, to: &data)
         appendUInt32(contextLength, to: &data)
+
+        if let nextNPredictLayers {
+            appendGGUFString("gemma4.nextn_predict_layers", to: &data)
+            appendInt32(4, to: &data)
+            appendUInt32(nextNPredictLayers, to: &data)
+        }
         return data
     }
 

@@ -3,47 +3,89 @@ import Foundation
 import llama
 
 extension LlamaEngine {
-    func preparePromptContext(_ promptTokens: [llama_token], context: OpaquePointer) throws {
+    func clearPromptCaches() {
+        cachedPromptTokens = nil
+        mtpCachedPromptTokens = nil
+    }
+
+    func commitPromptCache(_ promptTokens: [llama_token], mtpSynchronized: Bool) {
+        cachedPromptTokens = promptTokens
+        mtpCachedPromptTokens = mtpSynchronized ? promptTokens : nil
+    }
+
+    func preparePromptContext(
+        _ promptTokens: [llama_token],
+        context: OpaquePointer,
+        mtpContext: UnsafeMutableRawPointer? = nil
+    ) throws {
         let memory = llama_get_memory(context)
+        let reusableCache: [llama_token]?
+        if mtpContext != nil, mtpCachedPromptTokens != cachedPromptTokens {
+            reusableCache = nil
+        } else {
+            reusableCache = cachedPromptTokens
+        }
         let plan = Self.promptPrefillPlan(
-            cachedPromptTokens: cachedPromptTokens,
+            cachedPromptTokens: reusableCache,
             newPromptTokens: promptTokens
         )
-        cachedPromptTokens = nil
+        clearPromptCaches()
 
         if plan.shouldClearMemory {
-            llama_memory_clear(memory, false)
-            try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+            if let mtpContext {
+                carbocation_llama_mtp_clear_bridge(mtpContext)
+            } else {
+                llama_memory_clear(memory, false)
+            }
+            try decodePromptTokens(promptTokens, startingAt: 0, context: context, mtpContext: mtpContext)
             return
         }
 
         if let removeStartPosition = plan.removeStartPosition {
-            let removed = llama_memory_seq_rm(memory, 0, Int32(removeStartPosition), -1)
+            let removed = if let mtpContext {
+                carbocation_llama_mtp_rollback_bridge(mtpContext, Int32(removeStartPosition)) != 0
+            } else {
+                llama_memory_seq_rm(memory, 0, Int32(removeStartPosition), -1)
+            }
             if !removed {
                 llamaRuntimeLog.info(
                     "Prompt prefix cache removal failed; falling back to full prompt prefill."
                 )
-                llama_memory_clear(memory, false)
-                try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+                if let mtpContext {
+                    carbocation_llama_mtp_clear_bridge(mtpContext)
+                } else {
+                    llama_memory_clear(memory, false)
+                }
+                try decodePromptTokens(promptTokens, startingAt: 0, context: context, mtpContext: mtpContext)
                 return
             }
         }
 
         do {
-            try decodePromptTokens(promptTokens, startingAt: plan.decodeStartIndex, context: context)
+            try decodePromptTokens(
+                promptTokens,
+                startingAt: plan.decodeStartIndex,
+                context: context,
+                mtpContext: mtpContext
+            )
         } catch {
             llamaRuntimeLog.info(
                 "Prompt prefix cache decode failed; falling back to full prompt prefill."
             )
-            llama_memory_clear(memory, false)
-            try decodePromptTokens(promptTokens, startingAt: 0, context: context)
+            if let mtpContext {
+                carbocation_llama_mtp_clear_bridge(mtpContext)
+            } else {
+                llama_memory_clear(memory, false)
+            }
+            try decodePromptTokens(promptTokens, startingAt: 0, context: context, mtpContext: mtpContext)
         }
     }
 
     func decodePromptTokens(
         _ tokens: [llama_token],
         startingAt startIndex: Int,
-        context: OpaquePointer
+        context: OpaquePointer,
+        mtpContext: UnsafeMutableRawPointer? = nil
     ) throws {
         guard startIndex < tokens.count else { return }
 
@@ -53,8 +95,19 @@ extension LlamaEngine {
             let upper = startIndex + range.upperBound
             var chunk = Array(tokens[lower..<upper])
             try chunk.withUnsafeMutableBufferPointer { buffer in
-                let batch = llama_batch_get_one(buffer.baseAddress, Int32(buffer.count))
-                if llama_decode(context, batch) != 0 {
+                let result: Int32
+                if let mtpContext {
+                    result = carbocation_llama_mtp_decode_target_tokens_bridge(
+                        mtpContext,
+                        buffer.baseAddress,
+                        Int32(buffer.count),
+                        Int32(lower)
+                    )
+                } else {
+                    let batch = llama_batch_get_one(buffer.baseAddress, Int32(buffer.count))
+                    result = llama_decode(context, batch)
+                }
+                if result != 0 {
                     throw LLMEngineError.decodeFailed
                 }
             }

@@ -30,6 +30,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
     public var threadCount: Int32?
     public var promptReserveTokens: Int
     public var heartbeatInterval: TimeInterval
+    public var accelerationPolicy: LLMAccelerationPolicy
 
     public init(
         gpuLayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
@@ -37,7 +38,8 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         batchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
         threadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
-        heartbeatInterval: TimeInterval = 2
+        heartbeatInterval: TimeInterval = 2,
+        accelerationPolicy: LLMAccelerationPolicy = .automatic
     ) {
         self.gpuLayerCount = gpuLayerCount
         self.useMemoryMap = useMemoryMap
@@ -45,6 +47,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         self.threadCount = threadCount
         self.promptReserveTokens = promptReserveTokens
         self.heartbeatInterval = heartbeatInterval
+        self.accelerationPolicy = accelerationPolicy
     }
 }
 
@@ -92,6 +95,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var contextSize: Int
     public var trainingContextSize: Int
     public var hasEmbeddedChatTemplate: Bool
+    public var supportsMTPAcceleration: Bool
 
     public init(
         modelID: UUID?,
@@ -100,7 +104,8 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         filename: String,
         contextSize: Int,
         trainingContextSize: Int,
-        hasEmbeddedChatTemplate: Bool
+        hasEmbeddedChatTemplate: Bool,
+        supportsMTPAcceleration: Bool = false
     ) {
         self.modelID = modelID
         self.modelPath = modelPath
@@ -109,6 +114,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         self.contextSize = contextSize
         self.trainingContextSize = trainingContextSize
         self.hasEmbeddedChatTemplate = hasEmbeddedChatTemplate
+        self.supportsMTPAcceleration = supportsMTPAcceleration
     }
 }
 
@@ -228,6 +234,8 @@ public actor LlamaEngine: LLMEngine {
         ToolAwareGenerationSegmentOverrideInput
     ) async throws -> ToolAwareGenerationSegmentOverrideOutput
 
+    private static let maximumMTPDraftTokens = 16
+
     enum PreparedChatTemplate {
         case swiftJinja(ChatTemplatePromptFormatter)
         case unavailable(String)
@@ -238,6 +246,8 @@ public actor LlamaEngine: LLMEngine {
     private var model: OpaquePointer?
     var context: OpaquePointer?
     var vocabulary: OpaquePointer?
+    private var mtpContext: UnsafeMutableRawPointer?
+    var mtpCachedPromptTokens: [llama_token]?
     var loadedDescriptor: LlamaModelDescriptor?
     private var loadedInfo: LlamaLoadedModelInfo?
     var chatTemplate: String?
@@ -254,6 +264,7 @@ public actor LlamaEngine: LLMEngine {
     }
 
     deinit {
+        if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
     }
@@ -272,6 +283,22 @@ public actor LlamaEngine: LLMEngine {
 
     public func currentLoadedModelInfo() -> LlamaLoadedModelInfo? {
         loadedInfo
+    }
+
+    static func shouldUseMTPAcceleration(
+        policy: LLMAccelerationPolicy,
+        mtpContext: UnsafeMutableRawPointer?,
+        grammarMode: GenerationGrammarMode,
+        control: LLMGenerationControl?
+    ) -> Bool {
+        guard policy == .automatic,
+              mtpContext != nil,
+              !grammarMode.usesLazyGrammar,
+              control == nil
+        else {
+            return false
+        }
+        return true
     }
 
     public func preflight(
@@ -399,6 +426,7 @@ public actor LlamaEngine: LLMEngine {
         requestedContext: Int
     ) throws -> LlamaLoadedModelInfo {
         let path = descriptor.url.path
+        let ggufMetadata = GGUFMetadata.modelMetadata(at: descriptor.url)
 
         if let loadedInfo,
            loadedInfo.modelPath == path,
@@ -446,6 +474,7 @@ public actor LlamaEngine: LLMEngine {
         )
         var attemptedBatchSizes: [Int] = []
         var initializedContext: OpaquePointer?
+        var initializedBatchSize: Int?
         for batchSize in batchCandidates {
             attemptedBatchSizes.append(batchSize)
             let contextParams = Self.contextParams(
@@ -455,6 +484,7 @@ public actor LlamaEngine: LLMEngine {
             )
             if let context = llama_init_from_model(loadedModel, contextParams) {
                 initializedContext = context
+                initializedBatchSize = batchSize
                 break
             }
         }
@@ -475,6 +505,7 @@ public actor LlamaEngine: LLMEngine {
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
         let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+        let supportsMTPAcceleration = ggufMetadata.supportsMTPAcceleration
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
             modelPath: path,
@@ -482,18 +513,41 @@ public actor LlamaEngine: LLMEngine {
             filename: descriptor.filename,
             contextSize: chosenContext,
             trainingContextSize: max(0, trainingContext),
-            hasEmbeddedChatTemplate: template != nil
+            hasEmbeddedChatTemplate: template != nil,
+            supportsMTPAcceleration: supportsMTPAcceleration
         )
+        let loadedMTPContext: UnsafeMutableRawPointer?
+        if supportsMTPAcceleration,
+           configuration.accelerationPolicy == .automatic,
+           let initializedBatchSize {
+            loadedMTPContext = carbocation_llama_mtp_create_bridge(
+                loadedModel,
+                loadedContext,
+                UInt32(chosenContext),
+                UInt32(initializedBatchSize),
+                threads,
+                Int32(Self.maximumMTPDraftTokens),
+                0
+            )
+            if loadedMTPContext == nil {
+                llamaRuntimeLog.info(
+                    "MTP acceleration unavailable after runtime initialization; generation will use standard decoding."
+                )
+            }
+        } else {
+            loadedMTPContext = nil
+        }
 
         self.model = loadedModel
         self.context = loadedContext
+        self.mtpContext = loadedMTPContext
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
         self.chatTemplate = template
         self.preparedChatTemplate = preparedTemplate
         self.outputSanitizationProfile = outputProfile
-        self.cachedPromptTokens = nil
+        clearPromptCaches()
 
         Self.logOutputSanitizationProfile(outputProfile, descriptor: descriptor, hasEmbeddedTemplate: template != nil)
 
@@ -551,18 +605,20 @@ public actor LlamaEngine: LLMEngine {
             filename: descriptor.filename,
             contextSize: chosenContext,
             trainingContextSize: max(0, trainingContext),
-            hasEmbeddedChatTemplate: template != nil
+            hasEmbeddedChatTemplate: template != nil,
+            supportsMTPAcceleration: false
         )
 
         self.model = loadedModel
         self.context = nil
+        self.mtpContext = nil
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
         self.chatTemplate = template
         self.preparedChatTemplate = preparedTemplate
         self.outputSanitizationProfile = outputProfile
-        self.cachedPromptTokens = nil
+        clearPromptCaches()
 
         Self.logOutputSanitizationProfile(outputProfile, descriptor: descriptor, hasEmbeddedTemplate: template != nil)
 
@@ -595,19 +651,21 @@ public actor LlamaEngine: LLMEngine {
     }
 
     private func performUnload() {
+        if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
 
         unloadAfterActiveGeneration = false
         self.model = nil
         self.context = nil
+        self.mtpContext = nil
         self.vocabulary = nil
         self.loadedDescriptor = nil
         self.loadedInfo = nil
         self.chatTemplate = nil
         self.preparedChatTemplate = nil
         self.outputSanitizationProfile = .empty
-        self.cachedPromptTokens = nil
+        clearPromptCaches()
     }
 
     public func generate(
@@ -740,7 +798,7 @@ public actor LlamaEngine: LLMEngine {
 
         defer {
             if promptContextPrepared && !promptCacheCommitted {
-                cachedPromptTokens = nil
+                clearPromptCaches()
             }
             if !emittedStats {
                 onPhaseAwareEvent(.generationStats(
@@ -816,7 +874,14 @@ public actor LlamaEngine: LLMEngine {
         let sampler = samplerRuntime.chain
         defer { llama_sampler_free(sampler) }
 
-        try preparePromptContext(promptTokens, context: context)
+        let activeMTPContext = Self.shouldUseMTPAcceleration(
+            policy: configuration.accelerationPolicy,
+            mtpContext: mtpContext,
+            grammarMode: grammarMode,
+            control: control
+        ) ? mtpContext : nil
+
+        try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
         promptContextPrepared = true
 
         var accumulatedData = Data()
@@ -922,37 +987,25 @@ public actor LlamaEngine: LLMEngine {
             activeOutputProfile.extraStopStrings
         )
 
-        while generatedTokenCount < maxNew {
-            try Task.checkCancellation()
-            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
-                applyThinkingTerminationIfRequested(
-                    control: control,
-                    generationID: controlGenerationID,
-                    currentPhase: currentPhase,
-                    samplerRuntime: samplerRuntime,
-                    reasoningBudgetPlan: reasoningBudgetPlan,
-                    vocab: vocabulary
-                )
-            }
-
-            let next = llama_sampler_sample(sampler, context, -1)
-            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                carbocation_llama_reasoning_budget_sampler_state($0)
-            }
-            if llama_vocab_is_eog(vocabulary, next) {
+        func processGeneratedToken(
+            _ token: llama_token,
+            generatedTokensIncludingThisToken: Int,
+            reasoningBudgetState: carbocation_llama_reasoning_budget_state?
+        ) -> Bool {
+            if llama_vocab_is_eog(vocabulary, token) {
                 if let reasoningBudgetState {
                     logReasoningBudgetExhaustionIfNeeded(
                         state: reasoningBudgetState,
-                        generatedTokens: generatedTokenCount
+                        generatedTokens: max(0, generatedTokensIncludingThisToken - 1)
                     )
                 }
                 stopReason = "eog"
-                break
+                return false
             }
 
-            let rawPiece = tokenToPiece(vocab: vocabulary, token: next)
+            let rawPiece = tokenToPiece(vocab: vocabulary, token: token)
             let piece = rawPiece.isEmpty
-                ? tokenToPiece(vocab: vocabulary, token: next, special: true)
+                ? tokenToPiece(vocab: vocabulary, token: token, special: true)
                 : rawPiece
             if !piece.isEmpty {
                 accumulatedData.append(piece)
@@ -964,7 +1017,7 @@ public actor LlamaEngine: LLMEngine {
             if let reasoningBudgetState {
                 logReasoningBudgetExhaustionIfNeeded(
                     state: reasoningBudgetState,
-                    generatedTokens: generatedTokenCount + 1
+                    generatedTokens: generatedTokensIncludingThisToken
                 )
             }
 
@@ -1007,7 +1060,7 @@ public actor LlamaEngine: LLMEngine {
                     if stopReason == "json-complete", structuredOutputPlan != nil {
                         structuredPhase = .complete
                     }
-                    break
+                    return false
                 }
             }
 
@@ -1024,15 +1077,173 @@ public actor LlamaEngine: LLMEngine {
                 ))
             }
 
-            var oneToken: [llama_token] = [next]
+            return true
+        }
+
+        func decodeSingleToken(_ token: llama_token) throws {
+            var oneToken: [llama_token] = [token]
             let decodeResult = oneToken.withUnsafeMutableBufferPointer { buffer -> Int32 in
                 let batch = llama_batch_get_one(buffer.baseAddress, 1)
                 return llama_decode(context, batch)
             }
             if decodeResult != 0 {
-                cachedPromptTokens = nil
+                clearPromptCaches()
                 throw LLMEngineError.decodeFailed
             }
+        }
+
+        func decodeMTPTokens(
+            _ tokens: [llama_token],
+            startPosition: Int,
+            mtpContext: UnsafeMutableRawPointer
+        ) throws {
+            var tokens = tokens
+            let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                carbocation_llama_mtp_decode_target_tokens_bridge(
+                    mtpContext,
+                    buffer.baseAddress,
+                    Int32(buffer.count),
+                    Int32(startPosition)
+                )
+            }
+            if decodeResult != 0 {
+                clearPromptCaches()
+                throw LLMEngineError.decodeFailed
+            }
+        }
+
+        func acceptedDraftPrefix(
+            draftTokens: [llama_token],
+            sampler: UnsafeMutablePointer<llama_sampler>,
+            context: OpaquePointer
+        ) -> [llama_token] {
+            guard !draftTokens.isEmpty,
+                  let samplerClone = carbocation_llama_sampler_clone_bridge(UnsafePointer(sampler)) else {
+                return []
+            }
+            defer { llama_sampler_free(samplerClone) }
+
+            var accepted: [llama_token] = []
+            accepted.reserveCapacity(draftTokens.count)
+            for (index, draftToken) in draftTokens.enumerated() {
+                let sampled = llama_sampler_sample(samplerClone, context, Int32(index))
+                guard sampled == draftToken else {
+                    break
+                }
+                accepted.append(sampled)
+            }
+            return accepted
+        }
+
+        var nextSampleIndexOverride: Int32?
+
+        while generatedTokenCount < maxNew {
+            try Task.checkCancellation()
+            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+                applyThinkingTerminationIfRequested(
+                    control: control,
+                    generationID: controlGenerationID,
+                    currentPhase: currentPhase,
+                    samplerRuntime: samplerRuntime,
+                    reasoningBudgetPlan: reasoningBudgetPlan,
+                    vocab: vocabulary
+                )
+            }
+
+            let tokenPosition = promptTokens.count + generatedTokenCount
+            let sampleIndex = nextSampleIndexOverride ?? -1
+            nextSampleIndexOverride = nil
+            let next = llama_sampler_sample(sampler, context, sampleIndex)
+            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                carbocation_llama_reasoning_budget_sampler_state($0)
+            }
+            guard processGeneratedToken(
+                next,
+                generatedTokensIncludingThisToken: generatedTokenCount + 1,
+                reasoningBudgetState: reasoningBudgetState
+            ) else {
+                break
+            }
+
+            if let activeMTPContext {
+                let remainingDraftCapacity = maxNew - generatedTokenCount - 1
+                let draftLimit = min(Self.maximumMTPDraftTokens, remainingDraftCapacity)
+                let draftTokens: [llama_token]
+                if draftLimit > 0 {
+                    var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
+                    let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
+                        carbocation_llama_mtp_draft_bridge(
+                            activeMTPContext,
+                            next,
+                            Int32(tokenPosition),
+                            buffer.baseAddress,
+                            Int32(buffer.count)
+                        )
+                    }
+                    draftTokens = Array(draftBuffer.prefix(min(draftBuffer.count, max(0, Int(draftCount)))))
+                } else {
+                    draftTokens = []
+                }
+
+                let verifiedTokens = [next] + draftTokens
+                try decodeMTPTokens(
+                    verifiedTokens,
+                    startPosition: tokenPosition,
+                    mtpContext: activeMTPContext
+                )
+
+                let acceptedDraftTokens = acceptedDraftPrefix(
+                    draftTokens: draftTokens,
+                    sampler: sampler,
+                    context: context
+                )
+                var emittedAcceptedDraftCount = 0
+                var shouldContinue = true
+                for draftToken in acceptedDraftTokens {
+                    if llama_vocab_is_eog(vocabulary, draftToken) {
+                        stopReason = "eog"
+                        shouldContinue = false
+                        break
+                    }
+
+                    llama_sampler_accept(sampler, draftToken)
+                    let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                        carbocation_llama_reasoning_budget_sampler_state($0)
+                    }
+                    emittedAcceptedDraftCount += 1
+                    shouldContinue = processGeneratedToken(
+                        draftToken,
+                        generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount,
+                        reasoningBudgetState: acceptedReasoningBudgetState
+                    )
+                    if !shouldContinue {
+                        break
+                    }
+                }
+
+                carbocation_llama_mtp_accept_bridge(activeMTPContext, Int32(emittedAcceptedDraftCount))
+                let retainedTokenCount = 1 + emittedAcceptedDraftCount
+                if retainedTokenCount < verifiedTokens.count {
+                    let rollbackPosition = tokenPosition + retainedTokenCount
+                    let rolledBack = carbocation_llama_mtp_rollback_bridge(
+                        activeMTPContext,
+                        Int32(rollbackPosition)
+                    ) != 0
+                    if !rolledBack {
+                        clearPromptCaches()
+                        throw LLMEngineError.decodeFailed
+                    }
+                    nextSampleIndexOverride = Int32(retainedTokenCount - 1)
+                }
+
+                generatedTokenCount += retainedTokenCount
+                if !shouldContinue {
+                    break
+                }
+                continue
+            }
+
+            try decodeSingleToken(next)
 
             generatedTokenCount += 1
         }
@@ -1084,7 +1295,7 @@ public actor LlamaEngine: LLMEngine {
             "Generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
 
-        cachedPromptTokens = promptTokens
+        commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
         promptCacheCommitted = true
         emittedStats = true
         onPhaseAwareEvent(.generationStats(

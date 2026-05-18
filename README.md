@@ -245,6 +245,8 @@ let response = try await LocalLLMEngine.shared.generate(
 
 `GenerationOptions` is a shared request surface, not a guarantee that every backend can apply every knob. llama.cpp-backed GGUF models support the sampler chain used by the package. Apple Intelligence exposes a narrower sampling API: GBNF grammars, min-p, non-neutral presence/repetition penalties, and combined top-k plus top-p filtering are reported as unsupported options. Token counts for Apple Intelligence are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
+MTP/speculative decoding is automatic for GGUF models that advertise the required `*.nextn_predict_layers` metadata, such as appropriately converted Gemma 4 MTP weights. App code does not need to pass a per-request option: `LocalLLMEngineConfiguration.accelerationPolicy` and `LlamaEngineConfiguration.accelerationPolicy` default to `.automatic`, and loaded-model capabilities expose `supportsMTPAcceleration` for UI or diagnostics. To disable this runtime acceleration, initialize the engine with `accelerationPolicy: .disabled`. MTP is not used for tool-aware generation, generation-control interrupts, or lazy structured-output grammar; eager grammar-constrained generation can still use the same sampler path.
+
 ### Use tools
 
 Tool calling is opt-in and per request. Keep using `generate(...)` for ordinary text generation. Use `generateWithTools(...)` only for prompts where your app is willing to let the model request host-side tool execution.

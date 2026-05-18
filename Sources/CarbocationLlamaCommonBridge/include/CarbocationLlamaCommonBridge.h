@@ -1,15 +1,13 @@
 #pragma once
 
+#include "llama.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef int32_t llama_token;
-struct llama_sampler;
-struct llama_vocab;
 
 typedef enum carbocation_llama_reasoning_budget_state {
     CARBOCATION_LLAMA_REASONING_BUDGET_IDLE = 0,
@@ -44,6 +42,47 @@ int32_t carbocation_llama_reasoning_budget_sampler_force(
     const llama_token * forced_tokens,
     size_t forced_token_count
 );
+
+void * carbocation_llama_mtp_create(
+    struct llama_model * model,
+    struct llama_context * target_context,
+    uint32_t context_size,
+    uint32_t batch_size,
+    int32_t thread_count,
+    int32_t max_draft_tokens,
+    int32_t min_draft_tokens
+);
+
+void carbocation_llama_mtp_free(void * context);
+
+void carbocation_llama_mtp_clear(void * context);
+
+int32_t carbocation_llama_mtp_decode_target_tokens(
+    void * context,
+    const llama_token * tokens,
+    int32_t token_count,
+    int32_t start_position
+);
+
+int32_t carbocation_llama_mtp_draft(
+    void * context,
+    llama_token last_token,
+    int32_t last_token_position,
+    llama_token * output_tokens,
+    int32_t output_token_capacity
+);
+
+void carbocation_llama_mtp_accept(
+    void * context,
+    int32_t accepted_draft_tokens
+);
+
+int32_t carbocation_llama_mtp_rollback(
+    void * context,
+    int32_t start_position
+);
+
+struct llama_sampler * carbocation_llama_sampler_clone(const struct llama_sampler * sampler);
 
 #ifdef __cplusplus
 }
