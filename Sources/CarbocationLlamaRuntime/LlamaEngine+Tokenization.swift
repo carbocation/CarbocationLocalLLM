@@ -230,6 +230,40 @@ extension LlamaEngine {
         "[" + tokens.map { diagnosticTokenDescription($0, vocab: vocab) }.joined(separator: ",") + "]"
     }
 
+    func diagnosticTokenIDList(_ tokens: [llama_token]) -> String {
+        tokens.map(String.init).joined(separator: ",")
+    }
+
+    func diagnosticShellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    func diagnosticBatchEquivalenceCommand(
+        modelPath: String?,
+        prefixTokens: [llama_token],
+        windowTokens: [llama_token],
+        recurrentStateSnapshots: Int,
+        samplerPrefixSkip: Int
+    ) -> String? {
+        guard let modelPath else { return nil }
+        return [
+            "/private/tmp/llama-batch-equivalence-build/bin/llama-batch-equivalence",
+            "-m",
+            diagnosticShellQuoted(modelPath),
+            "--prefix-token-ids",
+            diagnosticShellQuoted(diagnosticTokenIDList(prefixTokens)),
+            "--window-token-ids",
+            diagnosticShellQuoted(diagnosticTokenIDList(windowTokens)),
+            "--sampler-check",
+            "--sampler-prefix-skip",
+            String(max(0, samplerPrefixSkip)),
+            "--baseline-n-rs-seq",
+            "0",
+            "--candidate-pre-norm",
+            "--n-rs-seq",
+            String(recurrentStateSnapshots)
+        ].joined(separator: " ")
+    }
 
     static func promptPrefillPlan(
         cachedPromptTokens: [llama_token]?,

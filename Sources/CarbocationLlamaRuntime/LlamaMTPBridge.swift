@@ -25,12 +25,17 @@ func carbocation_llama_mtp_decode_target_tokens_bridge(
     _ startPosition: Int32
 ) -> Int32
 
-@_silgen_name("carbocation_llama_mtp_decode_verification_tokens")
-func carbocation_llama_mtp_decode_verification_tokens_bridge(
+@_silgen_name("carbocation_llama_mtp_decode_verification_target_tokens")
+func carbocation_llama_mtp_decode_verification_target_tokens_bridge(
     _ context: UnsafeMutableRawPointer?,
     _ tokens: UnsafePointer<llama_token>?,
     _ tokenCount: Int32,
     _ startPosition: Int32
+) -> Int32
+
+@_silgen_name("carbocation_llama_mtp_process_last_target_batch")
+func carbocation_llama_mtp_process_last_target_batch_bridge(
+    _ context: UnsafeMutableRawPointer?
 ) -> Int32
 
 @_silgen_name("carbocation_llama_mtp_restore_verification_checkpoint")

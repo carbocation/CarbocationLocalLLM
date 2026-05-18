@@ -10,6 +10,8 @@
 namespace {
 
 constexpr llama_seq_id sequence_id = 0;
+constexpr llama_state_seq_flags checkpoint_flags =
+    LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
 
 void clear_batch(llama_batch & batch) {
     batch.n_tokens = 0;
@@ -73,7 +75,7 @@ bool rollback_draft(carbocation_llama_mtp_context_impl * context, int32_t start_
         context->draft_rollback_checkpoint.load_dft(
             context->draft_context,
             sequence_id,
-            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+            checkpoint_flags
         );
     }
 
@@ -111,7 +113,8 @@ int32_t decode_target_tokens(
     const llama_token * tokens,
     int32_t token_count,
     int32_t start_position,
-    bool logits_for_all_tokens
+    bool logits_for_all_tokens,
+    bool process_speculative
 ) {
     if (context == nullptr || tokens == nullptr || token_count < 0) {
         return -1;
@@ -134,13 +137,13 @@ int32_t decode_target_tokens(
         context->verification_checkpoint.update_tgt(
             context->target_context,
             sequence_id,
-            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+            checkpoint_flags
         );
         if (context->draft_context_sequence_removal == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
             context->verification_checkpoint.update_dft(
                 context->draft_context,
                 sequence_id,
-                LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+                checkpoint_flags
             );
         }
         context->verification_checkpoint_active = !context->verification_checkpoint.empty();
@@ -167,6 +170,13 @@ int32_t decode_target_tokens(
         return target_result;
     }
 
+    // Verification samples target logits before common/speculative decodes the
+    // draft context. Some backends expose logits through scratch buffers that
+    // must not be sampled after another context has decoded.
+    if (!process_speculative) {
+        return 0;
+    }
+
     if (!common_speculative_process(context->speculative, context->target_batch)) {
         llama_memory_seq_rm(
             llama_get_memory(context->target_context),
@@ -188,6 +198,47 @@ int32_t decode_target_tokens(
     } else if (start_position >= 0) {
         context->prompt_tokens.resize(static_cast<size_t>(start_position));
         context->prompt_tokens.insert(context->prompt_tokens.end(), tokens, tokens + token_count);
+    }
+
+    return 0;
+}
+
+int32_t process_last_target_batch(carbocation_llama_mtp_context_impl * context) {
+    if (context == nullptr || context->speculative == nullptr || context->target_batch.n_tokens <= 0) {
+        return -1;
+    }
+
+    const int32_t start_position = context->target_batch.pos[0];
+
+    if (!common_speculative_process(context->speculative, context->target_batch)) {
+        llama_memory_seq_rm(
+            llama_get_memory(context->target_context),
+            sequence_id,
+            start_position,
+            -1
+        );
+        llama_memory_seq_rm(
+            llama_get_memory(context->draft_context),
+            sequence_id,
+            start_position,
+            -1
+        );
+        return -3;
+    }
+
+    if (start_position == static_cast<int32_t>(context->prompt_tokens.size())) {
+        context->prompt_tokens.insert(
+            context->prompt_tokens.end(),
+            context->target_batch.token,
+            context->target_batch.token + context->target_batch.n_tokens
+        );
+    } else if (start_position >= 0) {
+        context->prompt_tokens.resize(static_cast<size_t>(start_position));
+        context->prompt_tokens.insert(
+            context->prompt_tokens.end(),
+            context->target_batch.token,
+            context->target_batch.token + context->target_batch.n_tokens
+        );
     }
 
     return 0;
@@ -297,11 +348,12 @@ extern "C" int32_t carbocation_llama_mtp_decode_target_tokens(
         tokens,
         token_count,
         start_position,
-        false
+        false,
+        true
     );
 }
 
-extern "C" int32_t carbocation_llama_mtp_decode_verification_tokens(
+extern "C" int32_t carbocation_llama_mtp_decode_verification_target_tokens(
     void * opaque_context,
     const llama_token * tokens,
     int32_t token_count,
@@ -312,8 +364,13 @@ extern "C" int32_t carbocation_llama_mtp_decode_verification_tokens(
         tokens,
         token_count,
         start_position,
-        true
+        true,
+        false
     );
+}
+
+extern "C" int32_t carbocation_llama_mtp_process_last_target_batch(void * opaque_context) {
+    return process_last_target_batch(mtp_context(opaque_context));
 }
 
 extern "C" int32_t carbocation_llama_mtp_restore_verification_checkpoint(void * opaque_context) {
@@ -325,12 +382,12 @@ extern "C" int32_t carbocation_llama_mtp_restore_verification_checkpoint(void * 
     context->verification_checkpoint.load_tgt(
         context->target_context,
         sequence_id,
-        LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+        checkpoint_flags
     );
     context->verification_checkpoint.load_dft(
         context->draft_context,
         sequence_id,
-        LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+        checkpoint_flags
     );
 
     const llama_pos restore_position = context->verification_checkpoint.pos_max + 1;
@@ -391,7 +448,7 @@ extern "C" int32_t carbocation_llama_mtp_draft(
         context->draft_rollback_checkpoint.update_dft(
             context->draft_context,
             sequence_id,
-            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+            checkpoint_flags
         );
         context->draft_rollback_checkpoint_active = true;
     }

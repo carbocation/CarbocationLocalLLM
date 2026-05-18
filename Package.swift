@@ -80,6 +80,10 @@ let package = Package(
         .library(
             name: "CarbocationLocalLLMRuntimeUI",
             targets: ["CarbocationLocalLLMRuntimeUI"]
+        ),
+        .executable(
+            name: "CLLMMTPReproCommand",
+            targets: ["CLLMMTPReproCommand"]
         )
     ],
     dependencies: [
@@ -182,6 +186,13 @@ let package = Package(
                 "CarbocationLocalLLM",
                 "CarbocationLocalLLMRuntime",
                 "CarbocationLocalLLMUI"
+            ]
+        ),
+        .executableTarget(
+            name: "CLLMMTPReproCommand",
+            dependencies: [
+                "CarbocationLocalLLM",
+                "CarbocationLlamaRuntime"
             ]
         ),
         .testTarget(
