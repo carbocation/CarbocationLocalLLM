@@ -29,7 +29,8 @@ extension LlamaEngine {
     static func contextParams(
         contextSize: Int,
         batchSize: Int,
-        threads: Int32
+        threads: Int32,
+        recurrentStateSnapshots: Int = 0
     ) -> llama_context_params {
         var params = llama_context_default_params()
         let clampedContext = max(1, contextSize)
@@ -39,6 +40,7 @@ extension LlamaEngine {
         params.n_ubatch = UInt32(clampedBatch)
         params.n_threads = threads
         params.n_threads_batch = threads
+        params.n_rs_seq = UInt32(max(0, recurrentStateSnapshots))
         return params
     }
 

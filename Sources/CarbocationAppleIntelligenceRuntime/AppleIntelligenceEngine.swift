@@ -565,6 +565,9 @@ public actor AppleIntelligenceEngine: LLMEngine {
                 generatedTokens: snapshot.generatedTokens,
                 stopReason: snapshot.stopReason
             ))
+            if let accelerationStats = snapshot.accelerationStats {
+                onPhaseAwareEvent(.aggregateAccelerationStats(accelerationStats))
+            }
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
@@ -738,22 +741,45 @@ private final class AppleToolGenerationStatsAccumulator: @unchecked Sendable {
     private var promptTokens = 0
     private var generatedTokens = 0
     private var stopReason: String?
+    private var accelerationStats: LLMGenerationAccelerationStats?
 
     func record(_ event: LLMPhaseAwareStreamEvent) {
-        guard case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _) = event else {
-            return
+        switch event {
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _):
+            lock.lock()
+            defer { lock.unlock() }
+            self.promptTokens += promptTokens
+            self.generatedTokens += generatedTokens
+            self.stopReason = stopReason
+        case .accelerationStats(let stats):
+            lock.lock()
+            defer { lock.unlock() }
+            if accelerationStats == nil {
+                accelerationStats = stats
+            } else {
+                accelerationStats?.merge(stats)
+            }
+        default:
+            break
         }
-        lock.lock()
-        defer { lock.unlock() }
-        self.promptTokens += promptTokens
-        self.generatedTokens += generatedTokens
-        self.stopReason = stopReason
     }
 
-    func snapshot(fallbackStopReason: String) -> (promptTokens: Int, generatedTokens: Int, stopReason: String) {
+    func snapshot(
+        fallbackStopReason: String
+    ) -> (
+        promptTokens: Int,
+        generatedTokens: Int,
+        stopReason: String,
+        accelerationStats: LLMGenerationAccelerationStats?
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        return (promptTokens, generatedTokens, stopReason ?? fallbackStopReason)
+        return (
+            promptTokens,
+            generatedTokens,
+            stopReason ?? fallbackStopReason,
+            accelerationStats
+        )
     }
 }
 

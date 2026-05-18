@@ -66,6 +66,77 @@ public enum LLMStreamEvent: Sendable {
     case done(totalBytes: Int, duration: TimeInterval)
 }
 
+public enum LLMGenerationAccelerationStatus: String, Codable, Hashable, Sendable {
+    case active
+    case unsupported
+    case runtimeUnavailable = "runtime-unavailable"
+    case disabledByPolicy = "disabled-by-policy"
+    case disabledByIncompatibleControlPath = "disabled-by-incompatible-control-path"
+}
+
+public struct LLMGenerationAccelerationStats: Codable, Hashable, Sendable {
+    public var status: LLMGenerationAccelerationStatus
+    public var accelerator: String
+    public var maxDraftTokens: Int
+    public var draftCalls: Int
+    public var draftTokensGenerated: Int
+    public var draftTokensAccepted: Int
+
+    public init(
+        status: LLMGenerationAccelerationStatus,
+        accelerator: String,
+        maxDraftTokens: Int = 0,
+        draftCalls: Int = 0,
+        draftTokensGenerated: Int = 0,
+        draftTokensAccepted: Int = 0
+    ) {
+        self.status = status
+        self.accelerator = accelerator
+        self.maxDraftTokens = maxDraftTokens
+        self.draftCalls = draftCalls
+        self.draftTokensGenerated = draftTokensGenerated
+        self.draftTokensAccepted = draftTokensAccepted
+    }
+
+    public var acceptanceRate: Double? {
+        guard draftTokensGenerated > 0 else { return nil }
+        return Double(draftTokensAccepted) / Double(draftTokensGenerated)
+    }
+
+    public mutating func merge(_ other: LLMGenerationAccelerationStats) {
+        status = Self.mergedStatus(status, other.status)
+        if accelerator.isEmpty {
+            accelerator = other.accelerator
+        }
+        maxDraftTokens = max(maxDraftTokens, other.maxDraftTokens)
+        draftCalls += other.draftCalls
+        draftTokensGenerated += other.draftTokensGenerated
+        draftTokensAccepted += other.draftTokensAccepted
+    }
+
+    private static func mergedStatus(
+        _ lhs: LLMGenerationAccelerationStatus,
+        _ rhs: LLMGenerationAccelerationStatus
+    ) -> LLMGenerationAccelerationStatus {
+        statusPriority(lhs) >= statusPriority(rhs) ? lhs : rhs
+    }
+
+    private static func statusPriority(_ status: LLMGenerationAccelerationStatus) -> Int {
+        switch status {
+        case .active:
+            return 5
+        case .disabledByIncompatibleControlPath:
+            return 4
+        case .runtimeUnavailable:
+            return 3
+        case .disabledByPolicy:
+            return 2
+        case .unsupported:
+            return 1
+        }
+    }
+}
+
 public enum LLMFinalAnswerSnapshotReason: String, Codable, Sendable {
     case streamCorrection = "stream-correction"
     case completed
@@ -89,6 +160,7 @@ public enum LLMPhaseAwareStreamEvent: Sendable {
         templateMode: LLMChatTemplateMode,
         phase: LLMStreamContentPhase
     )
+    case accelerationStats(LLMGenerationAccelerationStats)
     case done(totalBytes: Int, duration: TimeInterval, phase: LLMStreamContentPhase)
 
     public var streamEvent: LLMStreamEvent? {
@@ -110,6 +182,8 @@ public enum LLMPhaseAwareStreamEvent: Sendable {
                 stopReason: stopReason,
                 templateMode: templateMode
             )
+        case .accelerationStats:
+            return nil
         case .done(let totalBytes, let duration, _):
             return .done(totalBytes: totalBytes, duration: duration)
         }
@@ -125,6 +199,7 @@ private final class LLMToolGenerationStatsAccumulator: @unchecked Sendable {
     private var promptTokens = 0
     private var generatedTokens = 0
     private var stopReason: String?
+    private var accelerationStats: LLMGenerationAccelerationStats?
 
     func record(_ event: LLMStreamEvent) {
         guard case .generationStats(let promptTokens, let generatedTokens, let stopReason, _) = event else {
@@ -134,16 +209,32 @@ private final class LLMToolGenerationStatsAccumulator: @unchecked Sendable {
     }
 
     func record(_ event: LLMPhaseAwareStreamEvent) {
-        guard case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _) = event else {
-            return
+        switch event {
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _):
+            record(promptTokens: promptTokens, generatedTokens: generatedTokens, stopReason: stopReason)
+        case .accelerationStats(let stats):
+            record(accelerationStats: stats)
+        default:
+            break
         }
-        record(promptTokens: promptTokens, generatedTokens: generatedTokens, stopReason: stopReason)
     }
 
-    func snapshot(fallbackStopReason: String) -> (promptTokens: Int, generatedTokens: Int, stopReason: String) {
+    func snapshot(
+        fallbackStopReason: String
+    ) -> (
+        promptTokens: Int,
+        generatedTokens: Int,
+        stopReason: String,
+        accelerationStats: LLMGenerationAccelerationStats?
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        return (promptTokens, generatedTokens, stopReason ?? fallbackStopReason)
+        return (
+            promptTokens,
+            generatedTokens,
+            stopReason ?? fallbackStopReason,
+            accelerationStats
+        )
     }
 
     private func record(promptTokens: Int, generatedTokens: Int, stopReason: String) {
@@ -152,6 +243,16 @@ private final class LLMToolGenerationStatsAccumulator: @unchecked Sendable {
         self.promptTokens += promptTokens
         self.generatedTokens += generatedTokens
         self.stopReason = stopReason
+    }
+
+    private func record(accelerationStats stats: LLMGenerationAccelerationStats) {
+        lock.lock()
+        defer { lock.unlock() }
+        if accelerationStats == nil {
+            accelerationStats = stats
+        } else {
+            accelerationStats?.merge(stats)
+        }
     }
 }
 
@@ -284,6 +385,9 @@ extension LLMEngine {
                 generatedTokens: snapshot.generatedTokens,
                 stopReason: snapshot.stopReason
             ))
+            if let accelerationStats = snapshot.accelerationStats {
+                onPhaseAwareEvent(.aggregateAccelerationStats(accelerationStats))
+            }
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {

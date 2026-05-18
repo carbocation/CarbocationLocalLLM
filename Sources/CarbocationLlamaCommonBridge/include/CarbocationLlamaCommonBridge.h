@@ -72,7 +72,7 @@ int32_t carbocation_llama_mtp_draft(
     int32_t output_token_capacity
 );
 
-void carbocation_llama_mtp_accept(
+int32_t carbocation_llama_mtp_accept(
     void * context,
     int32_t accepted_draft_tokens
 );

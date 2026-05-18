@@ -238,18 +238,21 @@ private final class SmokeState {
             append("loadedContext: \(loaded.contextSize)")
             append("trainingContext: \(loaded.trainingContextSize)")
             append("supportsGrammar: \(loaded.supportsGrammar)")
+            append("supportsMTPAcceleration: \(loaded.supportsMTPAcceleration)")
 
             let options = generationOptions(for: loaded)
 
             let response = try await engine.generate(
                 system: systemPrompt(for: loaded),
                 prompt: #"Return {"ok": true, "message": "hello"}."#,
-                options: options
-            ) { [weak self] event in
-                Task { @MainActor [weak self] in
-                    self?.append(Self.format(event: event))
-                }
-            }
+                options: options,
+                onPhaseAwareEvent: { [weak self] event in
+                    Task { @MainActor [weak self] in
+                        self?.append(Self.format(event: event))
+                    }
+                },
+                ()
+            )
 
             let normalized = try Self.validatedNormalizedJSON(from: response)
             append("rawResponse:")
@@ -269,6 +272,32 @@ private final class SmokeState {
             output = line
         } else {
             output += "\n\(line)"
+        }
+    }
+
+    private static func format(event: LLMPhaseAwareStreamEvent) -> String {
+        switch event {
+        case .requestSent(let phase):
+            return "event: request-sent phase=\(phase.rawValue)"
+        case .firstByteReceived(let seconds, let phase):
+            return String(format: "event: first-byte phase=%@ %.3fs", phase.rawValue, seconds)
+        case .phaseChanged(let from, let to):
+            return "event: phase-changed from=\(from.rawValue) to=\(to.rawValue)"
+        case .tokenChunk(let preview, let bytesSoFar, let phase):
+            return "event: token-chunk phase=\(phase.rawValue) bytes=\(bytesSoFar) preview=\(preview)"
+        case .finalAnswerDelta(let text, let bytesSoFar):
+            return "event: final-answer-delta bytes=\(bytesSoFar) text=\(text)"
+        case .finalAnswerSnapshot(let text, let bytesSoFar, let reason):
+            return "event: final-answer-snapshot reason=\(reason.rawValue) bytes=\(bytesSoFar) text=\(text)"
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
+            return "event: stats phase=\(phase.rawValue) promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
+        case .accelerationStats(let stats):
+            let rate = stats.acceptanceRate
+                .map { String(format: "%.1f%%", $0 * 100) }
+                ?? "n/a"
+            return "event: acceleration accelerator=\(stats.accelerator) status=\(stats.status.rawValue) maxDraftTokens=\(stats.maxDraftTokens) draftCalls=\(stats.draftCalls) draftGenerated=\(stats.draftTokensGenerated) draftAccepted=\(stats.draftTokensAccepted) acceptance=\(rate)"
+        case .done(let totalBytes, let duration, let phase):
+            return String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
         }
     }
 

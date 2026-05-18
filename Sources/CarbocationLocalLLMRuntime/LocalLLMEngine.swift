@@ -11,6 +11,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     public var promptReserveTokens: Int
     public var heartbeatInterval: TimeInterval
     public var accelerationPolicy: LLMAccelerationPolicy
+    public var mtpMaxDraftTokens: Int
 
     public init(
         llamaGPULayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
@@ -19,7 +20,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         llamaThreadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
-        accelerationPolicy: LLMAccelerationPolicy = .automatic
+        accelerationPolicy: LLMAccelerationPolicy = .automatic,
+        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
     ) {
         self.llamaGPULayerCount = llamaGPULayerCount
         self.llamaUseMemoryMap = llamaUseMemoryMap
@@ -28,6 +30,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         self.promptReserveTokens = promptReserveTokens
         self.heartbeatInterval = heartbeatInterval
         self.accelerationPolicy = accelerationPolicy
+        self.mtpMaxDraftTokens = mtpMaxDraftTokens
     }
 
     func makeLlamaConfiguration() -> LlamaEngineConfiguration {
@@ -38,7 +41,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
             threadCount: llamaThreadCount,
             promptReserveTokens: promptReserveTokens,
             heartbeatInterval: heartbeatInterval,
-            accelerationPolicy: accelerationPolicy
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: mtpMaxDraftTokens
         )
     }
 
@@ -563,7 +567,8 @@ public actor LocalLLMSession {
                 contextSize: loaded.contextSize,
                 trainingContextSize: loaded.trainingContextSize,
                 supportsGrammar: true,
-                usesExactTokenCounts: true
+                usesExactTokenCounts: true,
+                supportsMTPAcceleration: loaded.supportsMTPAcceleration
             )
 
         case .system(.appleIntelligence):

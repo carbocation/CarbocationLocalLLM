@@ -13,6 +13,9 @@ enum CLLMDemoMetadata {
 #endif
     static let appSupportFolderName = "CLLMDemo"
     static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
+    static let accelerationPolicyDefaultsKey = "CLLMDemo.accelerationPolicy"
+    static let mtpMaxDraftTokensDefaultsKey = "CLLMDemo.mtpMaxDraftTokens"
+    static let defaultMTPMaxDraftTokens = 3
 }
 
 enum DemoRunMode: String, CaseIterable, Identifiable {
@@ -141,6 +144,9 @@ final class DemoState {
     var repetitionPenaltyText = ""
     var enableThinking = false
     var thinkingBudgetText = ""
+    var maxOutputTokensText = ""
+    var mtpMaxDraftTokensText: String
+    var accelerationPolicy: LLMAccelerationPolicy
     var runMode: DemoRunMode = .plain
     var enableLoadWebpageTool = true
     var enableCalculateTool = true
@@ -159,11 +165,24 @@ final class DemoState {
     private var generationTask: Task<Void, Never>?
     private let appSamplingOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
     private let generationControl = LLMGenerationControl()
-    private let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
-        heartbeatInterval: 0.5
-    ))
+    private var engine: LocalLLMEngine
+    private var lastPlainGeneratedTokenCount: Int?
+    private var lastLegacyGeneratedTokenCount: Int?
 
     init() {
+        let savedAccelerationPolicy = UserDefaults.standard
+            .string(forKey: CLLMDemoMetadata.accelerationPolicyDefaultsKey)
+            .flatMap(LLMAccelerationPolicy.init(rawValue:)) ?? .automatic
+        let savedMTPMaxDraftTokens = UserDefaults.standard
+            .object(forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey) as? Int
+            ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
+        mtpMaxDraftTokensText = String(savedMTPMaxDraftTokens)
+        accelerationPolicy = savedAccelerationPolicy
+        engine = Self.makeEngine(
+            accelerationPolicy: savedAccelerationPolicy,
+            mtpMaxDraftTokens: savedMTPMaxDraftTokens
+        )
+
         let root = ModelStorage.modelsDirectory(appSupportFolderName: CLLMDemoMetadata.appSupportFolderName)
         library = ModelLibrary(
             root: root,
@@ -198,8 +217,24 @@ final class DemoState {
         isRunning && enableThinking && streamPhase == .thinking
     }
 
+    var mtpAccelerationEnabled: Bool {
+        accelerationPolicy == .automatic
+    }
+
+    var accelerationPolicyStatusLabel: String {
+        switch accelerationPolicy {
+        case .automatic:
+            return "Auto"
+        case .disabled:
+            return "Off"
+        }
+    }
+
     var generationOptionsValidationMessage: String? {
-        thinkingBudgetValidationMessage ?? samplingOptionsValidationMessage
+        thinkingBudgetValidationMessage
+            ?? maxOutputTokensValidationMessage
+            ?? mtpMaxDraftTokensValidationMessage
+            ?? samplingOptionsValidationMessage
     }
 
     var toolValidationMessage: String? {
@@ -334,6 +369,14 @@ final class DemoState {
         return nil
     }
 
+    var maxOutputTokensValidationMessage: String? {
+        validateInt(maxOutputTokensText, name: "Max output tokens", lowerBound: 1)
+    }
+
+    var mtpMaxDraftTokensValidationMessage: String? {
+        validateInt(mtpMaxDraftTokensText, name: "MTP draft tokens", lowerBound: 1, upperBound: 32)
+    }
+
     var samplingOptionsValidationMessage: String? {
         validateDouble(
             temperatureText,
@@ -385,12 +428,41 @@ final class DemoState {
         return Int(trimmed)
     }
 
+    private var parsedMaxOutputTokens: Int? {
+        parsedInt(maxOutputTokensText)
+    }
+
     private var selectedToolCount: Int {
         [
             enableLoadWebpageTool,
             enableCalculateTool,
             enableConvertUnitsTool
         ].filter { $0 }.count
+    }
+
+    private static func makeEngine(
+        accelerationPolicy: LLMAccelerationPolicy,
+        mtpMaxDraftTokens: Int
+    ) -> LocalLLMEngine {
+        LocalLLMEngine(configuration: engineConfiguration(
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: mtpMaxDraftTokens
+        ))
+    }
+
+    private static func engineConfiguration(
+        accelerationPolicy: LLMAccelerationPolicy,
+        mtpMaxDraftTokens: Int
+    ) -> LocalLLMEngineConfiguration {
+        LocalLLMEngineConfiguration(
+            heartbeatInterval: 0.5,
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: mtpMaxDraftTokens
+        )
+    }
+
+    private var parsedMTPMaxDraftTokens: Int {
+        parsedInt(mtpMaxDraftTokensText) ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
     }
 
     private func parsedDouble(_ text: String) -> Double? {
@@ -425,11 +497,19 @@ final class DemoState {
         return nil
     }
 
-    private func validateInt(_ text: String, name: String, lowerBound: Int) -> String? {
+    private func validateInt(
+        _ text: String,
+        name: String,
+        lowerBound: Int,
+        upperBound: Int? = nil
+    ) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         guard let value = Int(trimmed), value >= lowerBound else {
             return "\(name) must be blank or at least \(lowerBound)."
+        }
+        if let upperBound, value > upperBound {
+            return "\(name) must be at most \(upperBound)."
         }
         return nil
     }
@@ -508,6 +588,47 @@ final class DemoState {
         }
     }
 
+    func setMTPAccelerationEnabled(_ enabled: Bool) {
+        guard !isRunning else { return }
+
+        let newPolicy: LLMAccelerationPolicy = enabled ? .automatic : .disabled
+        guard accelerationPolicy != newPolicy else { return }
+
+        accelerationPolicy = newPolicy
+        UserDefaults.standard.set(newPolicy.rawValue, forKey: CLLMDemoMetadata.accelerationPolicyDefaultsKey)
+        loadedInfo = nil
+        errorMessage = nil
+
+        let oldEngine = engine
+        engine = Self.makeEngine(
+            accelerationPolicy: newPolicy,
+            mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+        )
+        Task {
+            await oldEngine.unload()
+        }
+    }
+
+    func setMTPMaxDraftTokensText(_ value: String) {
+        guard !isRunning else { return }
+        mtpMaxDraftTokensText = value
+
+        guard mtpMaxDraftTokensValidationMessage == nil else { return }
+        let maxDraftTokens = parsedMTPMaxDraftTokens
+        UserDefaults.standard.set(maxDraftTokens, forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey)
+        loadedInfo = nil
+        errorMessage = nil
+
+        let oldEngine = engine
+        engine = Self.makeEngine(
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: maxDraftTokens
+        )
+        Task {
+            await oldEngine.unload()
+        }
+    }
+
     func persistSelection(_ value: String) {
         UserDefaults.standard.set(value, forKey: CLLMDemoMetadata.selectedModelDefaultsKey)
     }
@@ -550,6 +671,8 @@ final class DemoState {
         output = ""
         events = ""
         toolTranscript = ""
+        lastPlainGeneratedTokenCount = nil
+        lastLegacyGeneratedTokenCount = nil
         resetStreamState()
         errorMessage = nil
 
@@ -584,6 +707,8 @@ final class DemoState {
         output = ""
         events = ""
         toolTranscript = ""
+        lastPlainGeneratedTokenCount = nil
+        lastLegacyGeneratedTokenCount = nil
         resetStreamState()
         errorMessage = nil
     }
@@ -595,7 +720,14 @@ final class DemoState {
         }
 
         do {
-            guard let plan = await LocalLLMEngine.loadPlan(from: storedSelection, in: library) else {
+            guard let plan = await LocalLLMEngine.loadPlan(
+                from: storedSelection,
+                in: library,
+                configuration: Self.engineConfiguration(
+                    accelerationPolicy: accelerationPolicy,
+                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+                )
+            ) else {
                 normalizeSelection()
                 errorMessage = "Selected model is unavailable. Pick a model in Settings."
                 appendEvent("failed: selected model unavailable")
@@ -613,6 +745,9 @@ final class DemoState {
             appendEvent("model: \(loaded.displayName)")
             appendEvent("context: \(loaded.contextSize)")
             appendEvent("grammar: \(loaded.supportsGrammar ? "yes" : "no")")
+            appendEvent("mtp-support: \(loaded.supportsMTPAcceleration ? "yes" : "no")")
+            appendEvent("mtp-policy: \(accelerationPolicy.rawValue)")
+            appendEvent("mtp-max-draft: \(parsedMTPMaxDraftTokens)")
 
             let options = generationOptions(for: loaded)
             appendGenerationOptionsEvent(options: options, loaded: loaded)
@@ -698,6 +833,7 @@ final class DemoState {
             minP: parsedMinP,
             presencePenalty: parsedPresencePenalty,
             repetitionPenalty: parsedRepetitionPenalty,
+            maxOutputTokens: parsedMaxOutputTokens,
             stopAtBalancedJSON: false,
             enableThinking: enableThinking,
             thinkingBudgetTokens: parsedThinkingBudgetTokens,
@@ -758,6 +894,7 @@ final class DemoState {
             "sampling: temp=\(temperature) top-p=\(topP) top-k=\(topK) "
                 + "min-p=\(minP) presence=\(presencePenalty) repetition=\(repetitionPenalty)"
         )
+        appendEvent("max-output: \(options.maxOutputTokens.map(String.init) ?? "context")")
 
         var line = "thinking: \(options.enableThinking ? "enabled" : "disabled")"
         if options.enableThinking {
@@ -793,10 +930,20 @@ final class DemoState {
             if output != text {
                 output = text
             }
-        case .generationStats(_, _, _, _, let phase):
+        case .generationStats(_, let generatedTokens, _, _, let phase):
+            lastPlainGeneratedTokenCount = generatedTokens
             setFinalAnswerPhase(phase)
-        case .done(_, _, let phase):
+        case .accelerationStats:
+            break
+        case .done(let totalBytes, let duration, let phase):
             setFinalAnswerPhase(phase)
+            appendEvent(Self.formatDoneEvent(
+                totalBytes: totalBytes,
+                duration: duration,
+                phase: phase,
+                generatedTokens: lastPlainGeneratedTokenCount
+            ))
+            return
         }
 
         appendEvent(Self.format(event: event))
@@ -831,6 +978,11 @@ final class DemoState {
             )
         case .aggregateGenerationStats(let promptTokens, let generatedTokens, let stopReason):
             appendEvent("tool-aggregate: prompt=\(promptTokens) generated=\(generatedTokens) stop=\(stopReason)")
+        case .aggregateAccelerationStats(let stats):
+            let rate = stats.acceptanceRate
+                .map { String(format: "%.1f%%", $0 * 100) }
+                ?? "n/a"
+            appendEvent("tool-aggregate-acceleration: accelerator=\(stats.accelerator) status=\(stats.status.rawValue) maxDraftTokens=\(stats.maxDraftTokens) draftCalls=\(stats.draftCalls) draftGenerated=\(stats.draftTokensGenerated) draftAccepted=\(stats.draftTokensAccepted) acceptance=\(rate)")
         }
     }
 
@@ -846,12 +998,20 @@ final class DemoState {
             streamPhase = .final
             streamActivity = .finalAnswer
             streamBytesSoFar = bytesSoFar
-        case .generationStats:
+        case .generationStats(_, let generatedTokens, _, _):
+            lastLegacyGeneratedTokenCount = generatedTokens
             streamPhase = .final
             streamActivity = .finalAnswer
-        case .done:
+        case .done(let totalBytes, let duration):
             streamPhase = .final
             streamActivity = .finalAnswer
+            appendEvent(Self.formatDoneEvent(
+                totalBytes: totalBytes,
+                duration: duration,
+                phase: nil,
+                generatedTokens: lastLegacyGeneratedTokenCount
+            ))
+            return
         }
 
         appendEvent(Self.format(event: event))
@@ -926,8 +1086,18 @@ final class DemoState {
             return "event: final-answer-snapshot reason=\(reason.rawValue) bytes=\(bytesSoFar) text=\(text)"
         case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
             return "event: stats phase=\(phase.rawValue) promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
+        case .accelerationStats(let stats):
+            let rate = stats.acceptanceRate
+                .map { String(format: "%.1f%%", $0 * 100) }
+                ?? "n/a"
+            return "event: acceleration accelerator=\(stats.accelerator) status=\(stats.status.rawValue) maxDraftTokens=\(stats.maxDraftTokens) draftCalls=\(stats.draftCalls) draftGenerated=\(stats.draftTokensGenerated) draftAccepted=\(stats.draftTokensAccepted) acceptance=\(rate)"
         case .done(let totalBytes, let duration, let phase):
-            return String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
+            return Self.formatDoneEvent(
+                totalBytes: totalBytes,
+                duration: duration,
+                phase: phase,
+                generatedTokens: nil
+            )
         }
     }
 
@@ -942,8 +1112,31 @@ final class DemoState {
         case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode):
             return "event: stats promptTokens=\(promptTokens) generatedTokens=\(generatedTokens) stopReason=\(stopReason) templateMode=\(templateMode.rawValue)"
         case .done(let totalBytes, let duration):
-            return String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
+            return Self.formatDoneEvent(
+                totalBytes: totalBytes,
+                duration: duration,
+                phase: nil,
+                generatedTokens: nil
+            )
         }
+    }
+
+    private static func formatDoneEvent(
+        totalBytes: Int,
+        duration: TimeInterval,
+        phase: LLMStreamContentPhase?,
+        generatedTokens: Int?
+    ) -> String {
+        var line: String
+        if let phase {
+            line = String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
+        } else {
+            line = String(format: "event: done bytes=%d duration=%.3fs", totalBytes, duration)
+        }
+        if let generatedTokens, duration > 0 {
+            line += String(format: " generatedTokensPerSecond=%.2f", Double(generatedTokens) / duration)
+        }
+        return line
     }
 
     private static func logPreview(_ text: String) -> String {

@@ -1338,6 +1338,14 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .finalAnswerDelta(text: "answer", bytesSoFar: 6),
             .finalAnswerSnapshot(text: "answer", bytesSoFar: 6, reason: .completed),
             .tokenChunk(preview: "answer", bytesSoFar: 6, phase: .final),
+            .accelerationStats(LLMGenerationAccelerationStats(
+                status: .active,
+                accelerator: "mtp",
+                maxDraftTokens: 3,
+                draftCalls: 2,
+                draftTokensGenerated: 6,
+                draftTokensAccepted: 3
+            )),
             .done(totalBytes: 6, duration: 1, phase: .final)
         ]
 
@@ -1356,6 +1364,32 @@ final class CarbocationLocalLLMTests: XCTestCase {
             return XCTFail("Expected done.")
         }
         XCTAssertEqual(totalBytes, 6)
+    }
+
+    func testGenerationAccelerationStatsAcceptanceRate() {
+        let active = LLMGenerationAccelerationStats(
+            status: .active,
+            accelerator: "mtp",
+            maxDraftTokens: 3,
+            draftCalls: 4,
+            draftTokensGenerated: 8,
+            draftTokensAccepted: 6
+        )
+        XCTAssertEqual(active.acceptanceRate, 0.75)
+
+        let unsupported = LLMGenerationAccelerationStats(
+            status: .unsupported,
+            accelerator: "mtp"
+        )
+        XCTAssertNil(unsupported.acceptanceRate)
+
+        var aggregate = unsupported
+        aggregate.merge(active)
+        XCTAssertEqual(aggregate.status, .active)
+        XCTAssertEqual(aggregate.maxDraftTokens, 3)
+        XCTAssertEqual(aggregate.draftCalls, 4)
+        XCTAssertEqual(aggregate.draftTokensGenerated, 8)
+        XCTAssertEqual(aggregate.draftTokensAccepted, 6)
     }
 
     func testOutputProfileDerivationStartEndThinkingPair() {

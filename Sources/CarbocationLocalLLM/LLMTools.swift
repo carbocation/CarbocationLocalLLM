@@ -280,6 +280,7 @@ public enum LLMToolPhaseAwareStreamEvent: Sendable {
     case toolCallCompleted(LLMToolOutput)
     case toolCallFailed(LLMToolOutput)
     case aggregateGenerationStats(promptTokens: Int, generatedTokens: Int, stopReason: String)
+    case aggregateAccelerationStats(LLMGenerationAccelerationStats)
 }
 
 public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {

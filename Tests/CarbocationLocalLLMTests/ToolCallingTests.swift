@@ -297,6 +297,9 @@ final class ToolCallingTests: XCTestCase {
 
         XCTAssertEqual(result.finalText, "Plain answer.")
         XCTAssertEqual(recorder.events.finalAnswerDeltaText, "Plain answer.")
+        XCTAssertEqual(recorder.events.aggregateAccelerationStats?.status, .active)
+        XCTAssertEqual(recorder.events.aggregateAccelerationStats?.draftTokensGenerated, 3)
+        XCTAssertEqual(recorder.events.aggregateAccelerationStats?.draftTokensAccepted, 2)
     }
 
     func testToolGenerationWithToolChoiceNoneUsesFinalAnswerEvents() async throws {
@@ -385,6 +388,14 @@ private actor ScriptedEngine: LLMEngine {
             onPhaseAwareEvent(.finalAnswerDelta(text: response, bytesSoFar: response.utf8.count))
             onPhaseAwareEvent(.tokenChunk(preview: response, bytesSoFar: response.utf8.count, phase: .final))
         }
+        onPhaseAwareEvent(.accelerationStats(LLMGenerationAccelerationStats(
+            status: .active,
+            accelerator: "mtp",
+            maxDraftTokens: 3,
+            draftCalls: 1,
+            draftTokensGenerated: 3,
+            draftTokensAccepted: 2
+        )))
         onPhaseAwareEvent(.generationStats(
             promptTokens: 3,
             generatedTokens: TokenEstimator.estimate(text: response),
@@ -452,6 +463,15 @@ private extension Array where Element == LLMToolPhaseAwareStreamEvent {
             }
             return promptTokens > 0 && generatedTokens > 0 && actualStopReason == stopReason
         }
+    }
+
+    var aggregateAccelerationStats: LLMGenerationAccelerationStats? {
+        compactMap { event in
+            if case .aggregateAccelerationStats(let stats) = event {
+                return stats
+            }
+            return nil
+        }.last
     }
 
     var startedToolCallIDs: [String] {

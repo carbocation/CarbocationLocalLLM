@@ -38,6 +38,9 @@ extension LlamaEngine {
                 generatedTokens: snapshot.generatedTokens,
                 stopReason: snapshot.stopReason
             ))
+            if let accelerationStats = snapshot.accelerationStats {
+                onPhaseAwareEvent(.aggregateAccelerationStats(accelerationStats))
+            }
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
@@ -517,13 +520,24 @@ private extension LlamaEngine {
         var generatedTokenCount = 0
         var stopReason = "cancelled"
         var emittedStats = false
+        var emittedAccelerationStats = false
+        var accelerationStats: LLMGenerationAccelerationStats?
         var promptContextPrepared = false
         var promptCacheCommitted = false
+
+        func emitAccelerationStatsIfNeeded() {
+            guard !emittedAccelerationStats, let accelerationStats else {
+                return
+            }
+            emittedAccelerationStats = true
+            emit(.accelerationStats(accelerationStats))
+        }
 
         defer {
             if promptContextPrepared && !promptCacheCommitted {
                 clearPromptCaches()
             }
+            emitAccelerationStatsIfNeeded()
             if !emittedStats {
                 emit(.generationStats(
                     promptTokens: promptTokenCount,
@@ -600,7 +614,11 @@ private extension LlamaEngine {
         let sampler = samplerRuntime.chain
         defer { llama_sampler_free(sampler) }
 
-        try preparePromptContext(promptTokens, context: context)
+        let mtpRuntime = mtpAccelerationRuntime(hasIncompatibleControlPath: false)
+        let activeMTPContext = mtpRuntime.context
+        accelerationStats = mtpRuntime.stats
+
+        try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
         promptContextPrepared = true
 
         var accumulatedData = Data()
@@ -716,41 +734,29 @@ private extension LlamaEngine {
             stopReason = "tool-call-complete"
         }
 
-        while generatedTokenCount < maxNew {
-            try Task.checkCancellation()
-            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
-                applyThinkingTerminationIfRequested(
-                    control: control,
-                    generationID: controlGenerationID,
-                    currentPhase: currentPhase,
-                    samplerRuntime: samplerRuntime,
-                    reasoningBudgetPlan: reasoningBudgetPlan,
-                    vocab: vocabulary
-                )
-            }
-
-            let next = llama_sampler_sample(sampler, context, -1)
-            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                carbocation_llama_reasoning_budget_sampler_state($0)
-            }
-            if llama_vocab_is_eog(vocabulary, next) {
+        func processGeneratedToolToken(
+            _ token: llama_token,
+            generatedTokensIncludingThisToken: Int,
+            reasoningBudgetState: carbocation_llama_reasoning_budget_state?
+        ) -> Bool {
+            if llama_vocab_is_eog(vocabulary, token) {
                 if interceptTools, let pendingNativeToolInterception {
                     completeToolInterception(pendingNativeToolInterception)
                 } else {
                     if let reasoningBudgetState {
                         logReasoningBudgetExhaustionIfNeeded(
                             state: reasoningBudgetState,
-                            generatedTokens: generatedTokenCount
+                            generatedTokens: max(0, generatedTokensIncludingThisToken - 1)
                         )
                     }
                     stopReason = "eog"
                 }
-                break
+                return false
             }
 
-            let rawPiece = tokenToPiece(vocab: vocabulary, token: next)
+            let rawPiece = tokenToPiece(vocab: vocabulary, token: token)
             let piece = rawPiece.isEmpty
-                ? tokenToPiece(vocab: vocabulary, token: next, special: true)
+                ? tokenToPiece(vocab: vocabulary, token: token, special: true)
                 : rawPiece
             if !piece.isEmpty {
                 accumulatedData.append(piece)
@@ -762,7 +768,7 @@ private extension LlamaEngine {
             if let reasoningBudgetState {
                 logReasoningBudgetExhaustionIfNeeded(
                     state: reasoningBudgetState,
-                    generatedTokens: generatedTokenCount + 1
+                    generatedTokens: generatedTokensIncludingThisToken
                 )
             }
 
@@ -804,7 +810,7 @@ private extension LlamaEngine {
                    let interception = LlamaToolStreamInterpreter.completedToolCallForStreaming(in: accumulatedText) {
                     pendingNativeToolInterception = nil
                     completeToolInterception(interception)
-                    break
+                    return false
                 }
 
                 if interceptTools,
@@ -848,7 +854,7 @@ private extension LlamaEngine {
                     if stopReason == "json-complete", structuredOutputPlan != nil {
                         structuredPhase = .complete
                     }
-                    break
+                    return false
                 }
             }
 
@@ -868,7 +874,11 @@ private extension LlamaEngine {
                 ))
             }
 
-            var oneToken: [llama_token] = [next]
+            return true
+        }
+
+        func decodeSingleToken(_ token: llama_token) throws {
+            var oneToken: [llama_token] = [token]
             let decodeResult = oneToken.withUnsafeMutableBufferPointer { buffer -> Int32 in
                 let batch = llama_batch_get_one(buffer.baseAddress, 1)
                 return llama_decode(context, batch)
@@ -877,6 +887,135 @@ private extension LlamaEngine {
                 clearPromptCaches()
                 throw LLMEngineError.decodeFailed
             }
+        }
+
+        func decodeMTPSynchronizedTokens(
+            _ tokens: [llama_token],
+            startPosition: Int,
+            mtpContext: UnsafeMutableRawPointer
+        ) throws {
+            var tokens = tokens
+            let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                carbocation_llama_mtp_decode_target_tokens_bridge(
+                    mtpContext,
+                    buffer.baseAddress,
+                    Int32(buffer.count),
+                    Int32(startPosition)
+                )
+            }
+            if decodeResult != 0 {
+                clearPromptCaches()
+                throw LLMEngineError.decodeFailed
+            }
+        }
+
+        while generatedTokenCount < maxNew {
+            try Task.checkCancellation()
+            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+                applyThinkingTerminationIfRequested(
+                    control: control,
+                    generationID: controlGenerationID,
+                    currentPhase: currentPhase,
+                    samplerRuntime: samplerRuntime,
+                    reasoningBudgetPlan: reasoningBudgetPlan,
+                    vocab: vocabulary
+                )
+            }
+
+            let tokenPosition = promptTokens.count + generatedTokenCount
+            let next = llama_sampler_sample(sampler, context, -1)
+            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                carbocation_llama_reasoning_budget_sampler_state($0)
+            }
+            guard processGeneratedToolToken(
+                next,
+                generatedTokensIncludingThisToken: generatedTokenCount + 1,
+                reasoningBudgetState: reasoningBudgetState
+            ) else {
+                break
+            }
+
+            if let activeMTPContext {
+                let remainingDraftCapacity = maxNew - generatedTokenCount - 1
+                let draftLimit = min(accelerationStats?.maxDraftTokens ?? 0, remainingDraftCapacity)
+                let draftTokens: [llama_token]
+                if draftLimit > 0 {
+                    var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
+                    let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
+                        carbocation_llama_mtp_draft_bridge(
+                            activeMTPContext,
+                            next,
+                            Int32(tokenPosition),
+                            buffer.baseAddress,
+                            Int32(buffer.count)
+                        )
+                    }
+                    draftTokens = Array(draftBuffer.prefix(min(draftBuffer.count, max(0, Int(draftCount)))))
+                    accelerationStats?.draftCalls += 1
+                    accelerationStats?.draftTokensGenerated += draftTokens.count
+                } else {
+                    draftTokens = []
+                }
+
+                try decodeMTPSynchronizedTokens(
+                    [next],
+                    startPosition: tokenPosition,
+                    mtpContext: activeMTPContext
+                )
+
+                var emittedAcceptedDraftCount = 0
+                var emittedTargetCorrectionCount = 0
+                var shouldContinue = true
+                for draftToken in draftTokens {
+                    let sampled = llama_sampler_sample(sampler, context, -1)
+                    let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                        carbocation_llama_reasoning_budget_sampler_state($0)
+                    }
+
+                    if sampled == draftToken {
+                        emittedAcceptedDraftCount += 1
+                        shouldContinue = processGeneratedToolToken(
+                            draftToken,
+                            generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount,
+                            reasoningBudgetState: acceptedReasoningBudgetState
+                        )
+                        if !shouldContinue {
+                            break
+                        }
+
+                        try decodeMTPSynchronizedTokens(
+                            [draftToken],
+                            startPosition: tokenPosition + emittedAcceptedDraftCount,
+                            mtpContext: activeMTPContext
+                        )
+                    } else {
+                        emittedTargetCorrectionCount = 1
+                        shouldContinue = processGeneratedToolToken(
+                            sampled,
+                            generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
+                            reasoningBudgetState: acceptedReasoningBudgetState
+                        )
+                        if shouldContinue {
+                            try decodeMTPSynchronizedTokens(
+                                [sampled],
+                                startPosition: tokenPosition + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
+                                mtpContext: activeMTPContext
+                            )
+                        }
+                        break
+                    }
+                }
+
+                accelerationStats?.draftTokensAccepted += emittedAcceptedDraftCount
+                let retainedTokenCount = 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount
+                generatedTokenCount += retainedTokenCount
+                if !shouldContinue {
+                    break
+                }
+                continue
+            }
+
+            try decodeSingleToken(next)
 
             generatedTokenCount += 1
         }
@@ -951,8 +1090,9 @@ private extension LlamaEngine {
             "Tool-aware generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(rawForReturn.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
 
-        commitPromptCache(promptTokens, mtpSynchronized: false)
+        commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
         promptCacheCommitted = true
+        emitAccelerationStatsIfNeeded()
         emittedStats = true
         emit(.generationStats(
             promptTokens: promptTokens.count,
@@ -1153,22 +1293,45 @@ private final class LlamaToolGenerationStatsAccumulator: @unchecked Sendable {
     private var promptTokens = 0
     private var generatedTokens = 0
     private var stopReason: String?
+    private var accelerationStats: LLMGenerationAccelerationStats?
 
     func record(_ event: LLMPhaseAwareStreamEvent) {
-        guard case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _) = event else {
-            return
+        switch event {
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _):
+            lock.lock()
+            defer { lock.unlock() }
+            self.promptTokens += promptTokens
+            self.generatedTokens += generatedTokens
+            self.stopReason = stopReason
+        case .accelerationStats(let stats):
+            lock.lock()
+            defer { lock.unlock() }
+            if accelerationStats == nil {
+                accelerationStats = stats
+            } else {
+                accelerationStats?.merge(stats)
+            }
+        default:
+            break
         }
-        lock.lock()
-        defer { lock.unlock() }
-        self.promptTokens += promptTokens
-        self.generatedTokens += generatedTokens
-        self.stopReason = stopReason
     }
 
-    func snapshot(fallbackStopReason: String) -> (promptTokens: Int, generatedTokens: Int, stopReason: String) {
+    func snapshot(
+        fallbackStopReason: String
+    ) -> (
+        promptTokens: Int,
+        generatedTokens: Int,
+        stopReason: String,
+        accelerationStats: LLMGenerationAccelerationStats?
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        return (promptTokens, generatedTokens, stopReason ?? fallbackStopReason)
+        return (
+            promptTokens,
+            generatedTokens,
+            stopReason ?? fallbackStopReason,
+            accelerationStats
+        )
     }
 }
 

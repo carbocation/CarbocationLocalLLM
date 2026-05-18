@@ -13,31 +13,76 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(LlamaRuntimeSmoke.defaultContextBatchSize(), 0)
     }
 
-    func testMTPAccelerationPolicyAllowsEagerGrammarButNotLazyGrammarOrControl() {
+    func testMTPAccelerationPolicyAllowsGrammarAndControlObject() {
         let opaqueMTPContext = UnsafeMutableRawPointer(bitPattern: 0x1)
         XCTAssertTrue(LlamaEngine.shouldUseMTPAcceleration(
             policy: .automatic,
             mtpContext: opaqueMTPContext,
-            grammarMode: .eager(grammar: "root ::= object"),
-            control: nil
+            grammarMode: .none,
+            control: nil,
+            hasIncompatibleControlPath: false
         ))
-        XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
+        XCTAssertTrue(LlamaEngine.shouldUseMTPAcceleration(
+            policy: .automatic,
+            mtpContext: opaqueMTPContext,
+            grammarMode: .eager(grammar: "root ::= object"),
+            control: nil,
+            hasIncompatibleControlPath: false
+        ))
+        XCTAssertTrue(LlamaEngine.shouldUseMTPAcceleration(
             policy: .automatic,
             mtpContext: opaqueMTPContext,
             grammarMode: .lazy(grammar: "root ::= object", triggerPatterns: ["{"]),
-            control: nil
+            control: LLMGenerationControl(),
+            hasIncompatibleControlPath: false
         ))
+        XCTAssertEqual(LlamaEngine.mtpAccelerationStatus(
+            policy: .automatic,
+            supportsMTPAcceleration: true,
+            mtpContext: opaqueMTPContext,
+            hasIncompatibleControlPath: false
+        ), .active)
+    }
+
+    func testMTPAccelerationPolicyReportsDisabledStates() {
+        let opaqueMTPContext = UnsafeMutableRawPointer(bitPattern: 0x1)
+        XCTAssertEqual(LlamaEngine.mtpAccelerationStatus(
+            policy: .automatic,
+            supportsMTPAcceleration: false,
+            mtpContext: nil,
+            hasIncompatibleControlPath: false
+        ), .unsupported)
+        XCTAssertEqual(LlamaEngine.mtpAccelerationStatus(
+            policy: .disabled,
+            supportsMTPAcceleration: true,
+            mtpContext: opaqueMTPContext,
+            hasIncompatibleControlPath: false
+        ), .disabledByPolicy)
+        XCTAssertEqual(LlamaEngine.mtpAccelerationStatus(
+            policy: .automatic,
+            supportsMTPAcceleration: true,
+            mtpContext: opaqueMTPContext,
+            hasIncompatibleControlPath: true
+        ), .disabledByIncompatibleControlPath)
+        XCTAssertEqual(LlamaEngine.mtpAccelerationStatus(
+            policy: .automatic,
+            supportsMTPAcceleration: true,
+            mtpContext: nil,
+            hasIncompatibleControlPath: false
+        ), .runtimeUnavailable)
         XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
             policy: .automatic,
-            mtpContext: opaqueMTPContext,
+            mtpContext: nil,
             grammarMode: .none,
-            control: LLMGenerationControl()
+            control: nil,
+            hasIncompatibleControlPath: false
         ))
         XCTAssertFalse(LlamaEngine.shouldUseMTPAcceleration(
             policy: .disabled,
             mtpContext: opaqueMTPContext,
             grammarMode: .none,
-            control: nil
+            control: nil,
+            hasIncompatibleControlPath: false
         ))
     }
 
@@ -385,6 +430,15 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(params.n_ubatch, 64)
         XCTAssertEqual(params.n_threads, 2)
         XCTAssertEqual(params.n_threads_batch, 2)
+        XCTAssertEqual(params.n_rs_seq, 0)
+
+        let mtpParams = LlamaEngine.contextParams(
+            contextSize: 4_096,
+            batchSize: 64,
+            threads: 2,
+            recurrentStateSnapshots: 3
+        )
+        XCTAssertEqual(mtpParams.n_rs_seq, 3)
     }
 
     func testContextCalibrationSearchCancellationDoesNotWriteCacheRecord() async throws {

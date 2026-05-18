@@ -38,7 +38,7 @@ func carbocation_llama_mtp_draft_bridge(
 func carbocation_llama_mtp_accept_bridge(
     _ context: UnsafeMutableRawPointer?,
     _ acceptedDraftTokens: Int32
-)
+) -> Int32
 
 @_silgen_name("carbocation_llama_mtp_rollback")
 func carbocation_llama_mtp_rollback_bridge(
