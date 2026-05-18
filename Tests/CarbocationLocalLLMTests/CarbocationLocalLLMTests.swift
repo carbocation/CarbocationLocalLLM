@@ -344,6 +344,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try makeMinimalGGUF(contextLength: 32_768).write(to: url)
 
         XCTAssertEqual(GGUFMetadata.trainingContextLength(at: url), 32_768)
+        XCTAssertEqual(GGUFMetadata.modelMetadata(at: url).architecture, "llama")
     }
 
     func testGGUFMetadataDetectsMTPAccelerationSupport() throws {
@@ -352,6 +353,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try makeMinimalGGUF(contextLength: 32_768, nextNPredictLayers: 4).write(to: url)
 
         let metadata = GGUFMetadata.modelMetadata(at: url)
+        XCTAssertEqual(metadata.architecture, "llama")
         XCTAssertEqual(metadata.trainingContextLength, 32_768)
         XCTAssertEqual(metadata.nextNPredictLayers, 4)
         XCTAssertTrue(metadata.supportsMTPAcceleration)
@@ -1338,6 +1340,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .finalAnswerDelta(text: "answer", bytesSoFar: 6),
             .finalAnswerSnapshot(text: "answer", bytesSoFar: 6, reason: .completed),
             .tokenChunk(preview: "answer", bytesSoFar: 6, phase: .final),
+            .diagnostic(message: "mtp-diagnostic accepted=0/3"),
             .accelerationStats(LLMGenerationAccelerationStats(
                 status: .active,
                 accelerator: "mtp",
@@ -1752,7 +1755,11 @@ final class CarbocationLocalLLMTests: XCTestCase {
         """#
     }
 
-    private func makeMinimalGGUF(contextLength: UInt32, nextNPredictLayers: UInt32? = nil) -> Data {
+    private func makeMinimalGGUF(
+        contextLength: UInt32,
+        nextNPredictLayers: UInt32? = nil,
+        architecture: String = "llama"
+    ) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
         appendUInt32(3, to: &data)
         appendInt64(0, to: &data)
@@ -1760,7 +1767,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
         appendGGUFString("general.architecture", to: &data)
         appendInt32(8, to: &data)
-        appendGGUFString("llama", to: &data)
+        appendGGUFString(architecture, to: &data)
 
         appendGGUFString("llama.context_length", to: &data)
         appendInt32(4, to: &data)

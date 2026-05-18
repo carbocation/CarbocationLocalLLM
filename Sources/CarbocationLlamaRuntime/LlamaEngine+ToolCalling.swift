@@ -909,6 +909,42 @@ private extension LlamaEngine {
             }
         }
 
+        func decodeMTPVerificationTokens(
+            _ tokens: [llama_token],
+            startPosition: Int,
+            mtpContext: UnsafeMutableRawPointer
+        ) throws {
+            var tokens = tokens
+            let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                carbocation_llama_mtp_decode_verification_tokens_bridge(
+                    mtpContext,
+                    buffer.baseAddress,
+                    Int32(buffer.count),
+                    Int32(startPosition)
+                )
+            }
+            if decodeResult != 0 {
+                clearPromptCaches()
+                throw LLMEngineError.decodeFailed
+            }
+        }
+
+        var prefetchedNextToken: llama_token?
+        var prefetchedReasoningBudgetState: carbocation_llama_reasoning_budget_state?
+
+        func sampleTargetToken(at index: Int32) -> llama_token {
+            llama_synchronize(context)
+            return llama_sampler_sample(sampler, context, index)
+        }
+
+        let mtpDiagnosticsEnabled = configuration.allowsUnsafeMTPDraftWidthsForDebugging
+            && activeMTPContext != nil
+            && (accelerationStats?.maxDraftTokens ?? 0) > 2
+        func emitMTPDiagnostic(_ message: String) {
+            guard mtpDiagnosticsEnabled else { return }
+            emit(.diagnostic(message: "mtp-diagnostic \(message)"))
+        }
+
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
             if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
@@ -923,9 +959,18 @@ private extension LlamaEngine {
             }
 
             let tokenPosition = promptTokens.count + generatedTokenCount
-            let next = llama_sampler_sample(sampler, context, -1)
-            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                carbocation_llama_reasoning_budget_sampler_state($0)
+            let next: llama_token
+            let reasoningBudgetState: carbocation_llama_reasoning_budget_state?
+            if let prefetched = prefetchedNextToken {
+                next = prefetched
+                reasoningBudgetState = prefetchedReasoningBudgetState
+                prefetchedNextToken = nil
+                prefetchedReasoningBudgetState = nil
+            } else {
+                next = sampleTargetToken(at: -1)
+                reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                    carbocation_llama_reasoning_budget_sampler_state($0)
+                }
             }
             guard processGeneratedToolToken(
                 next,
@@ -938,8 +983,10 @@ private extension LlamaEngine {
             if let activeMTPContext {
                 let remainingDraftCapacity = maxNew - generatedTokenCount - 1
                 let draftLimit = min(accelerationStats?.maxDraftTokens ?? 0, remainingDraftCapacity)
+                var draftCallIndex: Int?
                 let draftTokens: [llama_token]
                 if draftLimit > 0 {
+                    draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
                     var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
                     let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
                         carbocation_llama_mtp_draft_bridge(
@@ -953,26 +1000,46 @@ private extension LlamaEngine {
                     draftTokens = Array(draftBuffer.prefix(min(draftBuffer.count, max(0, Int(draftCount)))))
                     accelerationStats?.draftCalls += 1
                     accelerationStats?.draftTokensGenerated += draftTokens.count
+                    emitMTPDiagnostic(
+                        "draft call=\(draftCallIndex ?? 0) pos=\(tokenPosition) next=\(diagnosticTokenDescription(next, vocab: vocabulary)) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary))"
+                    )
                 } else {
                     draftTokens = []
                 }
 
-                try decodeMTPSynchronizedTokens(
-                    [next],
-                    startPosition: tokenPosition,
-                    mtpContext: activeMTPContext
-                )
-
                 var emittedAcceptedDraftCount = 0
-                var emittedTargetCorrectionCount = 0
                 var shouldContinue = true
-                for draftToken in draftTokens {
-                    let sampled = llama_sampler_sample(sampler, context, -1)
-                    let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                        carbocation_llama_reasoning_budget_sampler_state($0)
-                    }
 
-                    if sampled == draftToken {
+                if draftTokens.isEmpty {
+                    try decodeMTPSynchronizedTokens(
+                        [next],
+                        startPosition: tokenPosition,
+                        mtpContext: activeMTPContext
+                    )
+                } else {
+                    let verificationTokens = [next] + draftTokens
+                    try decodeMTPVerificationTokens(
+                        verificationTokens,
+                        startPosition: tokenPosition,
+                        mtpContext: activeMTPContext
+                    )
+
+                    var correctionToken: llama_token?
+                    var correctionReasoningBudgetState: carbocation_llama_reasoning_budget_state?
+                    var verifierSamples: [llama_token] = []
+                    for (verifierIndex, draftToken) in draftTokens.enumerated() {
+                        let sampled = sampleTargetToken(at: Int32(verifierIndex))
+                        verifierSamples.append(sampled)
+                        let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                            carbocation_llama_reasoning_budget_sampler_state($0)
+                        }
+
+                        if sampled != draftToken {
+                            correctionToken = sampled
+                            correctionReasoningBudgetState = acceptedReasoningBudgetState
+                            break
+                        }
+
                         emittedAcceptedDraftCount += 1
                         shouldContinue = processGeneratedToolToken(
                             draftToken,
@@ -982,32 +1049,55 @@ private extension LlamaEngine {
                         if !shouldContinue {
                             break
                         }
+                    }
 
-                        try decodeMTPSynchronizedTokens(
-                            [draftToken],
-                            startPosition: tokenPosition + emittedAcceptedDraftCount,
-                            mtpContext: activeMTPContext
+                    if emittedAcceptedDraftCount < draftTokens.count {
+                        let retainedDraftEndPosition = tokenPosition + 1 + emittedAcceptedDraftCount
+                        let rollbackResult = carbocation_llama_mtp_rollback_bridge(
+                            activeMTPContext,
+                            Int32(retainedDraftEndPosition)
+                        )
+                        if rollbackResult == 0 {
+                            clearPromptCaches()
+                            throw LLMEngineError.decodeFailed
+                        }
+
+                        _ = carbocation_llama_mtp_accept_bridge(
+                            activeMTPContext,
+                            Int32(emittedAcceptedDraftCount)
+                        )
+
+                        if let correctionToken, shouldContinue {
+                            prefetchedNextToken = correctionToken
+                            prefetchedReasoningBudgetState = correctionReasoningBudgetState
+                        }
+                        emitMTPDiagnostic(
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
                         )
                     } else {
-                        emittedTargetCorrectionCount = 1
-                        shouldContinue = processGeneratedToolToken(
-                            sampled,
-                            generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
-                            reasoningBudgetState: acceptedReasoningBudgetState
-                        )
-                        if shouldContinue {
-                            try decodeMTPSynchronizedTokens(
-                                [sampled],
-                                startPosition: tokenPosition + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
-                                mtpContext: activeMTPContext
-                            )
+                        var prefetchedDiagnosticToken: llama_token?
+                        if shouldContinue,
+                           generatedTokenCount + 1 + emittedAcceptedDraftCount < maxNew {
+                            let sampledPrefetch = sampleTargetToken(at: Int32(draftTokens.count))
+                            prefetchedNextToken = sampledPrefetch
+                            prefetchedDiagnosticToken = sampledPrefetch
+                            prefetchedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                                carbocation_llama_reasoning_budget_sampler_state($0)
+                            }
                         }
-                        break
+
+                        _ = carbocation_llama_mtp_accept_bridge(
+                            activeMTPContext,
+                            Int32(emittedAcceptedDraftCount)
+                        )
+                        emitMTPDiagnostic(
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                        )
                     }
                 }
 
                 accelerationStats?.draftTokensAccepted += emittedAcceptedDraftCount
-                let retainedTokenCount = 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount
+                let retainedTokenCount = 1 + emittedAcceptedDraftCount
                 generatedTokenCount += retainedTokenCount
                 if !shouldContinue {
                     break

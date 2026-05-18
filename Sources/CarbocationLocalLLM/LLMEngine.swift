@@ -161,6 +161,7 @@ public enum LLMPhaseAwareStreamEvent: Sendable {
         phase: LLMStreamContentPhase
     )
     case accelerationStats(LLMGenerationAccelerationStats)
+    case diagnostic(message: String)
     case done(totalBytes: Int, duration: TimeInterval, phase: LLMStreamContentPhase)
 
     public var streamEvent: LLMStreamEvent? {
@@ -182,7 +183,7 @@ public enum LLMPhaseAwareStreamEvent: Sendable {
                 stopReason: stopReason,
                 templateMode: templateMode
             )
-        case .accelerationStats:
+        case .accelerationStats, .diagnostic:
             return nil
         case .done(let totalBytes, let duration, _):
             return .done(totalBytes: totalBytes, duration: duration)

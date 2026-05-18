@@ -296,6 +296,8 @@ private final class SmokeState {
                 .map { String(format: "%.1f%%", $0 * 100) }
                 ?? "n/a"
             return "event: acceleration accelerator=\(stats.accelerator) status=\(stats.status.rawValue) maxDraftTokens=\(stats.maxDraftTokens) draftCalls=\(stats.draftCalls) draftGenerated=\(stats.draftTokensGenerated) draftAccepted=\(stats.draftTokensAccepted) acceptance=\(rate)"
+        case .diagnostic(let message):
+            return "event: \(message)"
         case .done(let totalBytes, let duration, let phase):
             return String(format: "event: done phase=%@ bytes=%d duration=%.3fs", phase.rawValue, totalBytes, duration)
         }

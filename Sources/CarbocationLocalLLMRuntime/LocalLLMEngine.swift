@@ -12,6 +12,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     public var heartbeatInterval: TimeInterval
     public var accelerationPolicy: LLMAccelerationPolicy
     public var mtpMaxDraftTokens: Int
+    public var allowsUnsafeMTPDraftWidthsForDebugging: Bool
 
     public init(
         llamaGPULayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
@@ -21,7 +22,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
         accelerationPolicy: LLMAccelerationPolicy = .automatic,
-        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
+        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens,
+        allowsUnsafeMTPDraftWidthsForDebugging: Bool = false
     ) {
         self.llamaGPULayerCount = llamaGPULayerCount
         self.llamaUseMemoryMap = llamaUseMemoryMap
@@ -31,6 +33,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         self.heartbeatInterval = heartbeatInterval
         self.accelerationPolicy = accelerationPolicy
         self.mtpMaxDraftTokens = mtpMaxDraftTokens
+        self.allowsUnsafeMTPDraftWidthsForDebugging = allowsUnsafeMTPDraftWidthsForDebugging
     }
 
     func makeLlamaConfiguration() -> LlamaEngineConfiguration {
@@ -42,7 +45,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
             promptReserveTokens: promptReserveTokens,
             heartbeatInterval: heartbeatInterval,
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: mtpMaxDraftTokens
+            mtpMaxDraftTokens: mtpMaxDraftTokens,
+            allowsUnsafeMTPDraftWidthsForDebugging: allowsUnsafeMTPDraftWidthsForDebugging
         )
     }
 

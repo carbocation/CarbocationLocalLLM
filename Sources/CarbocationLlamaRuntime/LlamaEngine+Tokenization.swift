@@ -212,6 +212,24 @@ extension LlamaEngine {
         }
     }
 
+    func diagnosticTokenDescription(_ token: llama_token, vocab: OpaquePointer) -> String {
+        let rawPiece = tokenToPiece(vocab: vocab, token: token)
+        let pieceData = rawPiece.isEmpty
+            ? tokenToPiece(vocab: vocab, token: token, special: true)
+            : rawPiece
+        let piece = String(decoding: pieceData, as: UTF8.self)
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\(token):\"\(piece)\""
+    }
+
+    func diagnosticTokenList(_ tokens: [llama_token], vocab: OpaquePointer) -> String {
+        "[" + tokens.map { diagnosticTokenDescription($0, vocab: vocab) }.joined(separator: ",") + "]"
+    }
+
 
     static func promptPrefillPlan(
         cachedPromptTokens: [llama_token]?,

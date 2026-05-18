@@ -15,6 +15,7 @@ enum CLLMDemoMetadata {
     static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
     static let accelerationPolicyDefaultsKey = "CLLMDemo.accelerationPolicy"
     static let mtpMaxDraftTokensDefaultsKey = "CLLMDemo.mtpMaxDraftTokens"
+    static let allowUnsafeMTPDraftWidthsDefaultsKey = "CLLMDemo.allowUnsafeMTPDraftWidths"
     static let defaultMTPMaxDraftTokens = 3
 }
 
@@ -146,6 +147,7 @@ final class DemoState {
     var thinkingBudgetText = ""
     var maxOutputTokensText = ""
     var mtpMaxDraftTokensText: String
+    var allowUnsafeMTPDraftWidths: Bool
     var accelerationPolicy: LLMAccelerationPolicy
     var runMode: DemoRunMode = .plain
     var enableLoadWebpageTool = true
@@ -176,11 +178,15 @@ final class DemoState {
         let savedMTPMaxDraftTokens = UserDefaults.standard
             .object(forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey) as? Int
             ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
+        let savedAllowUnsafeMTPDraftWidths = UserDefaults.standard
+            .bool(forKey: CLLMDemoMetadata.allowUnsafeMTPDraftWidthsDefaultsKey)
         mtpMaxDraftTokensText = String(savedMTPMaxDraftTokens)
+        allowUnsafeMTPDraftWidths = savedAllowUnsafeMTPDraftWidths
         accelerationPolicy = savedAccelerationPolicy
         engine = Self.makeEngine(
             accelerationPolicy: savedAccelerationPolicy,
-            mtpMaxDraftTokens: savedMTPMaxDraftTokens
+            mtpMaxDraftTokens: savedMTPMaxDraftTokens,
+            allowUnsafeMTPDraftWidths: savedAllowUnsafeMTPDraftWidths
         )
 
         let root = ModelStorage.modelsDirectory(appSupportFolderName: CLLMDemoMetadata.appSupportFolderName)
@@ -442,22 +448,26 @@ final class DemoState {
 
     private static func makeEngine(
         accelerationPolicy: LLMAccelerationPolicy,
-        mtpMaxDraftTokens: Int
+        mtpMaxDraftTokens: Int,
+        allowUnsafeMTPDraftWidths: Bool
     ) -> LocalLLMEngine {
         LocalLLMEngine(configuration: engineConfiguration(
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: mtpMaxDraftTokens
+            mtpMaxDraftTokens: mtpMaxDraftTokens,
+            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
         ))
     }
 
     private static func engineConfiguration(
         accelerationPolicy: LLMAccelerationPolicy,
-        mtpMaxDraftTokens: Int
+        mtpMaxDraftTokens: Int,
+        allowUnsafeMTPDraftWidths: Bool
     ) -> LocalLLMEngineConfiguration {
         LocalLLMEngineConfiguration(
             heartbeatInterval: 0.5,
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: mtpMaxDraftTokens
+            mtpMaxDraftTokens: mtpMaxDraftTokens,
+            allowsUnsafeMTPDraftWidthsForDebugging: allowUnsafeMTPDraftWidths
         )
     }
 
@@ -602,7 +612,8 @@ final class DemoState {
         let oldEngine = engine
         engine = Self.makeEngine(
             accelerationPolicy: newPolicy,
-            mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+            mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
+            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
         )
         Task {
             await oldEngine.unload()
@@ -622,7 +633,28 @@ final class DemoState {
         let oldEngine = engine
         engine = Self.makeEngine(
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: maxDraftTokens
+            mtpMaxDraftTokens: maxDraftTokens,
+            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
+        )
+        Task {
+            await oldEngine.unload()
+        }
+    }
+
+    func setAllowUnsafeMTPDraftWidths(_ value: Bool) {
+        guard !isRunning else { return }
+        guard allowUnsafeMTPDraftWidths != value else { return }
+
+        allowUnsafeMTPDraftWidths = value
+        UserDefaults.standard.set(value, forKey: CLLMDemoMetadata.allowUnsafeMTPDraftWidthsDefaultsKey)
+        loadedInfo = nil
+        errorMessage = nil
+
+        let oldEngine = engine
+        engine = Self.makeEngine(
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
+            allowUnsafeMTPDraftWidths: value
         )
         Task {
             await oldEngine.unload()
@@ -725,7 +757,8 @@ final class DemoState {
                 in: library,
                 configuration: Self.engineConfiguration(
                     accelerationPolicy: accelerationPolicy,
-                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
+                    allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
                 )
             ) else {
                 normalizeSelection()
@@ -748,6 +781,7 @@ final class DemoState {
             appendEvent("mtp-support: \(loaded.supportsMTPAcceleration ? "yes" : "no")")
             appendEvent("mtp-policy: \(accelerationPolicy.rawValue)")
             appendEvent("mtp-max-draft: \(parsedMTPMaxDraftTokens)")
+            appendEvent("mtp-unsafe-draft-widths: \(allowUnsafeMTPDraftWidths ? "yes" : "no")")
 
             let options = generationOptions(for: loaded)
             appendGenerationOptionsEvent(options: options, loaded: loaded)
@@ -933,7 +967,7 @@ final class DemoState {
         case .generationStats(_, let generatedTokens, _, _, let phase):
             lastPlainGeneratedTokenCount = generatedTokens
             setFinalAnswerPhase(phase)
-        case .accelerationStats:
+        case .accelerationStats, .diagnostic:
             break
         case .done(let totalBytes, let duration, let phase):
             setFinalAnswerPhase(phase)
@@ -1091,6 +1125,8 @@ final class DemoState {
                 .map { String(format: "%.1f%%", $0 * 100) }
                 ?? "n/a"
             return "event: acceleration accelerator=\(stats.accelerator) status=\(stats.status.rawValue) maxDraftTokens=\(stats.maxDraftTokens) draftCalls=\(stats.draftCalls) draftGenerated=\(stats.draftTokensGenerated) draftAccepted=\(stats.draftTokensAccepted) acceptance=\(rate)"
+        case .diagnostic(let message):
+            return "event: \(message)"
         case .done(let totalBytes, let duration, let phase):
             return Self.formatDoneEvent(
                 totalBytes: totalBytes,

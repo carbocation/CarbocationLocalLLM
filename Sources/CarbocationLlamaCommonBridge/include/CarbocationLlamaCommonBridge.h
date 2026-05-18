@@ -64,6 +64,15 @@ int32_t carbocation_llama_mtp_decode_target_tokens(
     int32_t start_position
 );
 
+int32_t carbocation_llama_mtp_decode_verification_tokens(
+    void * context,
+    const llama_token * tokens,
+    int32_t token_count,
+    int32_t start_position
+);
+
+int32_t carbocation_llama_mtp_restore_verification_checkpoint(void * context);
+
 int32_t carbocation_llama_mtp_draft(
     void * context,
     llama_token last_token,

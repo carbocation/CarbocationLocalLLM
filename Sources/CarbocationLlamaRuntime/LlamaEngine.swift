@@ -33,6 +33,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
     public var heartbeatInterval: TimeInterval
     public var accelerationPolicy: LLMAccelerationPolicy
     public var mtpMaxDraftTokens: Int
+    public var allowsUnsafeMTPDraftWidthsForDebugging: Bool
 
     public init(
         gpuLayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
@@ -42,7 +43,8 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
         accelerationPolicy: LLMAccelerationPolicy = .automatic,
-        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
+        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens,
+        allowsUnsafeMTPDraftWidthsForDebugging: Bool = false
     ) {
         self.gpuLayerCount = gpuLayerCount
         self.useMemoryMap = useMemoryMap
@@ -52,6 +54,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         self.heartbeatInterval = heartbeatInterval
         self.accelerationPolicy = accelerationPolicy
         self.mtpMaxDraftTokens = mtpMaxDraftTokens
+        self.allowsUnsafeMTPDraftWidthsForDebugging = allowsUnsafeMTPDraftWidthsForDebugging
     }
 }
 
@@ -100,6 +103,8 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var trainingContextSize: Int
     public var hasEmbeddedChatTemplate: Bool
     public var supportsMTPAcceleration: Bool
+    public var architecture: String?
+    public var nextNPredictLayers: Int?
 
     public init(
         modelID: UUID?,
@@ -109,7 +114,9 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         contextSize: Int,
         trainingContextSize: Int,
         hasEmbeddedChatTemplate: Bool,
-        supportsMTPAcceleration: Bool = false
+        supportsMTPAcceleration: Bool = false,
+        architecture: String? = nil,
+        nextNPredictLayers: Int? = nil
     ) {
         self.modelID = modelID
         self.modelPath = modelPath
@@ -119,6 +126,8 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         self.trainingContextSize = trainingContextSize
         self.hasEmbeddedChatTemplate = hasEmbeddedChatTemplate
         self.supportsMTPAcceleration = supportsMTPAcceleration
+        self.architecture = architecture
+        self.nextNPredictLayers = nextNPredictLayers
     }
 }
 
@@ -354,7 +363,44 @@ public actor LlamaEngine: LLMEngine {
     }
 
     var mtpMaxDraftTokens: Int {
-        max(1, min(32, configuration.mtpMaxDraftTokens))
+        Self.effectiveMTPMaxDraftTokens(
+            requested: configuration.mtpMaxDraftTokens,
+            architecture: loadedInfo?.architecture,
+            nextNPredictLayers: loadedInfo?.nextNPredictLayers,
+            allowsUnsafeDraftWidths: configuration.allowsUnsafeMTPDraftWidthsForDebugging
+        )
+    }
+
+    static func clampedMTPMaxDraftTokens(_ requested: Int) -> Int {
+        max(1, min(32, requested))
+    }
+
+    static func effectiveMTPMaxDraftTokens(
+        requested: Int,
+        metadata: GGUFMetadata.ModelMetadata
+    ) -> Int {
+        effectiveMTPMaxDraftTokens(
+            requested: requested,
+            architecture: metadata.architecture,
+            nextNPredictLayers: metadata.nextNPredictLayers,
+            allowsUnsafeDraftWidths: false
+        )
+    }
+
+    static func effectiveMTPMaxDraftTokens(
+        requested: Int,
+        architecture: String?,
+        nextNPredictLayers: Int?,
+        allowsUnsafeDraftWidths: Bool = false
+    ) -> Int {
+        let clamped = clampedMTPMaxDraftTokens(requested)
+        guard !allowsUnsafeDraftWidths else {
+            return clamped
+        }
+        guard architecture == "qwen35", nextNPredictLayers == 1 else {
+            return clamped
+        }
+        return min(clamped, 2)
     }
 
     public func preflight(
@@ -529,9 +575,20 @@ public actor LlamaEngine: LLMEngine {
             batchSizeLimit: configuration.batchSizeLimit
         )
         let supportsMTPAcceleration = ggufMetadata.supportsMTPAcceleration
-        let maxMTPDraftTokens = mtpMaxDraftTokens
+        let requestedMTPDraftTokens = Self.clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
+        let maxMTPDraftTokens = Self.effectiveMTPMaxDraftTokens(
+            requested: requestedMTPDraftTokens,
+            architecture: ggufMetadata.architecture,
+            nextNPredictLayers: ggufMetadata.nextNPredictLayers,
+            allowsUnsafeDraftWidths: configuration.allowsUnsafeMTPDraftWidthsForDebugging
+        )
         let shouldPrepareMTPAcceleration = supportsMTPAcceleration &&
             configuration.accelerationPolicy == .automatic
+        if supportsMTPAcceleration, maxMTPDraftTokens != requestedMTPDraftTokens {
+            llamaRuntimeLog.info(
+                "MTP draft width capped: requested=\(requestedMTPDraftTokens, privacy: .public) effective=\(maxMTPDraftTokens, privacy: .public) architecture=\(ggufMetadata.architecture ?? "unknown", privacy: .public) nextNPredictLayers=\(ggufMetadata.nextNPredictLayers ?? 0, privacy: .public)"
+            )
+        }
         var attemptedBatchSizes: [Int] = []
         var initializedContext: OpaquePointer?
         var initializedBatchSize: Int?
@@ -541,7 +598,7 @@ public actor LlamaEngine: LLMEngine {
                 contextSize: chosenContext,
                 batchSize: batchSize,
                 threads: threads,
-                recurrentStateSnapshots: 0
+                recurrentStateSnapshots: shouldPrepareMTPAcceleration ? maxMTPDraftTokens : 0
             )
             if let context = llama_init_from_model(loadedModel, contextParams) {
                 initializedContext = context
@@ -574,7 +631,9 @@ public actor LlamaEngine: LLMEngine {
             contextSize: chosenContext,
             trainingContextSize: max(0, trainingContext),
             hasEmbeddedChatTemplate: template != nil,
-            supportsMTPAcceleration: supportsMTPAcceleration
+            supportsMTPAcceleration: supportsMTPAcceleration,
+            architecture: ggufMetadata.architecture,
+            nextNPredictLayers: ggufMetadata.nextNPredictLayers
         )
         let loadedMTPContext: UnsafeMutableRawPointer?
         if shouldPrepareMTPAcceleration, let initializedBatchSize {
@@ -1189,6 +1248,42 @@ public actor LlamaEngine: LLMEngine {
             }
         }
 
+        func decodeMTPVerificationTokens(
+            _ tokens: [llama_token],
+            startPosition: Int,
+            mtpContext: UnsafeMutableRawPointer
+        ) throws {
+            var tokens = tokens
+            let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                carbocation_llama_mtp_decode_verification_tokens_bridge(
+                    mtpContext,
+                    buffer.baseAddress,
+                    Int32(buffer.count),
+                    Int32(startPosition)
+                )
+            }
+            if decodeResult != 0 {
+                clearPromptCaches()
+                throw LLMEngineError.decodeFailed
+            }
+        }
+
+        var prefetchedNextToken: llama_token?
+        var prefetchedReasoningBudgetState: carbocation_llama_reasoning_budget_state?
+
+        func sampleTargetToken(at index: Int32) -> llama_token {
+            llama_synchronize(context)
+            return llama_sampler_sample(sampler, context, index)
+        }
+
+        let mtpDiagnosticsEnabled = configuration.allowsUnsafeMTPDraftWidthsForDebugging
+            && activeMTPContext != nil
+            && maxMTPDraftTokens > 2
+        func emitMTPDiagnostic(_ message: String) {
+            guard mtpDiagnosticsEnabled else { return }
+            onPhaseAwareEvent(.diagnostic(message: "mtp-diagnostic \(message)"))
+        }
+
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
             if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
@@ -1203,9 +1298,18 @@ public actor LlamaEngine: LLMEngine {
             }
 
             let tokenPosition = promptTokens.count + generatedTokenCount
-            let next = llama_sampler_sample(sampler, context, -1)
-            let reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                carbocation_llama_reasoning_budget_sampler_state($0)
+            let next: llama_token
+            let reasoningBudgetState: carbocation_llama_reasoning_budget_state?
+            if let prefetched = prefetchedNextToken {
+                next = prefetched
+                reasoningBudgetState = prefetchedReasoningBudgetState
+                prefetchedNextToken = nil
+                prefetchedReasoningBudgetState = nil
+            } else {
+                next = sampleTargetToken(at: -1)
+                reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                    carbocation_llama_reasoning_budget_sampler_state($0)
+                }
             }
             guard processGeneratedToken(
                 next,
@@ -1218,8 +1322,10 @@ public actor LlamaEngine: LLMEngine {
             if let activeMTPContext {
                 let remainingDraftCapacity = maxNew - generatedTokenCount - 1
                 let draftLimit = min(maxMTPDraftTokens, remainingDraftCapacity)
+                var draftCallIndex: Int?
                 let draftTokens: [llama_token]
                 if draftLimit > 0 {
+                    draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
                     var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
                     let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
                         carbocation_llama_mtp_draft_bridge(
@@ -1233,26 +1339,46 @@ public actor LlamaEngine: LLMEngine {
                     draftTokens = Array(draftBuffer.prefix(min(draftBuffer.count, max(0, Int(draftCount)))))
                     accelerationStats?.draftCalls += 1
                     accelerationStats?.draftTokensGenerated += draftTokens.count
+                    emitMTPDiagnostic(
+                        "draft call=\(draftCallIndex ?? 0) pos=\(tokenPosition) next=\(diagnosticTokenDescription(next, vocab: vocabulary)) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary))"
+                    )
                 } else {
                     draftTokens = []
                 }
 
-                try decodeMTPSynchronizedTokens(
-                    [next],
-                    startPosition: tokenPosition,
-                    mtpContext: activeMTPContext
-                )
-
                 var emittedAcceptedDraftCount = 0
-                var emittedTargetCorrectionCount = 0
                 var shouldContinue = true
-                for draftToken in draftTokens {
-                    let sampled = llama_sampler_sample(sampler, context, -1)
-                    let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                        carbocation_llama_reasoning_budget_sampler_state($0)
-                    }
 
-                    if sampled == draftToken {
+                if draftTokens.isEmpty {
+                    try decodeMTPSynchronizedTokens(
+                        [next],
+                        startPosition: tokenPosition,
+                        mtpContext: activeMTPContext
+                    )
+                } else {
+                    let verificationTokens = [next] + draftTokens
+                    try decodeMTPVerificationTokens(
+                        verificationTokens,
+                        startPosition: tokenPosition,
+                        mtpContext: activeMTPContext
+                    )
+
+                    var correctionToken: llama_token?
+                    var correctionReasoningBudgetState: carbocation_llama_reasoning_budget_state?
+                    var verifierSamples: [llama_token] = []
+                    for (verifierIndex, draftToken) in draftTokens.enumerated() {
+                        let sampled = sampleTargetToken(at: Int32(verifierIndex))
+                        verifierSamples.append(sampled)
+                        let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                            carbocation_llama_reasoning_budget_sampler_state($0)
+                        }
+
+                        if sampled != draftToken {
+                            correctionToken = sampled
+                            correctionReasoningBudgetState = acceptedReasoningBudgetState
+                            break
+                        }
+
                         emittedAcceptedDraftCount += 1
                         shouldContinue = processGeneratedToken(
                             draftToken,
@@ -1262,32 +1388,55 @@ public actor LlamaEngine: LLMEngine {
                         if !shouldContinue {
                             break
                         }
+                    }
 
-                        try decodeMTPSynchronizedTokens(
-                            [draftToken],
-                            startPosition: tokenPosition + emittedAcceptedDraftCount,
-                            mtpContext: activeMTPContext
+                    if emittedAcceptedDraftCount < draftTokens.count {
+                        let retainedDraftEndPosition = tokenPosition + 1 + emittedAcceptedDraftCount
+                        let rollbackResult = carbocation_llama_mtp_rollback_bridge(
+                            activeMTPContext,
+                            Int32(retainedDraftEndPosition)
+                        )
+                        if rollbackResult == 0 {
+                            clearPromptCaches()
+                            throw LLMEngineError.decodeFailed
+                        }
+
+                        _ = carbocation_llama_mtp_accept_bridge(
+                            activeMTPContext,
+                            Int32(emittedAcceptedDraftCount)
+                        )
+
+                        if let correctionToken, shouldContinue {
+                            prefetchedNextToken = correctionToken
+                            prefetchedReasoningBudgetState = correctionReasoningBudgetState
+                        }
+                        emitMTPDiagnostic(
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
                         )
                     } else {
-                        emittedTargetCorrectionCount = 1
-                        shouldContinue = processGeneratedToken(
-                            sampled,
-                            generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
-                            reasoningBudgetState: acceptedReasoningBudgetState
-                        )
-                        if shouldContinue {
-                            try decodeMTPSynchronizedTokens(
-                                [sampled],
-                                startPosition: tokenPosition + emittedAcceptedDraftCount + emittedTargetCorrectionCount,
-                                mtpContext: activeMTPContext
-                            )
+                        var prefetchedDiagnosticToken: llama_token?
+                        if shouldContinue,
+                           generatedTokenCount + 1 + emittedAcceptedDraftCount < maxNew {
+                            let sampledPrefetch = sampleTargetToken(at: Int32(draftTokens.count))
+                            prefetchedNextToken = sampledPrefetch
+                            prefetchedDiagnosticToken = sampledPrefetch
+                            prefetchedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
+                                carbocation_llama_reasoning_budget_sampler_state($0)
+                            }
                         }
-                        break
+
+                        _ = carbocation_llama_mtp_accept_bridge(
+                            activeMTPContext,
+                            Int32(emittedAcceptedDraftCount)
+                        )
+                        emitMTPDiagnostic(
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                        )
                     }
                 }
 
                 accelerationStats?.draftTokensAccepted += emittedAcceptedDraftCount
-                let retainedTokenCount = 1 + emittedAcceptedDraftCount + emittedTargetCorrectionCount
+                let retainedTokenCount = 1 + emittedAcceptedDraftCount
                 generatedTokenCount += retainedTokenCount
                 if !shouldContinue {
                     break

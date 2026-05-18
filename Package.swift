@@ -92,17 +92,50 @@ let package = Package(
         ),
         llamaTarget,
         .target(
-            name: "CarbocationLlamaCommonBridge",
+            name: "LlamaCppCommon",
             dependencies: [
                 "llama"
             ],
+            path: "Vendor/llama.cpp/common",
+            sources: [
+                "common.cpp",
+                "fit.cpp",
+                "log.cpp",
+                "ngram-cache.cpp",
+                "ngram-map.cpp",
+                "ngram-mod.cpp",
+                "sampling.cpp",
+                "speculative.cpp",
+                "unicode.cpp"
+            ],
+            publicHeadersPath: ".",
+            cxxSettings: [
+                .headerSearchPath("."),
+                .headerSearchPath("../include"),
+                .headerSearchPath("../ggml/include"),
+                .headerSearchPath("../ggml/src"),
+                .headerSearchPath("../src"),
+                .headerSearchPath("../vendor")
+            ]
+        ),
+        .target(
+            name: "CarbocationLlamaCommonBridge",
+            dependencies: [
+                "llama",
+                "LlamaCppCommon"
+            ],
             publicHeadersPath: "include",
             cSettings: [
-                .headerSearchPath("../../Vendor/llama.cpp/include")
+                .headerSearchPath("../../Vendor/llama.cpp/include"),
+                .headerSearchPath("../../Vendor/llama.cpp/common")
             ],
             cxxSettings: [
+                .headerSearchPath("../../Vendor/llama.cpp/common"),
                 .headerSearchPath("../../Vendor/llama.cpp/include"),
-                .headerSearchPath("../../Vendor/llama.cpp/ggml/include")
+                .headerSearchPath("../../Vendor/llama.cpp/ggml/include"),
+                .headerSearchPath("../../Vendor/llama.cpp/ggml/src"),
+                .headerSearchPath("../../Vendor/llama.cpp/src"),
+                .headerSearchPath("../../Vendor/llama.cpp/vendor")
             ]
         ),
         .target(
@@ -191,5 +224,6 @@ let package = Package(
             name: "CarbocationLocalLLMRuntimeUITests",
             dependencies: ["CarbocationLocalLLMRuntimeUI"]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

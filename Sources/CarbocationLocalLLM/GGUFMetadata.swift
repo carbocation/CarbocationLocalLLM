@@ -2,6 +2,7 @@ import Foundation
 
 public enum GGUFMetadata {
     public struct ModelMetadata: Hashable, Sendable {
+        public var architecture: String?
         public var trainingContextLength: Int?
         public var nextNPredictLayers: Int?
 
@@ -10,9 +11,11 @@ public enum GGUFMetadata {
         }
 
         public init(
+            architecture: String? = nil,
             trainingContextLength: Int? = nil,
             nextNPredictLayers: Int? = nil
         ) {
+            self.architecture = architecture
             self.trainingContextLength = trainingContextLength
             self.nextNPredictLayers = nextNPredictLayers
         }
@@ -118,6 +121,7 @@ private final class GGUFMetadataReader {
 
         _ = try readNonNegativeInt64()
         let keyValueCount = try readNonNegativeInt64()
+        var architecture: String?
         var trainingContextLength: Int?
         var nextNPredictLayers: Int?
 
@@ -131,6 +135,15 @@ private final class GGUFMetadataReader {
 
             if valueType == .array {
                 try skipArray()
+                continue
+            }
+
+            if key == "general.architecture" {
+                if valueType == .string {
+                    architecture = try readString(maxLength: Self.maxKeyLength)
+                } else {
+                    try skipScalarValue(type: valueType)
+                }
                 continue
             }
 
@@ -154,6 +167,7 @@ private final class GGUFMetadataReader {
         }
 
         return GGUFMetadata.ModelMetadata(
+            architecture: architecture,
             trainingContextLength: trainingContextLength,
             nextNPredictLayers: nextNPredictLayers
         )
