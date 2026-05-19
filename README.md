@@ -150,7 +150,7 @@ Generation policy stays app-owned. `LLMSamplingDefaultsResolver` can layer packa
 
 ### Set up a model library
 
-Each app creates one `ModelLibrary`. The default helper writes models into a shared App Group (`group.com.carbocation.shared`) and falls back to your app's Application Support folder if the group is unavailable.
+Each app creates one `ModelLibrary`. The default helper writes managed models into a shared App Group (`group.com.carbocation.shared`) and falls back to your app's Application Support folder if the group is unavailable.
 
 ```swift
 @MainActor
@@ -167,6 +167,8 @@ func makeLibrary() -> ModelLibrary {
 The `contextLengthProbe` lets imported GGUF files record their training context up front, so the picker and engine can size contexts correctly.
 Call `await library.refresh()` before reading `library.models` directly. For persisted selections, prefer `LocalLLMEngine.loadPlan(from:in:)`, which refreshes before resolving installed models. The bundled picker refreshes the library for you.
 
+On macOS, `ModelLibrary` also discovers read-only GGUF models already present in the Hugging Face Hub cache. It respects `HF_HUB_CACHE`, then `HF_HOME`, then the default `~/.cache/huggingface/hub`. These models can be selected and loaded without copying, but Carbocation will not delete or edit Hugging Face cache contents. Use `searchConfiguration: .managedOnly` if an app should list only its managed model folder.
+
 To share installed GGUF models across multiple of your apps, give them the same App Group entitlement and pass that identifier explicitly:
 
 ```swift
@@ -179,13 +181,13 @@ let library = ModelLibrary(root: modelsRoot, contextLengthProbe: { url in
 })
 ```
 
-For a fully custom location, bypass the helper:
+For a fully custom managed location, bypass the helper:
 
 ```swift
 let library = ModelLibrary(root: customModelsRoot)
 ```
 
-Installed GGUF models live in UUID directories under the models root, each with a `metadata.json` and a `.gguf` weight file.
+Managed GGUF models live in UUID directories under the models root, each with a `metadata.json` and a `.gguf` weight file.
 
 ### Pick and persist a provider
 
@@ -865,6 +867,7 @@ The smoke app uses the shared model cache by default:
 ```
 
 For unsigned/dev builds where the App Group container is unavailable, the core storage helper falls back to per-app Application Support.
+On macOS, the picker also lists read-only GGUF models from the Hugging Face Hub cache when present.
 
 If Xcode says the build succeeded but no window appears, clean once with `Product > Clean Build Folder`, then run `CLLMSmokeMac` again.
 

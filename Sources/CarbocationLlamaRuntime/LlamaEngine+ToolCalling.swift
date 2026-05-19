@@ -909,26 +909,6 @@ private extension LlamaEngine {
             }
         }
 
-        func decodeMTPAcceptedVerificationTokens(
-            _ tokens: [llama_token],
-            startPosition: Int,
-            mtpContext: UnsafeMutableRawPointer
-        ) throws {
-            var tokens = tokens
-            let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
-                carbocation_llama_mtp_decode_target_tokens_bridge(
-                    mtpContext,
-                    buffer.baseAddress,
-                    Int32(buffer.count),
-                    Int32(startPosition)
-                )
-            }
-            if decodeResult != 0 {
-                clearPromptCaches()
-                throw LLMEngineError.decodeFailed
-            }
-        }
-
         func processLastMTPVerificationBatch(
             mtpContext: UnsafeMutableRawPointer
         ) throws {
@@ -939,29 +919,21 @@ private extension LlamaEngine {
             }
         }
 
-        func restoreMTPVerificationCheckpoint(
-            mtpContext: UnsafeMutableRawPointer
-        ) throws {
-            let restoreResult = carbocation_llama_mtp_restore_verification_checkpoint_bridge(mtpContext)
-            if restoreResult == 0 {
-                clearPromptCaches()
-                throw LLMEngineError.decodeFailed
-            }
+        struct PendingMTPToken {
+            var token: llama_token
+            var reasoningBudgetState: carbocation_llama_reasoning_budget_state?
+            var alreadyProcessed: Bool
         }
 
-        var prefetchedNextToken: llama_token?
-        var prefetchedReasoningBudgetState: carbocation_llama_reasoning_budget_state?
+        var pendingNextToken: PendingMTPToken?
         var generatedTokenHistory: [llama_token] = []
-        // A partial rejection rolls target recurrent state through restore/replay.
-        // Keep a short sequential runway before the next batched verify window.
-        var mtpSequentialCooldown = 0
 
         func sampleTargetToken(at index: Int32) -> llama_token {
             llama_synchronize(context)
             return llama_sampler_sample(sampler, context, index)
         }
 
-        let mtpDiagnosticsEnabled = configuration.allowsUnsafeMTPDraftWidthsForDebugging
+        let mtpDiagnosticsEnabled = configuration.emitsMTPDiagnostics
             && activeMTPContext != nil
             && (accelerationStats?.maxDraftTokens ?? 0) > 2
         func emitMTPDiagnostic(_ message: String) {
@@ -982,42 +954,36 @@ private extension LlamaEngine {
                 )
             }
 
-            let tokenPosition = promptTokens.count + generatedTokenCount
+            let tokenPosition = promptTokens.count + generatedTokenHistory.count
             let next: llama_token
             let reasoningBudgetState: carbocation_llama_reasoning_budget_state?
-            if let prefetched = prefetchedNextToken {
-                next = prefetched
-                reasoningBudgetState = prefetchedReasoningBudgetState
-                prefetchedNextToken = nil
-                prefetchedReasoningBudgetState = nil
+            let nextAlreadyProcessed: Bool
+            if let pending = pendingNextToken {
+                next = pending.token
+                reasoningBudgetState = pending.reasoningBudgetState
+                nextAlreadyProcessed = pending.alreadyProcessed
+                pendingNextToken = nil
             } else {
                 next = sampleTargetToken(at: -1)
                 reasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
                     carbocation_llama_reasoning_budget_sampler_state($0)
                 }
+                nextAlreadyProcessed = false
             }
-            guard processGeneratedToolToken(
-                next,
-                generatedTokensIncludingThisToken: generatedTokenCount + 1,
-                reasoningBudgetState: reasoningBudgetState
-            ) else {
-                break
+            var emittedNextTokenCount = 0
+            if !nextAlreadyProcessed {
+                guard processGeneratedToolToken(
+                    next,
+                    generatedTokensIncludingThisToken: generatedTokenCount + 1,
+                    reasoningBudgetState: reasoningBudgetState
+                ) else {
+                    break
+                }
+                emittedNextTokenCount = 1
             }
 
             if let activeMTPContext {
-                if mtpSequentialCooldown > 0 {
-                    try decodeMTPAcceptedVerificationTokens(
-                        [next],
-                        startPosition: tokenPosition,
-                        mtpContext: activeMTPContext
-                    )
-                    generatedTokenHistory.append(next)
-                    generatedTokenCount += 1
-                    mtpSequentialCooldown -= 1
-                    continue
-                }
-
-                let remainingDraftCapacity = maxNew - generatedTokenCount - 1
+                let remainingDraftCapacity = maxNew - generatedTokenCount - emittedNextTokenCount
                 let draftLimit = min(accelerationStats?.maxDraftTokens ?? 0, remainingDraftCapacity)
                 var draftCallIndex: Int?
                 let draftTokens: [llama_token]
@@ -1053,12 +1019,15 @@ private extension LlamaEngine {
                         startPosition: tokenPosition,
                         mtpContext: activeMTPContext
                     )
-                    if generatedTokenCount + 1 < maxNew {
+                    if generatedTokenCount + emittedNextTokenCount < maxNew {
                         let sampledPrefetch = sampleTargetToken(at: 0)
-                        prefetchedNextToken = sampledPrefetch
-                        prefetchedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                            carbocation_llama_reasoning_budget_sampler_state($0)
-                        }
+                        pendingNextToken = PendingMTPToken(
+                            token: sampledPrefetch,
+                            reasoningBudgetState: samplerRuntime.reasoningBudgetSampler.map {
+                                carbocation_llama_reasoning_budget_sampler_state($0)
+                            },
+                            alreadyProcessed: false
+                        )
                     }
                     try processLastMTPVerificationBatch(mtpContext: activeMTPContext)
                 } else {
@@ -1089,7 +1058,7 @@ private extension LlamaEngine {
                         emittedAcceptedDraftCount += 1
                         shouldContinue = processGeneratedToolToken(
                             draftToken,
-                            generatedTokensIncludingThisToken: generatedTokenCount + 1 + emittedAcceptedDraftCount,
+                            generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount,
                             reasoningBudgetState: acceptedReasoningBudgetState
                         )
                         if !shouldContinue {
@@ -1099,31 +1068,35 @@ private extension LlamaEngine {
 
                     if emittedAcceptedDraftCount < draftTokens.count {
                         let retainedTokens = [next] + Array(draftTokens.prefix(emittedAcceptedDraftCount))
-                        try restoreMTPVerificationCheckpoint(mtpContext: activeMTPContext)
-                        try decodeMTPAcceptedVerificationTokens(
-                            retainedTokens,
-                            startPosition: tokenPosition,
-                            mtpContext: activeMTPContext
-                        )
+                        try processLastMTPVerificationBatch(mtpContext: activeMTPContext)
                         _ = carbocation_llama_mtp_accept_bridge(
                             activeMTPContext,
                             Int32(emittedAcceptedDraftCount)
                         )
+                        let rollbackPosition = tokenPosition + retainedTokens.count
+                        let rollbackResult = carbocation_llama_mtp_rollback_bridge(
+                            activeMTPContext,
+                            Int32(rollbackPosition)
+                        )
+                        if rollbackResult == 0 {
+                            clearPromptCaches()
+                            throw LLMEngineError.decodeFailed
+                        }
 
                         if let correctionToken, shouldContinue {
-                            let correctionPosition = tokenPosition + retainedTokens.count
-                            try decodeMTPAcceptedVerificationTokens(
-                                [correctionToken],
-                                startPosition: correctionPosition,
-                                mtpContext: activeMTPContext
-                            )
                             emittedCorrectionToken = correctionToken
                             shouldContinue = processGeneratedToolToken(
                                 correctionToken,
-                                generatedTokensIncludingThisToken: generatedTokenCount + retainedTokens.count + 1,
+                                generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount + 1,
                                 reasoningBudgetState: correctionReasoningBudgetState
                             )
-                            mtpSequentialCooldown = max(mtpSequentialCooldown, (accelerationStats?.maxDraftTokens ?? 0) * 2)
+                            if shouldContinue {
+                                pendingNextToken = PendingMTPToken(
+                                    token: correctionToken,
+                                    reasoningBudgetState: correctionReasoningBudgetState,
+                                    alreadyProcessed: true
+                                )
+                            }
                         }
                         if let command = diagnosticBatchEquivalenceCommand(
                             modelPath: loadedDescriptor?.url.path,
@@ -1143,13 +1116,16 @@ private extension LlamaEngine {
                     } else {
                         var prefetchedDiagnosticToken: llama_token?
                         if shouldContinue,
-                           generatedTokenCount + 1 + emittedAcceptedDraftCount < maxNew {
+                           generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount < maxNew {
                             let sampledPrefetch = sampleTargetToken(at: Int32(draftTokens.count))
-                            prefetchedNextToken = sampledPrefetch
                             prefetchedDiagnosticToken = sampledPrefetch
-                            prefetchedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
-                                carbocation_llama_reasoning_budget_sampler_state($0)
-                            }
+                            pendingNextToken = PendingMTPToken(
+                                token: sampledPrefetch,
+                                reasoningBudgetState: samplerRuntime.reasoningBudgetSampler.map {
+                                    carbocation_llama_reasoning_budget_sampler_state($0)
+                                },
+                                alreadyProcessed: false
+                            )
                         }
 
                         try processLastMTPVerificationBatch(mtpContext: activeMTPContext)
@@ -1165,13 +1141,10 @@ private extension LlamaEngine {
                 }
 
                 accelerationStats?.draftTokensAccepted += emittedAcceptedDraftCount
-                let retainedTokenCount = 1 + emittedAcceptedDraftCount + (emittedCorrectionToken == nil ? 0 : 1)
+                let retainedTokenCount = emittedNextTokenCount + emittedAcceptedDraftCount + (emittedCorrectionToken == nil ? 0 : 1)
                 generatedTokenHistory.append(next)
                 if emittedAcceptedDraftCount > 0 {
                     generatedTokenHistory.append(contentsOf: draftTokens.prefix(emittedAcceptedDraftCount))
-                }
-                if let emittedCorrectionToken {
-                    generatedTokenHistory.append(emittedCorrectionToken)
                 }
                 generatedTokenCount += retainedTokenCount
                 if !shouldContinue {

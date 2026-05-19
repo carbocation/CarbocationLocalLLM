@@ -12,6 +12,46 @@ public enum InstalledModelArtifactRole: String, Codable, Sendable {
     case mmproj
 }
 
+public struct InstalledModelStorageLocation: Codable, Hashable, Sendable {
+    public enum Kind: String, Codable, Sendable {
+        case managed
+        case external
+    }
+
+    public var kind: Kind
+    public var directoryPath: String?
+
+    public init(kind: Kind, directoryPath: String? = nil) {
+        self.kind = kind
+        self.directoryPath = directoryPath
+    }
+
+    public static let managed = InstalledModelStorageLocation(kind: .managed)
+
+    public static func external(directory: URL) -> InstalledModelStorageLocation {
+        InstalledModelStorageLocation(
+            kind: .external,
+            directoryPath: directory.standardizedFileURL.path
+        )
+    }
+
+    public var isManaged: Bool {
+        kind == .managed
+    }
+
+    public func directory(for modelID: UUID, in root: URL) -> URL {
+        switch kind {
+        case .managed:
+            return root.appendingPathComponent(modelID.uuidString, isDirectory: true)
+        case .external:
+            if let directoryPath, !directoryPath.isEmpty {
+                return URL(fileURLWithPath: directoryPath, isDirectory: true)
+            }
+            return root.appendingPathComponent(modelID.uuidString, isDirectory: true)
+        }
+    }
+}
+
 public struct InstalledModelArtifact: Codable, Hashable, Sendable {
     public var role: InstalledModelArtifactRole
     public var relativePath: String
@@ -75,6 +115,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
     public var hfFilename: String?
     public var sha256: String?
     public var artifacts: [InstalledModelArtifact]
+    public var storageLocation: InstalledModelStorageLocation
     public var installedAt: Date
 
     public init(
@@ -89,6 +130,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         hfFilename: String? = nil,
         sha256: String? = nil,
         artifacts: [InstalledModelArtifact],
+        storageLocation: InstalledModelStorageLocation = .managed,
         installedAt: Date = Date()
     ) {
         self.id = id
@@ -113,6 +155,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         } else {
             self.artifacts = artifacts
         }
+        self.storageLocation = storageLocation
         self.installedAt = installedAt
     }
 
@@ -127,6 +170,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         hfRepo: String? = nil,
         hfFilename: String? = nil,
         sha256: String? = nil,
+        storageLocation: InstalledModelStorageLocation = .managed,
         installedAt: Date = Date()
     ) {
         self.init(
@@ -141,6 +185,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
             hfFilename: hfFilename,
             sha256: sha256,
             artifacts: [],
+            storageLocation: storageLocation,
             installedAt: installedAt
         )
     }
@@ -157,6 +202,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         case hfFilename
         case sha256
         case artifacts
+        case storageLocation
         case installedAt
     }
 
@@ -181,6 +227,10 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
                 sha256: sha256
             )
         ]
+        storageLocation = try container.decodeIfPresent(
+            InstalledModelStorageLocation.self,
+            forKey: .storageLocation
+        ) ?? .managed
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -196,11 +246,16 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         try container.encodeIfPresent(hfFilename, forKey: .hfFilename)
         try container.encodeIfPresent(sha256, forKey: .sha256)
         try container.encode(artifacts, forKey: .artifacts)
+        try container.encode(storageLocation, forKey: .storageLocation)
         try container.encode(installedAt, forKey: .installedAt)
     }
 
+    public var isReadOnly: Bool {
+        !storageLocation.isManaged
+    }
+
     public func directory(in root: URL) -> URL {
-        root.appendingPathComponent(id.uuidString, isDirectory: true)
+        storageLocation.directory(for: id, in: root)
     }
 
     public func weightsURL(in root: URL) -> URL {

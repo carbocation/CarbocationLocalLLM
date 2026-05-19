@@ -47,6 +47,7 @@ struct carbocation_llama_mtp_context_impl {
 
     common_params_speculative params;
     common_speculative * speculative = nullptr;
+    common_context_seq_rm_type target_context_sequence_removal = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
     common_context_seq_rm_type draft_context_sequence_removal = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
 
     llama_tokens prompt_tokens;
@@ -108,6 +109,23 @@ bool reset_speculative(carbocation_llama_mtp_context_impl * context) {
     return context->speculative != nullptr;
 }
 
+bool needs_checkpoint_for_rollback(
+    llama_context * context,
+    common_context_seq_rm_type removal_type,
+    int32_t rollback_tokens
+) {
+    switch (removal_type) {
+    case COMMON_CONTEXT_SEQ_RM_TYPE_PART:
+        return false;
+    case COMMON_CONTEXT_SEQ_RM_TYPE_RS:
+        return rollback_tokens > static_cast<int32_t>(llama_n_rs_seq(context));
+    case COMMON_CONTEXT_SEQ_RM_TYPE_FULL:
+    case COMMON_CONTEXT_SEQ_RM_TYPE_NO:
+        return true;
+    }
+    return true;
+}
+
 int32_t decode_target_tokens(
     carbocation_llama_mtp_context_impl * context,
     const llama_token * tokens,
@@ -127,26 +145,43 @@ int32_t decode_target_tokens(
         return -2;
     }
 
-    if (logits_for_all_tokens && token_count > 1) {
+    const int32_t max_rollback_tokens = std::max<int32_t>(0, token_count - 1);
+    const bool needs_target_checkpoint = needs_checkpoint_for_rollback(
+        context->target_context,
+        context->target_context_sequence_removal,
+        max_rollback_tokens
+    );
+    const bool needs_draft_checkpoint = needs_checkpoint_for_rollback(
+        context->draft_context,
+        context->draft_context_sequence_removal,
+        max_rollback_tokens
+    );
+
+    if (logits_for_all_tokens && token_count > 1 &&
+        (needs_target_checkpoint || needs_draft_checkpoint)) {
         context->verification_checkpoint.clear();
         context->verification_checkpoint.update_pos(
             context->prompt_tokens.size(),
             llama_memory_seq_pos_min(llama_get_memory(context->target_context), sequence_id),
             llama_memory_seq_pos_max(llama_get_memory(context->target_context), sequence_id)
         );
-        context->verification_checkpoint.update_tgt(
-            context->target_context,
-            sequence_id,
-            checkpoint_flags
-        );
-        if (context->draft_context_sequence_removal == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
+        if (needs_target_checkpoint) {
+            context->verification_checkpoint.update_tgt(
+                context->target_context,
+                sequence_id,
+                checkpoint_flags
+            );
+        }
+        if (needs_draft_checkpoint) {
             context->verification_checkpoint.update_dft(
                 context->draft_context,
                 sequence_id,
                 checkpoint_flags
             );
         }
-        context->verification_checkpoint_active = !context->verification_checkpoint.empty();
+        context->verification_checkpoint_active =
+            (needs_target_checkpoint && !context->verification_checkpoint.data_tgt.empty()) ||
+            (needs_draft_checkpoint && !context->verification_checkpoint.data_dft.empty());
     } else {
         context->verification_checkpoint_active = false;
     }
@@ -284,6 +319,7 @@ extern "C" void * carbocation_llama_mtp_create(
     context->params.draft.ctx_dft = draft_context;
     context->params.draft.n_max = max_draft_tokens;
     context->params.draft.n_min = std::max<int32_t>(0, min_draft_tokens);
+    context->target_context_sequence_removal = common_context_can_seq_rm(target_context);
     context->draft_context_sequence_removal = common_context_can_seq_rm(draft_context);
 
     if (context->target_batch_capacity <= 0 ||
@@ -379,16 +415,20 @@ extern "C" int32_t carbocation_llama_mtp_restore_verification_checkpoint(void * 
         return 0;
     }
 
-    context->verification_checkpoint.load_tgt(
-        context->target_context,
-        sequence_id,
-        checkpoint_flags
-    );
-    context->verification_checkpoint.load_dft(
-        context->draft_context,
-        sequence_id,
-        checkpoint_flags
-    );
+    if (!context->verification_checkpoint.data_tgt.empty()) {
+        context->verification_checkpoint.load_tgt(
+            context->target_context,
+            sequence_id,
+            checkpoint_flags
+        );
+    }
+    if (!context->verification_checkpoint.data_dft.empty()) {
+        context->verification_checkpoint.load_dft(
+            context->draft_context,
+            sequence_id,
+            checkpoint_flags
+        );
+    }
 
     const llama_pos restore_position = context->verification_checkpoint.pos_max + 1;
     const bool target_removed = llama_memory_seq_rm(

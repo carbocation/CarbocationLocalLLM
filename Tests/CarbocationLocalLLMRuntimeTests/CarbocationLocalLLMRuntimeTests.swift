@@ -43,7 +43,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanRefreshesBeforeResolvingInstalledModel() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(
             displayName: "Planned Model",
             contextLength: 32_768,
@@ -71,7 +71,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanReturnsNilForInvalidAndDeletedSelections() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(displayName: "Deleted Model", contextLength: 8_192, in: root)
 
         let invalidPlan = await LocalLLMEngine.loadPlan(from: "not-a-model", in: library)
@@ -89,7 +89,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanHonorsAutoAndManualContextPolicy() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(
             displayName: "Context Model",
             contextLength: 65_536,
@@ -123,7 +123,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanUsesCalibrationAsAutomaticUpperBound() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(
             displayName: "Calibrated Context Model",
             contextLength: 131_072,
@@ -180,7 +180,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanAutoMaximumTracksSelectedModelCalibration() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let smallerModel = try installFixtureModel(
             displayName: "65K Calibrated Model",
             contextLength: 131_072,
@@ -251,7 +251,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanDoesNotPromoteAutoModeToMaximumCalibratedContext() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let model = try installFixtureModel(
             displayName: "Very Long Context Model",
             contextLength: 262_144,
@@ -294,7 +294,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     @MainActor
     func testLoadPlanHandlesSystemModelAvailability() async throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let storageValue = LLMSystemModelID.appleIntelligence.rawValue
 
         guard let option = LocalLLMEngine.availableSystemModels().first(where: {
@@ -359,7 +359,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
         }
 
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let engine = LocalLLMEngine()
         _ = try await engine.load(
             selection: option.selection,
@@ -396,7 +396,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("CarbocationLocalLLMRuntimeTests-\(UUID().uuidString)")
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let engine = LocalLLMEngine()
         let loaded = try await engine.load(
             selection: option.selection,

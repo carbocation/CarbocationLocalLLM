@@ -7,6 +7,7 @@ public enum ModelLibraryError: Error, LocalizedError, Sendable {
     case notAGGUF(String)
     case missingPrimaryArtifact
     case unsafeArtifactPath(String)
+    case readOnlyModel(String)
 
     public var errorDescription: String? {
         switch self {
@@ -22,11 +23,48 @@ public enum ModelLibraryError: Error, LocalizedError, Sendable {
             return "No primary GGUF model artifact was provided."
         case .unsafeArtifactPath(let path):
             return "Invalid model artifact path: \(path)"
+        case .readOnlyModel(let name):
+            return "\(name) is read-only because it is outside the managed model library."
         }
     }
 }
 
 public typealias ModelContextLengthProbe = @Sendable (URL) -> Int?
+
+public struct ModelLibrarySearchConfiguration: Hashable, Sendable {
+    public var includesManagedModels: Bool
+    public var externalHuggingFaceHubCacheDirectories: [URL]
+
+    public init(
+        includesManagedModels: Bool = true,
+        externalHuggingFaceHubCacheDirectories: [URL] = []
+    ) {
+        self.includesManagedModels = includesManagedModels
+        self.externalHuggingFaceHubCacheDirectories = externalHuggingFaceHubCacheDirectories
+    }
+
+    public static let managedOnly = ModelLibrarySearchConfiguration()
+
+    public static func platformDefault(
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ModelLibrarySearchConfiguration {
+        #if os(macOS)
+        let cacheDirectories = ModelStorage.huggingFaceHubCacheDirectory(
+            environment: environment,
+            fileManager: fileManager
+        ).map { [$0] } ?? []
+        return ModelLibrarySearchConfiguration(
+            includesManagedModels: true,
+            externalHuggingFaceHubCacheDirectories: cacheDirectories
+        )
+        #else
+        _ = fileManager
+        _ = environment
+        return .managedOnly
+        #endif
+    }
+}
 
 @MainActor
 public final class ModelLibrary {
@@ -39,12 +77,14 @@ public final class ModelLibrary {
     public init(
         root: URL,
         fileManager: FileManager = .default,
+        searchConfiguration: ModelLibrarySearchConfiguration = .platformDefault(),
         contextLengthProbe: ModelContextLengthProbe? = nil
     ) {
         self.root = root
         self.fileWorker = ModelLibraryFileWorker(
             root: root,
             fileManager: fileManager,
+            searchConfiguration: searchConfiguration,
             contextLengthProbe: contextLengthProbe
         )
     }
@@ -169,16 +209,19 @@ private struct ModelLibraryInstallResult: Sendable, Hashable {
 private final class ModelLibraryFileWorker: @unchecked Sendable {
     private let root: URL
     private let fileManager: FileManager
+    private let searchConfiguration: ModelLibrarySearchConfiguration
     private let contextLengthProbe: ModelContextLengthProbe?
     private let queue: DispatchQueue
 
     init(
         root: URL,
         fileManager: FileManager,
+        searchConfiguration: ModelLibrarySearchConfiguration,
         contextLengthProbe: ModelContextLengthProbe?
     ) {
         self.root = root
         self.fileManager = fileManager
+        self.searchConfiguration = searchConfiguration
         self.contextLengthProbe = contextLengthProbe
         self.queue = DispatchQueue(
             label: "com.carbocation.CarbocationLocalLLM.ModelLibraryFileWorker",
@@ -286,7 +329,12 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
 
     func delete(id: UUID) async throws -> ModelLibrarySnapshot {
         try await run {
-            try self.ensureRootExists()
+            let currentSnapshot = self.loadSnapshot()
+            if let model = currentSnapshot.models.first(where: { $0.id == id }),
+               model.isReadOnly {
+                throw ModelLibraryError.readOnlyModel(model.displayName)
+            }
+
             let directory = self.root.appendingPathComponent(id.uuidString, isDirectory: true)
             if self.fileManager.fileExists(atPath: directory.path) {
                 try self.fileManager.removeItem(at: directory)
@@ -312,6 +360,9 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
             guard let index = snapshot.models.firstIndex(where: { $0.id == id }),
                   snapshot.models[index].contextLength != contextLength
             else { return snapshot }
+            guard !snapshot.models[index].isReadOnly else {
+                throw ModelLibraryError.readOnlyModel(snapshot.models[index].displayName)
+            }
 
             snapshot.models[index].contextLength = contextLength
             try self.writeMetadata(snapshot.models[index], root: self.root)
@@ -321,6 +372,9 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
 
     func writeMetadata(_ model: InstalledModel) async throws -> ModelLibrarySnapshot {
         try await run {
+            guard !model.isReadOnly else {
+                throw ModelLibraryError.readOnlyModel(model.displayName)
+            }
             try self.writeMetadata(model, root: self.root)
             return self.loadSnapshot()
         }
@@ -436,33 +490,44 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
         var found: [InstalledModel] = []
         let decoder = LocalLLMJSON.makeDecoder()
 
-        try? ensureRootExists()
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return .empty
-        }
+        if searchConfiguration.includesManagedModels {
+            try? ensureRootExists()
+            if let entries = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for entry in entries {
+                    var isDirectory: ObjCBool = false
+                    guard fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
+                          isDirectory.boolValue
+                    else { continue }
 
-        for entry in entries {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
-                  isDirectory.boolValue
-            else { continue }
-
-            let metadataURL = entry.appendingPathComponent("metadata.json")
-            if let data = try? Data(contentsOf: metadataURL),
-               let metadata = try? decoder.decode(InstalledModel.self, from: data) {
-                found.append(metadata)
-            } else if let synthesized = synthesizeMetadata(for: entry) {
-                found.append(synthesized)
+                    let metadataURL = entry.appendingPathComponent("metadata.json")
+                    if let data = try? Data(contentsOf: metadataURL),
+                       let metadata = try? decoder.decode(InstalledModel.self, from: data) {
+                        found.append(metadata)
+                    } else if let synthesized = synthesizeMetadata(for: entry) {
+                        found.append(synthesized)
+                    }
+                }
             }
         }
 
+        for cacheDirectory in searchConfiguration.externalHuggingFaceHubCacheDirectories {
+            let scanner = HuggingFaceCacheModelScanner(
+                hubRoot: cacheDirectory,
+                fileManager: fileManager,
+                contextLengthProbe: contextLengthProbe
+            )
+            found.append(contentsOf: scanner.scan())
+        }
+
+        let deduplicated = deduplicate(found)
+
         return ModelLibrarySnapshot(
-            models: found.sorted(by: Self.modelSortPrecedes),
-            partials: ModelDownloader.listPartials(in: root)
+            models: deduplicated.sorted(by: Self.modelSortPrecedes),
+            partials: searchConfiguration.includesManagedModels ? ModelDownloader.listPartials(in: root) : []
         )
     }
 
@@ -508,6 +573,9 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     }
 
     private func writeMetadata(_ model: InstalledModel, root: URL) throws {
+        guard !model.isReadOnly else {
+            throw ModelLibraryError.readOnlyModel(model.displayName)
+        }
         try writeMetadata(model, directory: model.directory(in: root))
     }
 
@@ -533,6 +601,13 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     }
 
     private func fileSize(at url: URL) -> Int64 {
+        if let handle = try? FileHandle(forReadingFrom: url) {
+            defer { try? handle.close() }
+            if let size = try? handle.seekToEnd() {
+                return Int64(min(size, UInt64(Int64.max)))
+            }
+        }
+
         guard let value = try? fileManager.attributesOfItem(atPath: url.path)[.size] else {
             return 0
         }
@@ -550,6 +625,53 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
             return Int64(size)
         }
         return 0
+    }
+
+    private func deduplicate(_ models: [InstalledModel]) -> [InstalledModel] {
+        let managedModels = models.filter { !$0.isReadOnly }
+        let managedRepoFiles = Set(managedModels.compactMap(repoFileKey))
+        let managedExactKeys = Set(managedModels.compactMap(exactContentKey))
+
+        var seenExternalExactKeys: Set<String> = []
+        var seenExternalRepoFiles: Set<String> = []
+        var result = managedModels
+
+        for model in models where model.isReadOnly {
+            if let repoFile = repoFileKey(model),
+               managedRepoFiles.contains(repoFile) {
+                continue
+            }
+            if let exact = exactContentKey(model),
+               managedExactKeys.contains(exact) || seenExternalExactKeys.contains(exact) {
+                continue
+            }
+            if let repoFile = repoFileKey(model),
+               seenExternalRepoFiles.contains(repoFile) {
+                continue
+            }
+
+            if let exact = exactContentKey(model) {
+                seenExternalExactKeys.insert(exact)
+            }
+            if let repoFile = repoFileKey(model) {
+                seenExternalRepoFiles.insert(repoFile)
+            }
+            result.append(model)
+        }
+
+        return result
+    }
+
+    private func repoFileKey(_ model: InstalledModel) -> String? {
+        guard let repo = model.hfRepo?.lowercased(),
+              let filename = model.hfFilename?.lowercased()
+        else { return nil }
+        return "\(repo)|\(filename)"
+    }
+
+    private func exactContentKey(_ model: InstalledModel) -> String? {
+        guard let repoFile = repoFileKey(model) else { return nil }
+        return "\(repoFile)|\(model.sha256?.lowercased() ?? "-")"
     }
 
     private func removeDirectoryIfOwned(_ directory: URL, expectedID: UUID) {

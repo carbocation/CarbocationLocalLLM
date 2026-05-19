@@ -396,6 +396,9 @@ public struct ModelLibraryPickerView: View {
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                 }
+                                if model.isReadOnly {
+                                    Text("Hugging Face cache")
+                                }
                             }
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -411,13 +414,15 @@ public struct ModelLibraryPickerView: View {
 
                 calibrationControls(for: model, summary: calibrationSummary)
 
-                Button {
-                    showDeleteConfirm = model
-                } label: {
-                    Image(systemName: "trash")
+                if ModelLibraryPickerRowPresentation.showsDeleteControl(for: model) {
+                    Button {
+                        showDeleteConfirm = model
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Delete this model")
                 }
-                .buttonStyle(.borderless)
-                .help("Delete this model")
             }
             .padding(.vertical, 5)
             if calibrationErrorModelID == model.id,

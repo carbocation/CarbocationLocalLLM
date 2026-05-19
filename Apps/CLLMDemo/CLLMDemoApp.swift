@@ -237,21 +237,6 @@ private struct PromptPane: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Unsafe MTP")
-                    .frame(width: 84, alignment: .leading)
-
-                Toggle(
-                    "Allow requested draft width",
-                    isOn: Binding(
-                        get: { state.allowUnsafeMTPDraftWidths },
-                        set: { state.setAllowUnsafeMTPDraftWidths($0) }
-                    )
-                )
-                .disabled(state.isRunning || !state.mtpAccelerationEnabled)
-                .help("Bypass model-specific MTP draft caps for debugging; output may diverge.")
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("Budget")
                     .foregroundStyle(state.enableThinking ? .primary : .secondary)
                     .frame(width: 84, alignment: .leading)

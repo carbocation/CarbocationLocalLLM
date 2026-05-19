@@ -11,7 +11,7 @@ struct ProbeArguments {
     var maxOutput = 64
     var policy = LLMAccelerationPolicy.automatic
     var mtpMaxDraft = 3
-    var unsafeMTP = false
+    var mtpDiagnostics = false
     var compareDisabled = false
 }
 
@@ -190,8 +190,8 @@ enum CLLMMTPReproCommand {
                 arguments.policy = try parsePolicy(argument)
             case "--mtp-max-draft":
                 arguments.mtpMaxDraft = try parseInt(argument)
-            case "--unsafe-mtp":
-                arguments.unsafeMTP = true
+            case "--mtp-diagnostics":
+                arguments.mtpDiagnostics = true
             case "--compare-disabled":
                 arguments.compareDisabled = true
             case "--help", "-h":
@@ -238,7 +238,7 @@ enum CLLMMTPReproCommand {
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
             accelerationPolicy: arguments.policy,
             mtpMaxDraftTokens: arguments.mtpMaxDraft,
-            allowsUnsafeMTPDraftWidthsForDebugging: arguments.unsafeMTP
+            emitsMTPDiagnostics: arguments.mtpDiagnostics
         ))
 
         let loaded = try await engine.load(
@@ -253,7 +253,7 @@ enum CLLMMTPReproCommand {
         print("mtp-support: \(loaded.supportsMTPAcceleration ? "yes" : "no")")
         print("mtp-policy: \(arguments.policy.rawValue)")
         print("mtp-max-draft: \(arguments.mtpMaxDraft)")
-        print("mtp-unsafe-draft-widths: \(arguments.unsafeMTP ? "yes" : "no")")
+        print("mtp-diagnostics: \(arguments.mtpDiagnostics ? "yes" : "no")")
 
         let options = LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions(
             maxOutputTokens: arguments.maxOutput,
@@ -385,7 +385,7 @@ enum CLLMMTPReproCommand {
           --max-output N
           --policy automatic|disabled
           --mtp-max-draft N
-          --unsafe-mtp
+          --mtp-diagnostics
           --compare-disabled
         """)
     }

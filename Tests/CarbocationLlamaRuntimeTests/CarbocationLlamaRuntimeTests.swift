@@ -86,47 +86,18 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         ))
     }
 
-    func testQwen35SingleNextNUsesSafeMTPDraftWidth() {
+    func testMTPDraftWidthUsesRequestedValueWithRangeClamp() {
         XCTAssertEqual(
-            LlamaEngine.effectiveMTPMaxDraftTokens(
-                requested: 3,
-                architecture: "qwen35",
-                nextNPredictLayers: 1
-            ),
-            2
-        )
-        XCTAssertEqual(
-            LlamaEngine.effectiveMTPMaxDraftTokens(
-                requested: 3,
-                architecture: "qwen35",
-                nextNPredictLayers: 1,
-                allowsUnsafeDraftWidths: true
-            ),
+            LlamaEngine.effectiveMTPMaxDraftTokens(requested: 3),
             3
         )
         XCTAssertEqual(
-            LlamaEngine.effectiveMTPMaxDraftTokens(
-                requested: 2,
-                architecture: "qwen35",
-                nextNPredictLayers: 1
-            ),
-            2
+            LlamaEngine.effectiveMTPMaxDraftTokens(requested: 0),
+            1
         )
         XCTAssertEqual(
-            LlamaEngine.effectiveMTPMaxDraftTokens(
-                requested: 3,
-                architecture: "qwen35",
-                nextNPredictLayers: 2
-            ),
-            3
-        )
-        XCTAssertEqual(
-            LlamaEngine.effectiveMTPMaxDraftTokens(
-                requested: 3,
-                architecture: "gemma4",
-                nextNPredictLayers: 1
-            ),
-            3
+            LlamaEngine.effectiveMTPMaxDraftTokens(requested: 40),
+            32
         )
     }
 

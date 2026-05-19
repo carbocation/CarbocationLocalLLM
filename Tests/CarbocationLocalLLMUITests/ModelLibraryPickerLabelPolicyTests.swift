@@ -1,5 +1,5 @@
 import CarbocationLocalLLM
-import CarbocationLocalLLMUI
+@testable import CarbocationLocalLLMUI
 import XCTest
 
 final class ModelLibraryPickerLabelPolicyTests: XCTestCase {
@@ -185,6 +185,22 @@ final class ModelLibraryPickerLabelPolicyTests: XCTestCase {
         XCTAssertEqual(summary.actionTitle, "Recalibrate")
         XCTAssertEqual(summary.statusTitle, "Calibrated")
         XCTAssertTrue(summary.displayText.contains("Calibrated"))
+    }
+
+    func testReadOnlyExternalModelRowsHideDeleteControl() {
+        let managed = installedModel(for: smallModel)
+        let external = InstalledModel(
+            displayName: "Cached",
+            filename: "cached-Q4_K_M.gguf",
+            sizeBytes: 1_000_000,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            source: .customHF,
+            storageLocation: .external(directory: URL(fileURLWithPath: "/tmp/hf-cache", isDirectory: true))
+        )
+
+        XCTAssertTrue(ModelLibraryPickerRowPresentation.showsDeleteControl(for: managed))
+        XCTAssertFalse(ModelLibraryPickerRowPresentation.showsDeleteControl(for: external))
     }
 
     private var curatedModels: [CuratedModel] {

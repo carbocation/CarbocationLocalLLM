@@ -39,6 +39,45 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(modelsDirectory.standardizedFileURL.path, expected.standardizedFileURL.path)
     }
 
+    #if os(macOS)
+    func testHuggingFaceHubCacheDirectoryUsesEnvironmentPrecedence() throws {
+        let root = try makeTemporaryDirectory()
+        let direct = root.appendingPathComponent("direct-hub", isDirectory: true)
+        let hfHome = root.appendingPathComponent("hf-home", isDirectory: true)
+        let xdg = root.appendingPathComponent("xdg-cache", isDirectory: true)
+
+        XCTAssertEqual(
+            ModelStorage.huggingFaceHubCacheDirectory(
+                environment: [
+                    "HF_HUB_CACHE": direct.path,
+                    "HF_HOME": hfHome.path,
+                    "XDG_CACHE_HOME": xdg.path
+                ]
+            )?.path,
+            direct.standardizedFileURL.path
+        )
+
+        XCTAssertEqual(
+            ModelStorage.huggingFaceHubCacheDirectory(
+                environment: [
+                    "HF_HOME": hfHome.path,
+                    "XDG_CACHE_HOME": xdg.path
+                ]
+            )?.path,
+            hfHome.appendingPathComponent("hub", isDirectory: true).standardizedFileURL.path
+        )
+
+        XCTAssertEqual(
+            ModelStorage.huggingFaceHubCacheDirectory(
+                environment: ["XDG_CACHE_HOME": xdg.path]
+            )?.path,
+            xdg.appendingPathComponent("huggingface", isDirectory: true)
+                .appendingPathComponent("hub", isDirectory: true)
+                .standardizedFileURL.path
+        )
+    }
+    #endif
+
     func testContextCalibrationStoreSeparatesDeviceModelAndRuntimeKeys() {
         let suiteName = "CarbocationLocalLLMCalibrationTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -727,7 +766,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try Data("fake gguf".utf8).write(to: source)
         let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
 
-        let library = ModelLibrary(root: modelsRoot) { url in
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly) { url in
             url.lastPathComponent == "source-Q4_K_M.gguf" ? 32_768 : nil
         }
 
@@ -749,6 +788,168 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     @MainActor
+    func testModelLibraryDiscoversHuggingFaceCacheSnapshotsReadOnly() async throws {
+        let root = try makeTemporaryDirectory()
+        let hubRoot = root.appendingPathComponent("hub", isDirectory: true)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let commit = Self.mockCommit
+        let primaryHash = String(repeating: "b", count: 64)
+        let mmprojHash = String(repeating: "c", count: 64)
+        let primaryData = makeMinimalGGUF(contextLength: 32_768)
+        let mmprojData = Data("mmproj".utf8)
+
+        let snapshot = try makeHuggingFaceCacheRepo(
+            hubRoot: hubRoot,
+            repoFolder: "models--owner--repo",
+            commit: commit,
+            files: [
+                "Qwen3.6-27B-Q8_0.gguf": (primaryHash, primaryData),
+                "mmproj-BF16.gguf": (mmprojHash, mmprojData)
+            ]
+        )
+
+        let library = ModelLibrary(
+            root: modelsRoot,
+            searchConfiguration: ModelLibrarySearchConfiguration(
+                externalHuggingFaceHubCacheDirectories: [hubRoot]
+            )
+        )
+
+        await library.refresh()
+
+        XCTAssertEqual(library.models.count, 1)
+        let model = try XCTUnwrap(library.models.first)
+        let originalID = model.id
+        XCTAssertTrue(model.isReadOnly)
+        XCTAssertEqual(model.hfRepo, "owner/repo")
+        XCTAssertEqual(model.hfFilename, "Qwen3.6-27B-Q8_0.gguf")
+        XCTAssertEqual(model.sha256, primaryHash)
+        XCTAssertEqual(model.sizeBytes, Int64(primaryData.count + mmprojData.count))
+        XCTAssertEqual(model.contextLength, 32_768)
+        XCTAssertEqual(model.quantization, "Q8_0")
+        XCTAssertEqual(
+            model.weightsURL(in: modelsRoot).standardizedFileURL.path,
+            snapshot.appendingPathComponent("Qwen3.6-27B-Q8_0.gguf").standardizedFileURL.path
+        )
+        XCTAssertEqual(model.artifacts.map(\.role), [.primaryModel, .mmproj])
+
+        await library.refresh()
+        XCTAssertEqual(library.models.first?.id, originalID)
+
+        do {
+            try await library.delete(id: originalID)
+            XCTFail("Expected deleting a Hugging Face cache model to fail.")
+        } catch ModelLibraryError.readOnlyModel {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: snapshot.appendingPathComponent("Qwen3.6-27B-Q8_0.gguf").path
+            ))
+        }
+
+        do {
+            try await library.syncContextLength(65_536, for: originalID)
+            XCTFail("Expected syncing read-only model metadata to fail.")
+        } catch ModelLibraryError.readOnlyModel {
+        }
+
+        do {
+            try await library.writeMetadata(model)
+            XCTFail("Expected writing read-only model metadata to fail.")
+        } catch ModelLibraryError.readOnlyModel {
+        }
+    }
+
+    @MainActor
+    func testModelLibraryGroupsHuggingFaceCacheSplitModelsAndMMProj() async throws {
+        let root = try makeTemporaryDirectory()
+        let hubRoot = root.appendingPathComponent("hub", isDirectory: true)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let primaryData = makeMinimalGGUF(contextLength: 65_536)
+        let splitData = Data("split".utf8)
+        let mmprojData = Data("mmproj".utf8)
+
+        _ = try makeHuggingFaceCacheRepo(
+            hubRoot: hubRoot,
+            repoFolder: "models--owner--split-repo",
+            commit: Self.mockCommit,
+            files: [
+                "nested/model-Q4_K_M-00001-of-00002.gguf": (String(repeating: "d", count: 64), primaryData),
+                "nested/model-Q4_K_M-00002-of-00002.gguf": (String(repeating: "e", count: 64), splitData),
+                "nested/mmproj-model-Q4_K_M.gguf": (String(repeating: "f", count: 64), mmprojData)
+            ]
+        )
+
+        let library = ModelLibrary(
+            root: modelsRoot,
+            searchConfiguration: ModelLibrarySearchConfiguration(
+                externalHuggingFaceHubCacheDirectories: [hubRoot]
+            )
+        )
+
+        await library.refresh()
+
+        XCTAssertEqual(library.models.count, 1)
+        let model = try XCTUnwrap(library.models.first)
+        XCTAssertEqual(model.displayName, "model-Q4_K_M")
+        XCTAssertEqual(model.filename, "nested/model-Q4_K_M-00001-of-00002.gguf")
+        XCTAssertEqual(model.contextLength, 65_536)
+        XCTAssertEqual(model.sizeBytes, Int64(primaryData.count + splitData.count + mmprojData.count))
+        XCTAssertEqual(model.artifacts.map(\.role), [.primaryModel, .splitModel, .mmproj])
+        XCTAssertEqual(
+            model.artifacts.map(\.relativePath),
+            [
+                "nested/model-Q4_K_M-00001-of-00002.gguf",
+                "nested/model-Q4_K_M-00002-of-00002.gguf",
+                "nested/mmproj-model-Q4_K_M.gguf"
+            ]
+        )
+    }
+
+    @MainActor
+    func testModelLibraryPrefersManagedModelOverMatchingHuggingFaceCacheEntry() async throws {
+        let root = try makeTemporaryDirectory()
+        let hubRoot = root.appendingPathComponent("hub", isDirectory: true)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let source = root.appendingPathComponent("managed-Q4_K_M.gguf")
+        let sha = String(repeating: "a", count: 64)
+        let payload = makeMinimalGGUF(contextLength: 16_384)
+        try payload.write(to: source)
+
+        _ = try makeHuggingFaceCacheRepo(
+            hubRoot: hubRoot,
+            repoFolder: "models--owner--dupe",
+            commit: Self.mockCommit,
+            files: [
+                "managed-Q4_K_M.gguf": (sha, payload)
+            ]
+        )
+
+        let library = ModelLibrary(
+            root: modelsRoot,
+            searchConfiguration: ModelLibrarySearchConfiguration(
+                externalHuggingFaceHubCacheDirectories: [hubRoot]
+            )
+        )
+
+        let managed = try await library.add(
+            weightsAt: source,
+            displayName: "Managed",
+            filename: "managed-Q4_K_M.gguf",
+            sizeBytes: Int64(payload.count),
+            source: .customHF,
+            hfRepo: "owner/dupe",
+            hfFilename: "managed-Q4_K_M.gguf",
+            sha256: sha,
+            contextLength: 16_384
+        )
+
+        await library.refresh()
+
+        XCTAssertEqual(library.models.count, 1)
+        XCTAssertEqual(library.models.first?.id, managed.id)
+        XCTAssertFalse(try XCTUnwrap(library.models.first).isReadOnly)
+    }
+
+    @MainActor
     func testModelLibraryTrustsProvidedContextLengthWithoutProbe() async throws {
         let root = try makeTemporaryDirectory()
         let source = root.appendingPathComponent("download-Q4_K_M.gguf")
@@ -756,7 +957,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
         let recorder = ThreadProbeRecorder()
 
-        let library = ModelLibrary(root: modelsRoot) { _ in
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly) { _ in
             recorder.record(true)
             return 16_384
         }
@@ -782,7 +983,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data("fake".utf8).write(to: directory.appendingPathComponent("Orphan-Q5_K_M.gguf"))
 
-        let library = ModelLibrary(root: root)
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly)
         await library.refresh()
 
         XCTAssertEqual(library.models.count, 1)
@@ -797,7 +998,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         let sourcesRoot = root.appendingPathComponent("Sources", isDirectory: true)
         let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
         try FileManager.default.createDirectory(at: sourcesRoot, withIntermediateDirectories: true)
-        let library = ModelLibrary(root: modelsRoot)
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
 
         let largest = try await addFakeModel(
             to: library,
@@ -853,7 +1054,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data("fake".utf8).write(to: directory.appendingPathComponent("Resolvable-Q4_K_M.gguf"))
 
-        let library = ModelLibrary(root: root)
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly)
 
         XCTAssertNil(library.model(id: modelID))
         let cachedOnly = await library.resolveInstalledModel(id: modelID, refreshing: false)
@@ -874,7 +1075,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
         let recorder = ThreadProbeRecorder()
 
-        let library = ModelLibrary(root: modelsRoot) { _ in
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly) { _ in
             recorder.record(Thread.isMainThread)
             return 16_384
         }
@@ -895,7 +1096,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         try Data("fake".utf8).write(to: stagingDirectory.appendingPathComponent("Staged-Q5_K_M.gguf"))
 
-        let library = ModelLibrary(root: root)
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly)
         await library.refresh()
 
         XCTAssertTrue(library.models.isEmpty)
@@ -910,7 +1111,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try Data("fake gguf".utf8).write(to: source)
         try Data("not a directory".utf8).write(to: modelsRoot.appendingPathComponent(".staging"))
 
-        let library = ModelLibrary(root: modelsRoot)
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
 
         do {
             _ = try await library.importFile(at: source, displayName: "Broken")
@@ -1086,7 +1287,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         try Data("mmproj".utf8).write(to: mmproj)
 
         let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
-        let library = ModelLibrary(root: modelsRoot)
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
         let model = try await library.add(
             artifacts: [
                 ModelLibraryInstallArtifact(
@@ -1728,6 +1929,42 @@ final class CarbocationLocalLLMTests: XCTestCase {
             .appendingPathComponent("CarbocationLocalLLMTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func makeHuggingFaceCacheRepo(
+        hubRoot: URL,
+        repoFolder: String,
+        commit: String,
+        files: [String: (blobHash: String, data: Data)]
+    ) throws -> URL {
+        let repoRoot = hubRoot.appendingPathComponent(repoFolder, isDirectory: true)
+        let blobs = repoRoot.appendingPathComponent("blobs", isDirectory: true)
+        let refs = repoRoot.appendingPathComponent("refs", isDirectory: true)
+        let snapshot = repoRoot
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(commit, isDirectory: true)
+
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: refs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data(commit.utf8).write(to: refs.appendingPathComponent("main"))
+
+        for (relativePath, file) in files {
+            try file.data.write(to: blobs.appendingPathComponent(file.blobHash))
+            let linkURL = snapshot.appendingPathComponent(relativePath)
+            try FileManager.default.createDirectory(
+                at: linkURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let depth = relativePath.split(separator: "/").dropLast().count
+            let prefix = Array(repeating: "..", count: depth + 2).joined(separator: "/")
+            try FileManager.default.createSymbolicLink(
+                atPath: linkURL.path,
+                withDestinationPath: "\(prefix)/blobs/\(file.blobHash)"
+            )
+        }
+
+        return snapshot
     }
 
     private func addFakeModel(

@@ -9,7 +9,7 @@ import XCTest
 final class CarbocationLocalLLMRuntimeUITests: XCTestCase {
     func testConfigurationViewConstructsWithDefaultRuntimeCalibrationWiring() throws {
         let root = try makeTemporaryDirectory()
-        let library = ModelLibrary(root: root, contextLengthProbe: { _ in nil })
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
         let suiteName = "CarbocationLocalLLMRuntimeUITests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }

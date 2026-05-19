@@ -101,8 +101,8 @@ private final class GGUFMetadataReader {
 
     init(url: URL) throws {
         handle = try FileHandle(forReadingFrom: url)
-        let sizeValue = try FileManager.default.attributesOfItem(atPath: url.path)[.size]
-        fileSize = Self.int64Size(from: sizeValue)
+        fileSize = try handle.seekToEnd()
+        try handle.seek(toOffset: 0)
     }
 
     deinit {
@@ -171,22 +171,6 @@ private final class GGUFMetadataReader {
             trainingContextLength: trainingContextLength,
             nextNPredictLayers: nextNPredictLayers
         )
-    }
-
-    private static func int64Size(from value: Any?) -> UInt64 {
-        if let number = value as? NSNumber {
-            return max(0, number.int64Value).magnitude
-        }
-        if let value = value as? Int64 {
-            return max(0, value).magnitude
-        }
-        if let value = value as? UInt64 {
-            return value
-        }
-        if let value = value as? Int {
-            return UInt64(max(0, value))
-        }
-        return 0
     }
 
     private func readIntegerValue(type: GGUFValueType) throws -> Int64? {

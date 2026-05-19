@@ -15,7 +15,6 @@ enum CLLMDemoMetadata {
     static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
     static let accelerationPolicyDefaultsKey = "CLLMDemo.accelerationPolicy"
     static let mtpMaxDraftTokensDefaultsKey = "CLLMDemo.mtpMaxDraftTokens"
-    static let allowUnsafeMTPDraftWidthsDefaultsKey = "CLLMDemo.allowUnsafeMTPDraftWidths"
     static let defaultMTPMaxDraftTokens = 3
 }
 
@@ -148,7 +147,6 @@ final class DemoState {
     var thinkingBudgetText = ""
     var maxOutputTokensText = ""
     var mtpMaxDraftTokensText: String
-    var allowUnsafeMTPDraftWidths: Bool
     var accelerationPolicy: LLMAccelerationPolicy
     var runMode: DemoRunMode = .plain
     var enableLoadWebpageTool = true
@@ -179,15 +177,11 @@ final class DemoState {
         let savedMTPMaxDraftTokens = UserDefaults.standard
             .object(forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey) as? Int
             ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
-        let savedAllowUnsafeMTPDraftWidths = UserDefaults.standard
-            .bool(forKey: CLLMDemoMetadata.allowUnsafeMTPDraftWidthsDefaultsKey)
         mtpMaxDraftTokensText = String(savedMTPMaxDraftTokens)
-        allowUnsafeMTPDraftWidths = savedAllowUnsafeMTPDraftWidths
         accelerationPolicy = savedAccelerationPolicy
         engine = Self.makeEngine(
             accelerationPolicy: savedAccelerationPolicy,
-            mtpMaxDraftTokens: savedMTPMaxDraftTokens,
-            allowUnsafeMTPDraftWidths: savedAllowUnsafeMTPDraftWidths
+            mtpMaxDraftTokens: savedMTPMaxDraftTokens
         )
 
         let root = ModelStorage.modelsDirectory(appSupportFolderName: CLLMDemoMetadata.appSupportFolderName)
@@ -459,26 +453,22 @@ final class DemoState {
 
     private static func makeEngine(
         accelerationPolicy: LLMAccelerationPolicy,
-        mtpMaxDraftTokens: Int,
-        allowUnsafeMTPDraftWidths: Bool
+        mtpMaxDraftTokens: Int
     ) -> LocalLLMEngine {
         LocalLLMEngine(configuration: engineConfiguration(
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: mtpMaxDraftTokens,
-            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
+            mtpMaxDraftTokens: mtpMaxDraftTokens
         ))
     }
 
     private static func engineConfiguration(
         accelerationPolicy: LLMAccelerationPolicy,
-        mtpMaxDraftTokens: Int,
-        allowUnsafeMTPDraftWidths: Bool
+        mtpMaxDraftTokens: Int
     ) -> LocalLLMEngineConfiguration {
         LocalLLMEngineConfiguration(
             heartbeatInterval: 0.5,
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: mtpMaxDraftTokens,
-            allowsUnsafeMTPDraftWidthsForDebugging: allowUnsafeMTPDraftWidths
+            mtpMaxDraftTokens: mtpMaxDraftTokens
         )
     }
 
@@ -633,8 +623,7 @@ final class DemoState {
         let oldEngine = engine
         engine = Self.makeEngine(
             accelerationPolicy: newPolicy,
-            mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
-            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
+            mtpMaxDraftTokens: parsedMTPMaxDraftTokens
         )
         Task {
             await oldEngine.unload()
@@ -654,28 +643,7 @@ final class DemoState {
         let oldEngine = engine
         engine = Self.makeEngine(
             accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: maxDraftTokens,
-            allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
-        )
-        Task {
-            await oldEngine.unload()
-        }
-    }
-
-    func setAllowUnsafeMTPDraftWidths(_ value: Bool) {
-        guard !isRunning else { return }
-        guard allowUnsafeMTPDraftWidths != value else { return }
-
-        allowUnsafeMTPDraftWidths = value
-        UserDefaults.standard.set(value, forKey: CLLMDemoMetadata.allowUnsafeMTPDraftWidthsDefaultsKey)
-        loadedInfo = nil
-        errorMessage = nil
-
-        let oldEngine = engine
-        engine = Self.makeEngine(
-            accelerationPolicy: accelerationPolicy,
-            mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
-            allowUnsafeMTPDraftWidths: value
+            mtpMaxDraftTokens: maxDraftTokens
         )
         Task {
             await oldEngine.unload()
@@ -778,8 +746,7 @@ final class DemoState {
                 in: library,
                 configuration: Self.engineConfiguration(
                     accelerationPolicy: accelerationPolicy,
-                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens,
-                    allowUnsafeMTPDraftWidths: allowUnsafeMTPDraftWidths
+                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens
                 )
             ) else {
                 normalizeSelection()
@@ -802,7 +769,6 @@ final class DemoState {
             appendEvent("mtp-support: \(loaded.supportsMTPAcceleration ? "yes" : "no")")
             appendEvent("mtp-policy: \(accelerationPolicy.rawValue)")
             appendEvent("mtp-max-draft: \(parsedMTPMaxDraftTokens)")
-            appendEvent("mtp-unsafe-draft-widths: \(allowUnsafeMTPDraftWidths ? "yes" : "no")")
 
             let options = generationOptions(for: loaded)
             appendGenerationOptionsEvent(options: options, loaded: loaded)

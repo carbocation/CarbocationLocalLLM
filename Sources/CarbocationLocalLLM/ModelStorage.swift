@@ -77,7 +77,54 @@ public enum ModelStorage {
             .appendingPathComponent("Models", isDirectory: true)
     }
 
+    public static func huggingFaceHubCacheDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        #if os(macOS)
+        if let hubCache = nonEmptyEnvironmentValue("HF_HUB_CACHE", in: environment) {
+            return URL(fileURLWithPath: hubCache, isDirectory: true).standardizedFileURL
+        }
+
+        if let hfHome = nonEmptyEnvironmentValue("HF_HOME", in: environment) {
+            return URL(fileURLWithPath: hfHome, isDirectory: true)
+                .appendingPathComponent("hub", isDirectory: true)
+                .standardizedFileURL
+        }
+
+        let cacheRoot: URL
+        if let xdgCacheHome = nonEmptyEnvironmentValue("XDG_CACHE_HOME", in: environment) {
+            cacheRoot = URL(fileURLWithPath: xdgCacheHome, isDirectory: true)
+        } else {
+            cacheRoot = fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cache", isDirectory: true)
+        }
+
+        return cacheRoot
+            .appendingPathComponent("huggingface", isDirectory: true)
+            .appendingPathComponent("hub", isDirectory: true)
+            .standardizedFileURL
+        #else
+        _ = environment
+        _ = fileManager
+        return nil
+        #endif
+    }
+
     private static func defaultSharedGroupRoot(identifier: String, fileManager: FileManager) -> URL? {
         fileManager.containerURL(forSecurityApplicationGroupIdentifier: identifier)
+    }
+
+    private static func nonEmptyEnvironmentValue(
+        _ key: String,
+        in environment: [String: String]
+    ) -> String? {
+        environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
