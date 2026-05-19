@@ -143,6 +143,7 @@ final class DemoState {
     var minPText = ""
     var presencePenaltyText = ""
     var repetitionPenaltyText = ""
+    var seedText = ""
     var enableThinking = false
     var thinkingBudgetText = ""
     var maxOutputTokensText = ""
@@ -400,6 +401,7 @@ final class DemoState {
                 upperBound: nil
             )
             ?? validatePositiveDouble(repetitionPenaltyText, name: "Repetition penalty")
+            ?? validateSeed(seedText)
     }
 
     private var parsedTemperature: Double? {
@@ -424,6 +426,15 @@ final class DemoState {
 
     private var parsedRepetitionPenalty: Double? {
         parsedDouble(repetitionPenaltyText)
+    }
+
+    private var parsedSeed: UInt32? {
+        let trimmed = seedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let value = UInt64(trimmed),
+              value <= UInt64(UInt32.max)
+        else { return nil }
+        return UInt32(value)
     }
 
     private var parsedThinkingBudgetTokens: Int? {
@@ -536,6 +547,15 @@ final class DemoState {
         return nil
     }
 
+    private func validateSeed(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = UInt64(trimmed), value <= UInt64(UInt32.max) else {
+            return "Seed must be blank or an integer from 0 through \(UInt32.max)."
+        }
+        return nil
+    }
+
     private func applySamplingDefaults(_ defaults: LLMSamplingDefaults) {
         temperatureText = Self.formatSamplingValue(defaults.temperature)
         topPText = Self.formatSamplingValue(defaults.topP)
@@ -543,6 +563,7 @@ final class DemoState {
         minPText = Self.formatSamplingValue(defaults.minP)
         presencePenaltyText = Self.formatSamplingValue(defaults.presencePenalty)
         repetitionPenaltyText = Self.formatSamplingValue(defaults.repetitionPenalty)
+        seedText = defaults.seed.map(String.init) ?? ""
     }
 
     private func resolvedSamplingDefaultsForSelectedModel() -> LLMSamplingDefaults {
@@ -868,6 +889,7 @@ final class DemoState {
             presencePenalty: parsedPresencePenalty,
             repetitionPenalty: parsedRepetitionPenalty,
             maxOutputTokens: parsedMaxOutputTokens,
+            seed: parsedSeed,
             stopAtBalancedJSON: false,
             enableThinking: enableThinking,
             thinkingBudgetTokens: parsedThinkingBudgetTokens,
@@ -924,9 +946,10 @@ final class DemoState {
         let minP = options.minP.map { String(describing: $0) } ?? "provider"
         let presencePenalty = options.presencePenalty.map { String(describing: $0) } ?? "provider"
         let repetitionPenalty = options.repetitionPenalty.map { String(describing: $0) } ?? "provider"
+        let seed = options.seed.map(String.init) ?? "random"
         appendEvent(
             "sampling: temp=\(temperature) top-p=\(topP) top-k=\(topK) "
-                + "min-p=\(minP) presence=\(presencePenalty) repetition=\(repetitionPenalty)"
+                + "min-p=\(minP) presence=\(presencePenalty) repetition=\(repetitionPenalty) seed=\(seed)"
         )
         appendEvent("max-output: \(options.maxOutputTokens.map(String.init) ?? "context")")
 

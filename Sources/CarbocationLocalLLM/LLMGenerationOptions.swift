@@ -38,6 +38,7 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
     public var minP: Double?
     public var presencePenalty: Double?
     public var repetitionPenalty: Double?
+    public var seed: UInt32?
 
     public init(
         temperature: Double? = nil,
@@ -45,7 +46,8 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
         topK: Int? = nil,
         minP: Double? = nil,
         presencePenalty: Double? = nil,
-        repetitionPenalty: Double? = nil
+        repetitionPenalty: Double? = nil,
+        seed: UInt32? = nil
     ) {
         self.temperature = temperature
         self.topP = topP
@@ -53,6 +55,7 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
         self.minP = minP
         self.presencePenalty = presencePenalty
         self.repetitionPenalty = repetitionPenalty
+        self.seed = seed
     }
 
     public static let providerDefault = LLMSamplingDefaults()
@@ -66,7 +69,8 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
             topK: override.topK ?? topK,
             minP: override.minP ?? minP,
             presencePenalty: override.presencePenalty ?? presencePenalty,
-            repetitionPenalty: override.repetitionPenalty ?? repetitionPenalty
+            repetitionPenalty: override.repetitionPenalty ?? repetitionPenalty,
+            seed: override.seed ?? seed
         )
     }
 
@@ -89,6 +93,9 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
         }
         if copy.repetitionPenalty == nil {
             copy.repetitionPenalty = repetitionPenalty
+        }
+        if copy.seed == nil {
+            copy.seed = seed
         }
         return copy
     }
@@ -359,6 +366,7 @@ public struct GenerationOptionsPreferenceKeys: Sendable {
     public var minP: String
     public var presencePenalty: String
     public var repetitionPenalty: String
+    public var seed: String
 
     public init(
         mode: String = "llama.optionsMode",
@@ -367,7 +375,8 @@ public struct GenerationOptionsPreferenceKeys: Sendable {
         topK: String = "llama.topK",
         minP: String = "llama.minP",
         presencePenalty: String = "llama.presencePenalty",
-        repetitionPenalty: String = "llama.repetitionPenalty"
+        repetitionPenalty: String = "llama.repetitionPenalty",
+        seed: String = "llama.seed"
     ) {
         self.mode = mode
         self.temperature = temperature
@@ -376,6 +385,7 @@ public struct GenerationOptionsPreferenceKeys: Sendable {
         self.minP = minP
         self.presencePenalty = presencePenalty
         self.repetitionPenalty = repetitionPenalty
+        self.seed = seed
     }
 }
 
@@ -401,7 +411,33 @@ public enum GenerationOptionsResolver {
                 : defaults.double(forKey: keys.presencePenalty),
             repetitionPenalty: defaults.object(forKey: keys.repetitionPenalty) == nil
                 ? nil
-                : defaults.double(forKey: keys.repetitionPenalty)
+                : defaults.double(forKey: keys.repetitionPenalty),
+            seed: seedValue(from: defaults, key: keys.seed)
         )
+    }
+
+    private static func seedValue(from defaults: UserDefaults, key: String) -> UInt32? {
+        guard let object = defaults.object(forKey: key) else { return nil }
+
+        if let text = object as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let value = UInt64(trimmed),
+                  value <= UInt64(UInt32.max)
+            else { return nil }
+            return UInt32(value)
+        }
+
+        if let number = object as? NSNumber {
+            let value = number.doubleValue
+            guard value.isFinite,
+                  value.rounded(.towardZero) == value,
+                  value >= 0,
+                  value <= Double(UInt32.max)
+            else { return nil }
+            return UInt32(value)
+        }
+
+        return nil
     }
 }

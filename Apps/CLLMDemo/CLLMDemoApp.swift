@@ -277,6 +277,7 @@ private struct PromptPane: View {
             samplingRow("Min P", text: $state.minPText)
             samplingRow("Presence penalty", text: $state.presencePenaltyText)
             samplingRow("Repetition penalty", text: $state.repetitionPenaltyText)
+            samplingRow("Seed", text: $state.seedText, placeholder: "Random", integerOnly: true)
 
             if let message = state.generationOptionsValidationMessage {
                 Text(message)
@@ -291,13 +292,14 @@ private struct PromptPane: View {
     private func samplingRow(
         _ title: String,
         text: Binding<String>,
+        placeholder: String = "Default",
         integerOnly: Bool = false
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(title)
                 .frame(width: 128, alignment: .leading)
 
-            TextField("Default", text: text)
+            TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .demoSamplingInput(integerOnly: integerOnly)
                 .disabled(state.isRunning)

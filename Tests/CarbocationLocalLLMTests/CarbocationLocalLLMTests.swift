@@ -374,6 +374,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         defaults.set(0.05, forKey: "llama.minP")
         defaults.set(1.5, forKey: "llama.presencePenalty")
         defaults.set(1.0, forKey: "llama.repetitionPenalty")
+        defaults.set("1234", forKey: "llama.seed")
 
         let options = GenerationOptionsResolver.configuredExtractionOptions(defaults: defaults)
         XCTAssertEqual(options.temperature, 0.2)
@@ -382,6 +383,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(options.minP, 0.05)
         XCTAssertEqual(options.presencePenalty, 1.5)
         XCTAssertEqual(options.repetitionPenalty, 1.0)
+        XCTAssertEqual(options.seed, 1234)
     }
 
     func testSamplingDefaultsMergeOverridesOnlySpecifiedFields() {
@@ -391,13 +393,15 @@ final class CarbocationLocalLLMTests: XCTestCase {
             topK: 40,
             minP: 0.05,
             presencePenalty: 0,
-            repetitionPenalty: 1.3
+            repetitionPenalty: 1.3,
+            seed: 123
         )
         let override = LLMSamplingDefaults(
             temperature: 0.7,
             topK: 20,
             minP: 0,
-            repetitionPenalty: 1.0
+            repetitionPenalty: 1.0,
+            seed: 456
         )
 
         let merged = base.merged(with: override)
@@ -408,6 +412,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(merged.minP, 0)
         XCTAssertEqual(merged.presencePenalty, 0)
         XCTAssertEqual(merged.repetitionPenalty, 1.0)
+        XCTAssertEqual(merged.seed, 456)
     }
 
     func testSamplingDefaultsResolverLayersGlobalCuratedAppAndRequestOptions() {
@@ -524,7 +529,8 @@ final class CarbocationLocalLLMTests: XCTestCase {
             topK: 20,
             minP: 0,
             presencePenalty: 1.5,
-            repetitionPenalty: 1.0
+            repetitionPenalty: 1.0,
+            seed: 1234
         )
 
         let data = try JSONEncoder().encode(options)
@@ -536,6 +542,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(decoded.minP, 0)
         XCTAssertEqual(decoded.presencePenalty, 1.5)
         XCTAssertEqual(decoded.repetitionPenalty, 1.0)
+        XCTAssertEqual(decoded.seed, 1234)
     }
 
     func testGenerationOptionsThinkingBudgetRoundTrips() throws {
