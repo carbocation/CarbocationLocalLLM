@@ -131,7 +131,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     }
 }
 
-public actor LlamaEngine: LLMEngine {
+public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedGenerationProvider {
     public static let shared = LlamaEngine()
 
     struct PromptPrefillPlan: Equatable {
@@ -851,6 +851,51 @@ public actor LlamaEngine: LLMEngine {
         )
     }
 
+    public func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        guard context != nil, vocabulary != nil, loadedInfo != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        beginGenerationLease()
+        defer { endGenerationLease() }
+        let controlGenerationID = control?.beginGeneration()
+        defer {
+            if let controlGenerationID {
+                control?.finishGeneration(controlGenerationID)
+            }
+        }
+
+        let promptFormatting: PromptFormattingResult
+        do {
+            promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
+        } catch let error as LLMEngineError {
+            if case .chatTemplateUnavailable = error {
+                onEvent(.requestSent(phase: .unknown))
+                onEvent(.generationStats(
+                    promptTokens: 0,
+                    generatedTokens: 0,
+                    stopReason: "template-unavailable",
+                    templateMode: .unavailable,
+                    phase: .unknown
+                ))
+            }
+            throw error
+        }
+        return try await generatePhased(
+            promptFormatting: promptFormatting,
+            options: options,
+            control: control,
+            controlGenerationID: controlGenerationID,
+            onEvent: onEvent
+        )
+    }
+
     func generate(
         promptFormatting: PromptFormattingResult,
         options: GenerationOptions,
@@ -858,8 +903,33 @@ public actor LlamaEngine: LLMEngine {
         controlGenerationID: UInt64? = nil,
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void
     ) async throws -> String {
+        let result = try await generatePhased(
+            promptFormatting: promptFormatting,
+            options: options,
+            control: control,
+            controlGenerationID: controlGenerationID,
+            onEvent: { event in
+                if let phaseAwareEvent = event.phaseAwareEvent {
+                    onPhaseAwareEvent(phaseAwareEvent)
+                }
+            }
+        )
+        return result.finalText
+    }
+
+    func generatePhased(
+        promptFormatting: PromptFormattingResult,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        controlGenerationID: UInt64? = nil,
+        onEvent: @Sendable (LLMGenerationStreamEvent) -> Void
+    ) async throws -> LLMGenerationResult {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
+        }
+
+        func onPhaseAwareEvent(_ event: LLMPhaseAwareStreamEvent) {
+            onEvent(LLMGenerationStreamEvent(adapting: event))
         }
 
         var currentPhase = LLMStreamContentPhase.unknown
@@ -1024,10 +1094,35 @@ public actor LlamaEngine: LLMEngine {
         }
 
         var lastHeartbeat = Date()
+        var streamedThinkingText = ""
         var streamedFinalAnswer = ""
         var structuredPhase = structuredOutputPlan.map {
             Self.structuredOutputPhase(in: accumulatedText, plan: $0)
         }
+        func emitThinking(_ nextThinkingText: String, snapshotReason: LLMGenerationContentSnapshotReason) {
+            guard nextThinkingText != streamedThinkingText else { return }
+
+            if nextThinkingText.hasPrefix(streamedThinkingText) {
+                let delta = String(nextThinkingText.dropFirst(streamedThinkingText.count))
+                if !delta.isEmpty {
+                    onEvent(.contentDelta(
+                        phase: .thinking,
+                        text: delta,
+                        bytesSoFar: nextThinkingText.utf8.count
+                    ))
+                }
+            } else {
+                onEvent(.contentSnapshot(
+                    phase: .thinking,
+                    text: nextThinkingText,
+                    bytesSoFar: nextThinkingText.utf8.count,
+                    reason: snapshotReason
+                ))
+            }
+
+            streamedThinkingText = nextThinkingText
+        }
+
         func emitFinalAnswer(_ nextFinalAnswer: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
             guard nextFinalAnswer != streamedFinalAnswer else { return }
 
@@ -1064,6 +1159,11 @@ public actor LlamaEngine: LLMEngine {
             else { return }
 
             emitFinalAnswer(nextFinalAnswer, snapshotReason: .streamCorrection)
+        }
+
+        func emitThinkingProgressIfNeeded() {
+            let snapshot = Self.phasedGeneratedText(accumulatedText, plan: streamPhasePlan)
+            emitThinking(snapshot.thinkingText, snapshotReason: .streamCorrection)
         }
 
         let contextMaxNew = Self.maxGenerationTokens(
@@ -1180,6 +1280,7 @@ public actor LlamaEngine: LLMEngine {
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
+                    emitThinkingProgressIfNeeded()
                     emitFinalAnswerProgressIfNeeded()
                     if stopReason == "json-complete", structuredOutputPlan != nil {
                         structuredPhase = .complete
@@ -1193,6 +1294,7 @@ public actor LlamaEngine: LLMEngine {
             let now = Date()
             if now.timeIntervalSince(lastHeartbeat) >= configuration.heartbeatInterval {
                 lastHeartbeat = now
+                emitThinkingProgressIfNeeded()
                 emitFinalAnswerProgressIfNeeded()
                 onPhaseAwareEvent(.tokenChunk(
                     preview: String(accumulatedText.suffix(60)),
@@ -1504,6 +1606,12 @@ public actor LlamaEngine: LLMEngine {
             accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
         }
 
+        updatePhase(Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
+        if stopReason == "max-tokens", currentPhase == .thinking {
+            stopReason = "thinking-not-closed"
+        }
+        let shouldReturnIncompleteThinking = stopReason == "thinking-not-closed"
+
         if let plan = structuredOutputPlan {
             let finalPhase = structuredPhase ?? Self.structuredOutputPhase(in: accumulatedText, plan: plan)
             if finalPhase == .thinking || finalPhase == .awaitingFinal {
@@ -1513,30 +1621,39 @@ public actor LlamaEngine: LLMEngine {
                 llamaRuntimeLog.error(
                     "Structured output phase failed before sanitization: phase=\(finalPhase.rawValue, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
                 )
-                throw LLMEngineError.structuredOutputPhaseFailed(
-                    "Generation ended before final structured output began."
-                )
+                if !(shouldReturnIncompleteThinking && finalPhase == .thinking) {
+                    throw LLMEngineError.structuredOutputPhaseFailed(
+                        "Generation ended before final structured output began."
+                    )
+                }
             }
         }
 
+        let phasedText = Self.phasedGeneratedText(accumulatedText, plan: streamPhasePlan)
         let returnedText: String
-        do {
-            returnedText = try Self.sanitizedGeneratedText(
-                accumulatedText,
-                profile: activeOutputProfile,
-                continuingOpenThinkingPairs: continuingOpenThinkingPairs,
-                requiresNonEmptyStructuredOutput: options.grammar != nil && !activeOutputProfile.isEmpty
-            )
-        } catch let error as LLMEngineError {
-            if case .structuredOutputPhaseFailed = error {
-                stopReason = "structured-sanitization-empty"
-                llamaRuntimeLog.error(
-                    "Structured output sanitization failed: rawBytes=\(accumulatedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+        if stopReason == "thinking-not-closed" {
+            returnedText = phasedText.finalText
+        } else {
+            do {
+                returnedText = try Self.sanitizedGeneratedText(
+                    accumulatedText,
+                    profile: activeOutputProfile,
+                    continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+                    requiresNonEmptyStructuredOutput: options.grammar != nil && !activeOutputProfile.isEmpty
                 )
+            } catch let error as LLMEngineError {
+                if case .structuredOutputPhaseFailed = error {
+                    stopReason = "structured-sanitization-empty"
+                    llamaRuntimeLog.error(
+                        "Structured output sanitization failed: rawBytes=\(accumulatedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+                    )
+                }
+                throw error
             }
-            throw error
         }
 
+        let resultPhases = phasedText.replacingPhaseText(.final, with: returnedText)
+        emitThinking(resultPhases.thinkingText, snapshotReason: .completed)
         emitFinalAnswer(returnedText, snapshotReason: .completed)
 
         llamaRuntimeLog.info(
@@ -1559,7 +1676,13 @@ public actor LlamaEngine: LLMEngine {
             duration: Date().timeIntervalSince(startedAt),
             phase: currentPhase
         ))
-        return returnedText
+        return resultPhases.generationResult(
+            stopReason: stopReason,
+            promptTokens: promptTokens.count,
+            generatedTokens: generatedTokenCount,
+            templateMode: templateMode,
+            accelerationStats: accelerationStats
+        )
     }
 
 }

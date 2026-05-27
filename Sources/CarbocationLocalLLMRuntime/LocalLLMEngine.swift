@@ -140,7 +140,7 @@ public enum LocalLLMEngineError: Error, LocalizedError, Sendable {
     }
 }
 
-public actor LocalLLMEngine: LLMEngine {
+public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedGenerationProvider {
     public static let shared = LocalLLMEngine()
 
     private let llamaEngine: LlamaEngine
@@ -486,6 +486,41 @@ public actor LocalLLMEngine: LLMEngine {
         }
     }
 
+    public func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.generatePhased(
+                system: system,
+                prompt: prompt,
+                options: options,
+                control: control,
+                onEvent: onEvent
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.generatePhased(
+                    system: system,
+                    prompt: prompt,
+                    options: options,
+                    control: control,
+                    onEvent: onEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
     public func generateWithTools(
         _ request: LLMToolGenerationRequest,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
@@ -519,6 +554,35 @@ public actor LocalLLMEngine: LLMEngine {
                     request,
                     control: control,
                     onPhaseAwareEvent: onPhaseAwareEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolPhasedGenerationResult {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.generateWithToolsPhased(
+                request,
+                control: control,
+                onEvent: onEvent
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.generateWithToolsPhased(
+                    request,
+                    control: control,
+                    onEvent: onEvent
                 )
             } catch {
                 throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
@@ -742,6 +806,53 @@ public actor LocalLLMSession {
                     options: options,
                     control: control,
                     onPhaseAwareEvent: onPhaseAwareEvent
+                )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func generatePhased(
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            guard let llamaEngine else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            return try await llamaEngine.generatePhased(
+                system: system,
+                prompt: prompt,
+                options: options,
+                control: control,
+                onEvent: onEvent
+            )
+        case .system(.appleIntelligence):
+            guard let appleIntelligenceSession else {
+                throw LocalLLMEngineError.noSelectionLoaded
+            }
+            do {
+                let finalText = try await appleIntelligenceSession.generate(
+                    prompt: prompt,
+                    options: options,
+                    control: control,
+                    onPhaseAwareEvent: { event in
+                        onEvent(LLMGenerationStreamEvent(adapting: event))
+                    }
+                )
+                return LLMGenerationResult(
+                    finalText: finalText,
+                    phaseSegments: finalText.isEmpty
+                        ? []
+                        : [LLMGenerationPhaseSegment(phase: .final, text: finalText)]
                 )
             } catch {
                 throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)

@@ -272,6 +272,33 @@ public struct LLMToolGenerationResult: Codable, Hashable, Sendable {
     }
 }
 
+public struct LLMToolPhasedGenerationResult: Codable, Hashable, Sendable {
+    public var generation: LLMGenerationResult
+    public var toolCalls: [LLMToolCall]
+    public var toolOutputs: [LLMToolOutput]
+    public var roundsCompleted: Int
+    public var stopReason: String
+
+    public var thinkingText: String { generation.thinkingText }
+    public var finalText: String { generation.finalText }
+    public var phaseSegments: [LLMGenerationPhaseSegment] { generation.phaseSegments }
+    public var rawGeneratedText: String? { generation.rawGeneratedText }
+
+    public init(
+        generation: LLMGenerationResult,
+        toolCalls: [LLMToolCall] = [],
+        toolOutputs: [LLMToolOutput] = [],
+        roundsCompleted: Int = 0,
+        stopReason: String? = nil
+    ) {
+        self.generation = generation
+        self.toolCalls = toolCalls
+        self.toolOutputs = toolOutputs
+        self.roundsCompleted = roundsCompleted
+        self.stopReason = stopReason ?? generation.stopReason
+    }
+}
+
 public enum LLMToolPhaseAwareStreamEvent: Sendable {
     /// Phase-aware events for user-visible assistant output. Apps can render final-answer deltas and snapshots from this event.
     case finalAnswerEvent(LLMPhaseAwareStreamEvent)
@@ -281,6 +308,106 @@ public enum LLMToolPhaseAwareStreamEvent: Sendable {
     case toolCallFailed(LLMToolOutput)
     case aggregateGenerationStats(promptTokens: Int, generatedTokens: Int, stopReason: String)
     case aggregateAccelerationStats(LLMGenerationAccelerationStats)
+}
+
+public enum LLMToolPhasedStreamEvent: Sendable {
+    /// Phased assistant content. Apps can render thinking and final text from this event.
+    case generationEvent(LLMGenerationStreamEvent)
+    case toolRoundStarted(round: Int)
+    case toolCallStarted(LLMToolCall)
+    case toolCallCompleted(LLMToolOutput)
+    case toolCallFailed(LLMToolOutput)
+    case aggregateGenerationStats(promptTokens: Int, generatedTokens: Int, stopReason: String)
+    case aggregateAccelerationStats(LLMGenerationAccelerationStats)
+}
+
+public protocol LLMToolPhasedGenerationProvider: LLMEngine {
+    func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void
+    ) async throws -> LLMToolPhasedGenerationResult
+}
+
+extension LLMToolPhasedGenerationProvider {
+    public func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolPhasedGenerationResult {
+        try await generateWithToolsPhased(
+            request,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+}
+
+extension LLMEngine {
+    public func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolPhasedGenerationResult {
+        try await generateWithToolsPhased(
+            request,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolPhasedGenerationResult {
+        if let provider = self as? any LLMToolPhasedGenerationProvider {
+            return try await provider.generateWithToolsPhased(
+                request,
+                control: control,
+                onEvent: onEvent
+            )
+        }
+
+        let accumulator = LLMGenerationResultAccumulator()
+        let result = try await generateWithTools(
+            request,
+            control: control,
+            onPhaseAwareEvent: { event in
+                switch event {
+                case .finalAnswerEvent(let phaseEvent):
+                    let generationEvent = LLMGenerationStreamEvent(adapting: phaseEvent)
+                    accumulator.record(generationEvent)
+                    onEvent(.generationEvent(generationEvent))
+                case .toolRoundStarted(let round):
+                    onEvent(.toolRoundStarted(round: round))
+                case .toolCallStarted(let call):
+                    onEvent(.toolCallStarted(call))
+                case .toolCallCompleted(let output):
+                    onEvent(.toolCallCompleted(output))
+                case .toolCallFailed(let output):
+                    onEvent(.toolCallFailed(output))
+                case .aggregateGenerationStats(let promptTokens, let generatedTokens, let stopReason):
+                    onEvent(.aggregateGenerationStats(
+                        promptTokens: promptTokens,
+                        generatedTokens: generatedTokens,
+                        stopReason: stopReason
+                    ))
+                case .aggregateAccelerationStats(let stats):
+                    onEvent(.aggregateAccelerationStats(stats))
+                }
+            }
+        )
+        let generation = accumulator.result(
+            fallbackFinalText: result.finalText,
+            fallbackStopReason: result.stopReason
+        )
+        return LLMToolPhasedGenerationResult(
+            generation: generation,
+            toolCalls: result.toolCalls,
+            toolOutputs: result.toolOutputs,
+            roundsCompleted: result.roundsCompleted,
+            stopReason: result.stopReason
+        )
+    }
 }
 
 public enum LLMToolError: Error, LocalizedError, Sendable, Equatable {

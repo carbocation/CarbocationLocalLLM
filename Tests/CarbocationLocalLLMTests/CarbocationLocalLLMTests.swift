@@ -1577,6 +1577,103 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(totalBytes, 6)
     }
 
+    func testGenerationStreamEventMapsFinalContentToPhaseAwareEvents() {
+        let generationEvents: [LLMGenerationStreamEvent] = [
+            .contentDelta(phase: .thinking, text: "draft", bytesSoFar: 5),
+            .contentDelta(phase: .final, text: "answer", bytesSoFar: 6),
+            .contentSnapshot(
+                phase: .thinking,
+                text: "revised draft",
+                bytesSoFar: 13,
+                reason: .streamCorrection
+            ),
+            .contentSnapshot(
+                phase: .final,
+                text: "final answer",
+                bytesSoFar: 12,
+                reason: .completed
+            )
+        ]
+
+        let mapped = generationEvents.compactMap(\.phaseAwareEvent)
+
+        XCTAssertEqual(mapped.count, 2)
+        guard case .finalAnswerDelta(let delta, let deltaBytes) = mapped[0] else {
+            return XCTFail("Expected final delta.")
+        }
+        XCTAssertEqual(delta, "answer")
+        XCTAssertEqual(deltaBytes, 6)
+        guard case .finalAnswerSnapshot(let snapshot, let snapshotBytes, let reason) = mapped[1] else {
+            return XCTFail("Expected final snapshot.")
+        }
+        XCTAssertEqual(snapshot, "final answer")
+        XCTAssertEqual(snapshotBytes, 12)
+        XCTAssertEqual(reason, .completed)
+    }
+
+    func testGenerationResultAccumulatorAppliesDeltaAndSnapshotSemanticsPerPhase() {
+        let accumulator = LLMGenerationResultAccumulator()
+
+        accumulator.record(.contentDelta(phase: .thinking, text: "draft", bytesSoFar: 5))
+        accumulator.record(.contentDelta(phase: .final, text: "ans", bytesSoFar: 3))
+        accumulator.record(.contentDelta(phase: .final, text: "wer", bytesSoFar: 6))
+        accumulator.record(.contentSnapshot(
+            phase: .thinking,
+            text: "revised draft",
+            bytesSoFar: 13,
+            reason: .streamCorrection
+        ))
+        accumulator.record(.contentSnapshot(
+            phase: .final,
+            text: "final answer",
+            bytesSoFar: 12,
+            reason: .completed
+        ))
+        accumulator.record(.generationStats(
+            promptTokens: 2,
+            generatedTokens: 4,
+            stopReason: "complete",
+            templateMode: .embedded,
+            phase: .final
+        ))
+
+        let result = accumulator.result()
+
+        XCTAssertEqual(result.thinkingText, "revised draft")
+        XCTAssertEqual(result.finalText, "final answer")
+        XCTAssertEqual(result.stopReason, "complete")
+        XCTAssertEqual(result.promptTokens, 2)
+        XCTAssertEqual(result.generatedTokens, 4)
+        XCTAssertEqual(result.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "revised draft"),
+            LLMGenerationPhaseSegment(phase: .final, text: "final answer")
+        ])
+    }
+
+    func testGenerationResultAccumulatorPreservesOrderedSegmentsAcrossPhaseReentry() {
+        let accumulator = LLMGenerationResultAccumulator()
+
+        accumulator.record(.contentDelta(phase: .thinking, text: "draft", bytesSoFar: 5))
+        accumulator.record(.contentDelta(phase: .final, text: "answer", bytesSoFar: 6))
+        accumulator.record(.contentDelta(phase: .thinking, text: " revised", bytesSoFar: 13))
+        accumulator.record(.contentSnapshot(
+            phase: .thinking,
+            text: "draft revised",
+            bytesSoFar: 13,
+            reason: .streamCorrection
+        ))
+
+        let result = accumulator.result()
+
+        XCTAssertEqual(result.thinkingText, "draft revised")
+        XCTAssertEqual(result.finalText, "answer")
+        XCTAssertEqual(result.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "draft"),
+            LLMGenerationPhaseSegment(phase: .final, text: "answer"),
+            LLMGenerationPhaseSegment(phase: .thinking, text: " revised")
+        ])
+    }
+
     func testGenerationAccelerationStatsAcceptanceRate() {
         let active = LLMGenerationAccelerationStats(
             status: .active,

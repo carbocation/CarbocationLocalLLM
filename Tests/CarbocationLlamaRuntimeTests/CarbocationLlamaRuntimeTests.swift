@@ -1028,6 +1028,248 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testPhasedGeneratedTextStripsThinkingDelimiters() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "<think>private notes</think>visible answer",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "private notes")
+        XCTAssertEqual(phased.finalText, "visible answer")
+        XCTAssertEqual(phased.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "private notes"),
+            LLMGenerationPhaseSegment(phase: .final, text: "visible answer")
+        ])
+    }
+
+    func testPhasedGeneratedTextHandlesPromptOpenThinking() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [pair],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "continued notes</think>visible answer",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "continued notes")
+        XCTAssertEqual(phased.finalText, "visible answer")
+    }
+
+    func testPhasedGeneratedTextHandlesFinalMarkerOnlyReasoning() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(
+                scrubTokens: ["[END FINAL RESPONSE]"],
+                finalMarkers: ["[BEGIN FINAL RESPONSE]"]
+            ),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "private notes[BEGIN FINAL RESPONSE]visible answer[END FINAL RESPONSE]",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "private notes")
+        XCTAssertEqual(phased.finalText, "visible answer")
+    }
+
+    func testPhasedGeneratedTextHoldsBackPartialFinalMarkerPrefix() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(
+                finalMarkers: ["<|channel|>final<|message|>"]
+            ),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "private notes<|channel|>fin",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "private notes")
+        XCTAssertEqual(phased.finalText, "")
+        XCTAssertEqual(phased.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "private notes")
+        ])
+
+        let markerOnly = LlamaEngine.phasedGeneratedText(
+            "<|channel|>fin",
+            plan: plan
+        )
+        XCTAssertEqual(markerOnly.thinkingText, "")
+        XCTAssertEqual(markerOnly.finalText, "")
+        XCTAssertEqual(markerOnly.phaseSegments, [])
+    }
+
+    func testPhasedGeneratedTextHandlesMultipleThinkingBlocks() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "<think>first</think><think>second</think>final",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "first\nsecond")
+        XCTAssertEqual(phased.finalText, "final")
+        XCTAssertEqual(phased.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "first"),
+            LLMGenerationPhaseSegment(phase: .thinking, text: "second"),
+            LLMGenerationPhaseSegment(phase: .final, text: "final")
+        ])
+    }
+
+    func testPhasedGeneratedTextKeepsLiteralThinkingTagInFinalText() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "The literal <think> tag can be discussed safely.",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "")
+        XCTAssertEqual(phased.finalText, "The literal <think> tag can be discussed safely.")
+    }
+
+    func testPhasedGeneratedTextReturnsUnclosedThinking() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+
+        let phased = LlamaEngine.phasedGeneratedText(
+            "<think>unfinished private notes",
+            plan: plan
+        )
+
+        XCTAssertEqual(phased.thinkingText, "unfinished private notes")
+        XCTAssertEqual(phased.finalText, "")
+        XCTAssertEqual(phased.rawGeneratedText, "<think>unfinished private notes")
+    }
+
+    func testPhasedGenerationTextReplacementPreservesMatchingSegmentBoundaries() {
+        let phased = LlamaEngine.PhasedGenerationText(
+            thinkingText: "private",
+            finalText: "first\nsecond",
+            phaseSegments: [
+                LLMGenerationPhaseSegment(phase: .thinking, text: "private"),
+                LLMGenerationPhaseSegment(phase: .final, text: "first"),
+                LLMGenerationPhaseSegment(phase: .thinking, text: "more private"),
+                LLMGenerationPhaseSegment(phase: .final, text: "second")
+            ],
+            rawGeneratedText: "raw"
+        )
+
+        let unchanged = phased.replacingPhaseText(.final, with: "first\nsecond")
+
+        XCTAssertEqual(unchanged.phaseSegments, phased.phaseSegments)
+
+        let replaced = phased.replacingPhaseText(.final, with: "visible first\nvisible second")
+
+        XCTAssertEqual(replaced.finalText, "visible first\nvisible second")
+        XCTAssertEqual(replaced.phaseSegments, [
+            LLMGenerationPhaseSegment(phase: .thinking, text: "private"),
+            LLMGenerationPhaseSegment(phase: .final, text: "visible first"),
+            LLMGenerationPhaseSegment(phase: .thinking, text: "more private"),
+            LLMGenerationPhaseSegment(phase: .final, text: "visible second")
+        ])
+    }
+
+    func testToolPhasedStreamSuppressesFinalWhenVisibleTextIsNilForPartialFinalMarkerPrefix() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(
+                finalMarkers: ["<|channel|>final<|message|>"]
+            ),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let recorder = ToolPhasedEventRecorder()
+        let state = LlamaToolPhasedGenerationStreamState { event in
+            recorder.append(event)
+        }
+
+        state.emit(
+            raw: "private notes<|channel|>fin",
+            plan: plan,
+            finalText: nil,
+            allowsParserDerivedFinalText: false,
+            snapshotReason: .streamCorrection
+        )
+
+        let generationEvents = recorder.generationEvents
+        XCTAssertEqual(generationEvents.contentText(for: .thinking), "private notes")
+        XCTAssertEqual(generationEvents.contentText(for: .final), "")
+
+        let result = state.result(
+            stopReason: "tool-call-complete",
+            promptTokens: 1,
+            generatedTokens: 1,
+            templateMode: .unavailable,
+            accelerationStats: nil
+        )
+        XCTAssertEqual(result.thinkingText, "private notes")
+        XCTAssertEqual(result.finalText, "")
+    }
+
+    func testToolPhasedStreamSuppressesRawToolProtocolAsFinalWhenVisibleTextIsNil() {
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let recorder = ToolPhasedEventRecorder()
+        let state = LlamaToolPhasedGenerationStreamState { event in
+            recorder.append(event)
+        }
+        let rawToolProtocol = #"<|tool_call>call:lookup {"query":"private"}<tool_call|>"#
+
+        state.emit(
+            raw: rawToolProtocol,
+            plan: plan,
+            finalText: nil,
+            allowsParserDerivedFinalText: false,
+            snapshotReason: .streamCorrection
+        )
+
+        XCTAssertEqual(recorder.generationEvents.contentText(for: .thinking), "")
+        XCTAssertEqual(recorder.generationEvents.contentText(for: .final), "")
+
+        let result = state.result(
+            stopReason: "tool-call-complete",
+            promptTokens: 1,
+            generatedTokens: 1,
+            templateMode: .unavailable,
+            accelerationStats: nil
+        )
+        XCTAssertEqual(result.thinkingText, "")
+        XCTAssertEqual(result.finalText, "")
+        XCTAssertEqual(result.rawGeneratedText, rawToolProtocol)
+    }
+
     func testSanitizedGeneratedTextStripsImplicitGemma4ThinkingPrefix() throws {
         let profilePair = OutputDelimiterPair(open: "<|channel>thought", close: "<channel|>")
         let implicitPair = OutputDelimiterPair(open: "", close: "<channel|>")
@@ -1871,6 +2113,41 @@ private extension CarbocationLlamaRuntimeTests {
     static var qwen35TemplateURL: URL {
         packageRoot
             .appendingPathComponent("Vendor/llama.cpp/models/templates/Qwen3.5-4B.jinja")
+    }
+}
+
+private final class ToolPhasedEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [LLMToolPhasedStreamEvent] = []
+
+    func append(_ event: LLMToolPhasedStreamEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    var generationEvents: [LLMGenerationStreamEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.compactMap { event in
+            guard case .generationEvent(let generationEvent) = event else { return nil }
+            return generationEvent
+        }
+    }
+}
+
+private extension Array where Element == LLMGenerationStreamEvent {
+    func contentText(for phase: LLMStreamContentPhase) -> String {
+        reduce(into: "") { text, event in
+            switch event {
+            case .contentDelta(let eventPhase, let delta, _) where eventPhase == phase:
+                text += delta
+            case .contentSnapshot(let eventPhase, let snapshot, _, _) where eventPhase == phase:
+                text = snapshot
+            default:
+                break
+            }
+        }
     }
 }
 

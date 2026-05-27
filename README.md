@@ -485,6 +485,39 @@ let response = try await LocalLLMEngine.shared.generate(
 
 `finalAnswerDelta` is appendable user-visible text. `finalAnswerSnapshot` is a correction event for the rare case where incremental sanitization changes previously streamed text; apps can replace their visible answer with the snapshot. `tokenChunk` remains diagnostic stream telemetry and may include thinking content.
 
+Apps that want to render or persist the thinking phase as first-class content can use the phased generation API:
+
+```swift
+let result = try await LocalLLMEngine.shared.generatePhased(
+    system: "Solve carefully, then return the final answer.",
+    prompt: userPrompt,
+    options: GenerationOptions(maxOutputTokens: 1024, enableThinking: true),
+    onEvent: { event in
+        switch event {
+        case .contentDelta(phase: .thinking, text: let text, bytesSoFar: _):
+            // Append delimiter-free thinking text.
+            _ = text
+        case .contentSnapshot(phase: .thinking, text: let text, bytesSoFar: _, reason: _):
+            // Replace the displayed thinking text for this phase.
+            _ = text
+        case .contentDelta(phase: .final, text: let text, bytesSoFar: _):
+            // Append delimiter-free final-answer text.
+            _ = text
+        case .contentSnapshot(phase: .final, text: let text, bytesSoFar: _, reason: _):
+            // Replace the displayed final-answer text for this phase.
+            _ = text
+        default:
+            break
+        }
+    }
+)
+
+let thinking = result.thinkingText
+let answer = result.finalText
+```
+
+`contentDelta` is append-only relative to the last emitted content for the same phase. `contentSnapshot` replaces the full displayed content for that phase and includes a reason such as `streamCorrection` or `completed`. `thinkingText` and `phaseSegments` are delimiter-free parsed phase text. `rawGeneratedText` is diagnostic and not required for normal chat UI.
+
 Template-derived markers are used automatically for known local GGUF formats. If an app manually puts a thinking channel in the prompt for a model with no discoverable template metadata, declare the request markers explicitly:
 
 ```swift

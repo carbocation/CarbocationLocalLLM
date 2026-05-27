@@ -142,6 +142,173 @@ public enum LLMFinalAnswerSnapshotReason: String, Codable, Sendable {
     case completed
 }
 
+public enum LLMGenerationContentSnapshotReason: String, Codable, Hashable, Sendable {
+    case streamCorrection = "stream-correction"
+    case completed
+
+    public var finalAnswerSnapshotReason: LLMFinalAnswerSnapshotReason {
+        switch self {
+        case .streamCorrection:
+            return .streamCorrection
+        case .completed:
+            return .completed
+        }
+    }
+
+    public init(_ reason: LLMFinalAnswerSnapshotReason) {
+        switch reason {
+        case .streamCorrection:
+            self = .streamCorrection
+        case .completed:
+            self = .completed
+        }
+    }
+}
+
+public struct LLMGenerationPhaseSegment: Codable, Hashable, Sendable {
+    public var phase: LLMStreamContentPhase
+    public var text: String
+
+    public init(phase: LLMStreamContentPhase, text: String) {
+        self.phase = phase
+        self.text = text
+    }
+}
+
+public struct LLMGenerationResult: Codable, Hashable, Sendable {
+    public var thinkingText: String
+    public var finalText: String
+    public var phaseSegments: [LLMGenerationPhaseSegment]
+    public var stopReason: String
+    public var promptTokens: Int
+    public var generatedTokens: Int
+    public var templateMode: LLMChatTemplateMode
+    public var accelerationStats: LLMGenerationAccelerationStats?
+    /// Diagnostic raw provider output. Apps rendering normal UI should prefer `thinkingText`, `finalText`, and `phaseSegments`.
+    public var rawGeneratedText: String?
+
+    public init(
+        thinkingText: String = "",
+        finalText: String = "",
+        phaseSegments: [LLMGenerationPhaseSegment] = [],
+        stopReason: String = "complete",
+        promptTokens: Int = 0,
+        generatedTokens: Int = 0,
+        templateMode: LLMChatTemplateMode = .unavailable,
+        accelerationStats: LLMGenerationAccelerationStats? = nil,
+        rawGeneratedText: String? = nil
+    ) {
+        self.thinkingText = thinkingText
+        self.finalText = finalText
+        self.phaseSegments = phaseSegments
+        self.stopReason = stopReason
+        self.promptTokens = promptTokens
+        self.generatedTokens = generatedTokens
+        self.templateMode = templateMode
+        self.accelerationStats = accelerationStats
+        self.rawGeneratedText = rawGeneratedText
+    }
+}
+
+public enum LLMGenerationStreamEvent: Sendable {
+    case requestSent(phase: LLMStreamContentPhase)
+    case firstByteReceived(after: TimeInterval, phase: LLMStreamContentPhase)
+    case phaseChanged(from: LLMStreamContentPhase, to: LLMStreamContentPhase)
+    case tokenChunk(preview: String, bytesSoFar: Int, phase: LLMStreamContentPhase)
+    /// Append-only text relative to the last emitted content for this same phase.
+    case contentDelta(phase: LLMStreamContentPhase, text: String, bytesSoFar: Int)
+    /// Full replacement text for the currently displayed content for this same phase.
+    case contentSnapshot(
+        phase: LLMStreamContentPhase,
+        text: String,
+        bytesSoFar: Int,
+        reason: LLMGenerationContentSnapshotReason
+    )
+    case generationStats(
+        promptTokens: Int,
+        generatedTokens: Int,
+        stopReason: String,
+        templateMode: LLMChatTemplateMode,
+        phase: LLMStreamContentPhase
+    )
+    case accelerationStats(LLMGenerationAccelerationStats)
+    case diagnostic(message: String)
+    case done(totalBytes: Int, duration: TimeInterval, phase: LLMStreamContentPhase)
+
+    public init(adapting event: LLMPhaseAwareStreamEvent) {
+        switch event {
+        case .requestSent(let phase):
+            self = .requestSent(phase: phase)
+        case .firstByteReceived(let after, let phase):
+            self = .firstByteReceived(after: after, phase: phase)
+        case .phaseChanged(let from, let to):
+            self = .phaseChanged(from: from, to: to)
+        case .tokenChunk(let preview, let bytesSoFar, let phase):
+            self = .tokenChunk(preview: preview, bytesSoFar: bytesSoFar, phase: phase)
+        case .finalAnswerDelta(let text, let bytesSoFar):
+            self = .contentDelta(phase: .final, text: text, bytesSoFar: bytesSoFar)
+        case .finalAnswerSnapshot(let text, let bytesSoFar, let reason):
+            self = .contentSnapshot(
+                phase: .final,
+                text: text,
+                bytesSoFar: bytesSoFar,
+                reason: LLMGenerationContentSnapshotReason(reason)
+            )
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
+            self = .generationStats(
+                promptTokens: promptTokens,
+                generatedTokens: generatedTokens,
+                stopReason: stopReason,
+                templateMode: templateMode,
+                phase: phase
+            )
+        case .accelerationStats(let stats):
+            self = .accelerationStats(stats)
+        case .diagnostic(let message):
+            self = .diagnostic(message: message)
+        case .done(let totalBytes, let duration, let phase):
+            self = .done(totalBytes: totalBytes, duration: duration, phase: phase)
+        }
+    }
+
+    public var phaseAwareEvent: LLMPhaseAwareStreamEvent? {
+        switch self {
+        case .requestSent(let phase):
+            return .requestSent(phase: phase)
+        case .firstByteReceived(let after, let phase):
+            return .firstByteReceived(after: after, phase: phase)
+        case .phaseChanged(let from, let to):
+            return .phaseChanged(from: from, to: to)
+        case .tokenChunk(let preview, let bytesSoFar, let phase):
+            return .tokenChunk(preview: preview, bytesSoFar: bytesSoFar, phase: phase)
+        case .contentDelta(.final, let text, let bytesSoFar):
+            return .finalAnswerDelta(text: text, bytesSoFar: bytesSoFar)
+        case .contentSnapshot(.final, let text, let bytesSoFar, let reason):
+            return .finalAnswerSnapshot(
+                text: text,
+                bytesSoFar: bytesSoFar,
+                reason: reason.finalAnswerSnapshotReason
+            )
+        case .contentDelta, .contentSnapshot:
+            return nil
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, let phase):
+            return .generationStats(
+                promptTokens: promptTokens,
+                generatedTokens: generatedTokens,
+                stopReason: stopReason,
+                templateMode: templateMode,
+                phase: phase
+            )
+        case .accelerationStats(let stats):
+            return .accelerationStats(stats)
+        case .diagnostic(let message):
+            return .diagnostic(message: message)
+        case .done(let totalBytes, let duration, let phase):
+            return .done(totalBytes: totalBytes, duration: duration, phase: phase)
+        }
+    }
+}
+
 public enum LLMPhaseAwareStreamEvent: Sendable {
     case requestSent(phase: LLMStreamContentPhase)
     case firstByteReceived(after: TimeInterval, phase: LLMStreamContentPhase)
@@ -257,6 +424,247 @@ private final class LLMToolGenerationStatsAccumulator: @unchecked Sendable {
     }
 }
 
+final class LLMGenerationResultAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var phaseTexts: [LLMStreamContentPhase: String] = [:]
+    private var phaseSegments: [LLMGenerationPhaseSegment] = []
+    private var promptTokens = 0
+    private var generatedTokens = 0
+    private var stopReason: String?
+    private var templateMode = LLMChatTemplateMode.unavailable
+    private var accelerationStats: LLMGenerationAccelerationStats?
+    private var rawGeneratedText: String?
+
+    init(rawGeneratedText: String? = nil) {
+        self.rawGeneratedText = rawGeneratedText
+    }
+
+    func record(_ event: LLMGenerationStreamEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        switch event {
+        case .contentDelta(let phase, let text, _):
+            append(text, to: phase)
+        case .contentSnapshot(let phase, let text, _, _):
+            set(text, for: phase)
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, _):
+            self.promptTokens += promptTokens
+            self.generatedTokens += generatedTokens
+            self.stopReason = stopReason
+            self.templateMode = templateMode
+        case .accelerationStats(let stats):
+            if accelerationStats == nil {
+                accelerationStats = stats
+            } else {
+                accelerationStats?.merge(stats)
+            }
+        default:
+            break
+        }
+    }
+
+    func setRawGeneratedText(_ rawGeneratedText: String?) {
+        lock.lock()
+        self.rawGeneratedText = rawGeneratedText
+        lock.unlock()
+    }
+
+    func result(
+        fallbackFinalText: String = "",
+        fallbackStopReason: String = "complete"
+    ) -> LLMGenerationResult {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let finalText = phaseTexts[.final] ?? fallbackFinalText
+        let thinkingText = phaseTexts[.thinking] ?? ""
+        var resultSegments = phaseSegments.filter { segment in
+            (segment.phase == .thinking || segment.phase == .final) && !segment.text.isEmpty
+        }
+        if resultSegments.isEmpty, !fallbackFinalText.isEmpty {
+            resultSegments = [
+                LLMGenerationPhaseSegment(phase: .final, text: fallbackFinalText)
+            ]
+        }
+
+        return LLMGenerationResult(
+            thinkingText: thinkingText,
+            finalText: finalText,
+            phaseSegments: resultSegments,
+            stopReason: stopReason ?? fallbackStopReason,
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            templateMode: templateMode,
+            accelerationStats: accelerationStats,
+            rawGeneratedText: rawGeneratedText
+        )
+    }
+
+    private func append(_ text: String, to phase: LLMStreamContentPhase) {
+        guard phase == .thinking || phase == .final else { return }
+        if phaseTexts[phase] == nil {
+            phaseTexts[phase] = ""
+        }
+        phaseTexts[phase, default: ""] += text
+        appendSegmentText(text, to: phase)
+    }
+
+    private func set(_ text: String, for phase: LLMStreamContentPhase) {
+        guard phase == .thinking || phase == .final else { return }
+        phaseTexts[phase] = text
+        replaceSegments(for: phase, with: text)
+    }
+
+    private func appendSegmentText(_ text: String, to phase: LLMStreamContentPhase) {
+        guard !text.isEmpty else { return }
+        if let lastIndex = phaseSegments.indices.last,
+           phaseSegments[lastIndex].phase == phase {
+            phaseSegments[lastIndex].text += text
+        } else {
+            phaseSegments.append(LLMGenerationPhaseSegment(phase: phase, text: text))
+        }
+    }
+
+    private func replaceSegments(for phase: LLMStreamContentPhase, with text: String) {
+        let phaseSegmentsWithIndices = phaseSegments.enumerated().filter { _, segment in
+            segment.phase == phase
+        }
+
+        guard !text.isEmpty else {
+            phaseSegments.removeAll { $0.phase == phase }
+            return
+        }
+
+        let replacementTexts = replacementTextsPreservingBoundaries(
+            originalTexts: phaseSegmentsWithIndices.map { $0.element.text },
+            replacementText: text
+        ) ?? [text]
+
+        guard let firstPhaseIndex = phaseSegmentsWithIndices.first?.offset else {
+            phaseSegments.append(contentsOf: replacementTexts.map {
+                LLMGenerationPhaseSegment(phase: phase, text: $0)
+            })
+            return
+        }
+
+        if replacementTexts.count == phaseSegmentsWithIndices.count {
+            var replacementIndex = 0
+            phaseSegments = phaseSegments.map { segment in
+                guard segment.phase == phase else { return segment }
+                defer { replacementIndex += 1 }
+                return LLMGenerationPhaseSegment(
+                    phase: phase,
+                    text: replacementTexts[replacementIndex]
+                )
+            }
+            return
+        }
+
+        var insertedReplacement = false
+        phaseSegments = phaseSegments.enumerated().compactMap { index, segment in
+            guard segment.phase == phase else { return segment }
+            if index == firstPhaseIndex {
+                insertedReplacement = true
+                return LLMGenerationPhaseSegment(phase: phase, text: text)
+            }
+            return insertedReplacement ? nil : segment
+        }
+    }
+
+    private func replacementTextsPreservingBoundaries(
+        originalTexts: [String],
+        replacementText: String
+    ) -> [String]? {
+        let originalTexts = originalTexts.filter { !$0.isEmpty }
+        guard !originalTexts.isEmpty else { return nil }
+
+        if replacementText == originalTexts.joined() {
+            return originalTexts
+        }
+
+        let newlineParts = replacementText.components(separatedBy: "\n")
+        if newlineParts.count == originalTexts.count,
+           newlineParts.allSatisfy({ !$0.isEmpty }) {
+            return newlineParts
+        }
+
+        guard let aligned = replacementTextsByExactAlignment(
+            originalTexts: originalTexts,
+            replacementText: replacementText
+        ), aligned.joined() == replacementText else {
+            return nil
+        }
+
+        return aligned
+    }
+
+    private func replacementTextsByExactAlignment(
+        originalTexts: [String],
+        replacementText: String
+    ) -> [String]? {
+        var cursor = replacementText.startIndex
+        var aligned: [String] = []
+
+        for originalText in originalTexts {
+            guard let range = replacementText.range(
+                of: originalText,
+                range: cursor..<replacementText.endIndex
+            ) else {
+                return nil
+            }
+
+            if range.lowerBound > cursor {
+                let interstitial = String(replacementText[cursor..<range.lowerBound])
+                if aligned.isEmpty {
+                    aligned.append(interstitial + originalText)
+                } else {
+                    aligned[aligned.count - 1] += interstitial
+                    aligned.append(originalText)
+                }
+            } else {
+                aligned.append(originalText)
+            }
+
+            cursor = range.upperBound
+        }
+
+        if cursor < replacementText.endIndex {
+            guard !aligned.isEmpty else { return nil }
+            aligned[aligned.count - 1] += replacementText[cursor..<replacementText.endIndex]
+        }
+
+        return aligned
+    }
+}
+
+public protocol LLMPhasedGenerationProvider: LLMEngine {
+    func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void
+    ) async throws -> LLMGenerationResult
+}
+
+extension LLMPhasedGenerationProvider {
+    public func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        try await generatePhased(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+}
+
 public protocol LLMEngine: Sendable {
     func currentModelID() async -> UUID?
     func currentContextSize() async -> Int
@@ -306,6 +714,54 @@ public protocol LLMEngine: Sendable {
 }
 
 extension LLMEngine {
+    public func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        try await generatePhased(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generatePhased(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        if let provider = self as? any LLMPhasedGenerationProvider {
+            return try await provider.generatePhased(
+                system: system,
+                prompt: prompt,
+                options: options,
+                control: control,
+                onEvent: onEvent
+            )
+        }
+
+        let accumulator = LLMGenerationResultAccumulator()
+        let finalText = try await generate(
+            system: system,
+            prompt: prompt,
+            options: options,
+            control: control,
+            onPhaseAwareEvent: { event in
+                let generationEvent = LLMGenerationStreamEvent(adapting: event)
+                accumulator.record(generationEvent)
+                onEvent(generationEvent)
+            },
+            ()
+        )
+        return accumulator.result(fallbackFinalText: finalText)
+    }
+
     public func generate(
         system: String,
         prompt: String,

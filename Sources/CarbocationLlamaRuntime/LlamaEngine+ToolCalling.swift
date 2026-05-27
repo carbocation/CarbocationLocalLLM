@@ -180,6 +180,217 @@ extension LlamaEngine {
         }
     }
 
+    public func generateWithToolsPhased(
+        _ request: LLMToolGenerationRequest,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMToolPhasedGenerationResult {
+        guard vocabulary != nil,
+              context != nil || toolAwareGenerationSegmentOverride != nil else {
+            throw LLMEngineError.noModelLoaded
+        }
+
+        beginGenerationLease()
+        defer { endGenerationLease() }
+
+        try LLMToolRuntime.validate(request)
+        let stats = LlamaToolGenerationStatsAccumulator()
+
+        func emitAggregateStats(stopReason: String) {
+            let snapshot = stats.snapshot(fallbackStopReason: stopReason)
+            onEvent(.aggregateGenerationStats(
+                promptTokens: snapshot.promptTokens,
+                generatedTokens: snapshot.generatedTokens,
+                stopReason: snapshot.stopReason
+            ))
+            if let accelerationStats = snapshot.accelerationStats {
+                onEvent(.aggregateAccelerationStats(accelerationStats))
+            }
+        }
+
+        guard !request.tools.isEmpty, request.toolChoice != .none else {
+            let generation = try await generatePhased(
+                system: request.system,
+                prompt: request.prompt,
+                options: request.options,
+                control: control,
+                onEvent: { event in
+                    onEvent(.generationEvent(event))
+                }
+            )
+            onEvent(.aggregateGenerationStats(
+                promptTokens: generation.promptTokens,
+                generatedTokens: generation.generatedTokens,
+                stopReason: generation.stopReason
+            ))
+            if let accelerationStats = generation.accelerationStats {
+                onEvent(.aggregateAccelerationStats(accelerationStats))
+            }
+            return LLMToolPhasedGenerationResult(
+                generation: generation,
+                stopReason: generation.stopReason
+            )
+        }
+
+        let controlGenerationID = control?.beginGeneration()
+        defer {
+            if let controlGenerationID {
+                control?.finishGeneration(controlGenerationID)
+            }
+        }
+
+        let forwardToolEvent: @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { event in
+            switch event {
+            case .finalAnswerEvent(let phaseEvent):
+                let generationEvent = LLMGenerationStreamEvent(adapting: phaseEvent)
+                switch generationEvent {
+                case .contentDelta, .contentSnapshot:
+                    break
+                default:
+                    onEvent(.generationEvent(generationEvent))
+                }
+            case .toolRoundStarted(let round):
+                onEvent(.toolRoundStarted(round: round))
+            case .toolCallStarted(let call):
+                onEvent(.toolCallStarted(call))
+            case .toolCallCompleted(let output):
+                onEvent(.toolCallCompleted(output))
+            case .toolCallFailed(let output):
+                onEvent(.toolCallFailed(output))
+            case .aggregateGenerationStats(let promptTokens, let generatedTokens, let stopReason):
+                onEvent(.aggregateGenerationStats(
+                    promptTokens: promptTokens,
+                    generatedTokens: generatedTokens,
+                    stopReason: stopReason
+                ))
+            case .aggregateAccelerationStats(let stats):
+                onEvent(.aggregateAccelerationStats(stats))
+            }
+        }
+
+        let toolsByName = LLMToolRuntime.index(request.tools)
+        var idAllocator = LLMToolCallIDAllocator()
+        var history: [LLMToolInteractionRound] = []
+        var allCalls: [LLMToolCall] = []
+        var allOutputs: [LLMToolOutput] = []
+        var roundsCompleted = 0
+        let streamState = LlamaToolFinalAnswerStreamState(onPhaseAwareEvent: forwardToolEvent)
+        let phasedStreamState = LlamaToolPhasedGenerationStreamState(onEvent: onEvent)
+        var continuation: LlamaToolContinuation?
+
+        func phasedResult(stopReason: String) -> LLMToolPhasedGenerationResult {
+            let snapshot = stats.snapshot(fallbackStopReason: stopReason)
+            let generation = phasedStreamState.result(
+                stopReason: snapshot.stopReason,
+                promptTokens: snapshot.promptTokens,
+                generatedTokens: snapshot.generatedTokens,
+                templateMode: snapshot.templateMode,
+                accelerationStats: snapshot.accelerationStats
+            )
+            return LLMToolPhasedGenerationResult(
+                generation: generation,
+                toolCalls: allCalls,
+                toolOutputs: allOutputs,
+                roundsCompleted: roundsCompleted,
+                stopReason: stopReason
+            )
+        }
+
+        while true {
+            let segmentOptions = continuation.map {
+                Self.toolContinuationOptions(base: request.options, continuation: $0)
+            } ?? request.options
+            let promptFormatting = try toolPromptFormatting(
+                system: request.system,
+                originalPrompt: request.prompt,
+                tools: request.tools.map(\.definition),
+                toolChoice: request.toolChoice,
+                history: history,
+                assistantTextSoFar: streamState.text,
+                options: segmentOptions
+            )
+            let segment = try await generateToolAwareSegment(
+                promptFormatting: promptFormatting,
+                options: segmentOptions,
+                streamState: streamState,
+                phasedStreamState: phasedStreamState,
+                stats: stats,
+                interceptTools: true,
+                isInternalContinuation: continuation != nil,
+                phaseLock: continuation?.triggerPhase == .final ? .final : nil,
+                emitDoneOnCompletion: true,
+                control: control,
+                controlGenerationID: controlGenerationID,
+                onPhaseAwareEvent: forwardToolEvent
+            )
+
+            let calls = idAllocator.materialize(segment.toolCalls)
+            guard !calls.isEmpty else {
+                emitAggregateStats(stopReason: segment.stopReason)
+                return phasedResult(stopReason: segment.stopReason)
+            }
+
+            guard roundsCompleted < request.maxToolRounds else {
+                allCalls.append(contentsOf: calls)
+                let finalFormatting = try noToolContinuationPromptFormatting(
+                    system: request.system,
+                    originalPrompt: request.prompt,
+                    history: history,
+                    assistantTextSoFar: streamState.text,
+                    unexecutedCalls: calls,
+                    maxToolRoundsReached: true,
+                    options: Self.toolContinuationOptions(
+                        base: request.options,
+                        continuation: LlamaToolContinuation(
+                            triggerPhase: segment.triggerPhase,
+                            remainingThinkingBudgetTokens: segment.remainingThinkingBudgetTokens
+                        )
+                    )
+                )
+                _ = try await generateToolAwareSegment(
+                    promptFormatting: finalFormatting,
+                    options: Self.toolContinuationOptions(
+                        base: request.options,
+                        continuation: LlamaToolContinuation(
+                            triggerPhase: segment.triggerPhase,
+                            remainingThinkingBudgetTokens: segment.remainingThinkingBudgetTokens
+                        )
+                    ),
+                    streamState: streamState,
+                    phasedStreamState: phasedStreamState,
+                    stats: stats,
+                    interceptTools: true,
+                    isInternalContinuation: true,
+                    phaseLock: segment.triggerPhase == .final ? .final : nil,
+                    emitDoneOnCompletion: true,
+                    emitDoneOnToolInterception: true,
+                    control: control,
+                    controlGenerationID: controlGenerationID,
+                    onPhaseAwareEvent: forwardToolEvent
+                )
+                emitAggregateStats(stopReason: "max-tool-rounds")
+                return phasedResult(stopReason: "max-tool-rounds")
+            }
+
+            let round = roundsCompleted + 1
+            forwardToolEvent(.toolRoundStarted(round: round))
+            let outputs = try await LLMToolRuntime.execute(
+                calls: calls,
+                toolsByName: toolsByName,
+                onPhaseAwareEvent: forwardToolEvent
+            )
+
+            roundsCompleted = round
+            allCalls.append(contentsOf: calls)
+            allOutputs.append(contentsOf: outputs)
+            history.append(LLMToolInteractionRound(calls: calls, outputs: outputs))
+            continuation = LlamaToolContinuation(
+                triggerPhase: segment.triggerPhase,
+                remainingThinkingBudgetTokens: segment.remainingThinkingBudgetTokens
+            )
+        }
+    }
+
     var supportsGemmaNativeToolTemplate: Bool {
         guard case .swiftJinja = preparedChatTemplate,
               let chatTemplate else {
@@ -465,6 +676,7 @@ private extension LlamaEngine {
         promptFormatting: PromptFormattingResult,
         options: GenerationOptions,
         streamState: LlamaToolFinalAnswerStreamState,
+        phasedStreamState: LlamaToolPhasedGenerationStreamState? = nil,
         stats: LlamaToolGenerationStatsAccumulator,
         interceptTools: Bool,
         isInternalContinuation: Bool = false,
@@ -477,10 +689,12 @@ private extension LlamaEngine {
     ) async throws -> ToolAwareGenerationSegment {
         if let override = toolAwareGenerationSegmentOverride {
             streamState.beginSegment()
+            phasedStreamState?.beginSegment()
             return try await generateToolAwareSegmentOverride(
                 override,
                 promptFormatting: promptFormatting,
                 streamState: streamState,
+                phasedStreamState: phasedStreamState,
                 stats: stats,
                 isInternalContinuation: isInternalContinuation,
                 emitDoneOnCompletion: emitDoneOnCompletion,
@@ -493,6 +707,7 @@ private extension LlamaEngine {
             throw LLMEngineError.noModelLoaded
         }
         streamState.beginSegment()
+        phasedStreamState?.beginSegment()
 
         var currentPhase = streamState.phase
         func emit(_ event: LLMPhaseAwareStreamEvent) {
@@ -670,14 +885,21 @@ private extension LlamaEngine {
         }
 
         func emitVisibleProgress(raw: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
-            guard Self.shouldEmitFinalAnswerProgress(
+            let canEmitFinal = Self.shouldEmitFinalAnswerProgress(
                 currentPhase: currentPhase,
                 structuredPhase: structuredPhase
-            ),
-                  let visible = sanitizedVisibleText(raw: raw) else {
-                return
+            )
+            let visible = canEmitFinal ? sanitizedVisibleText(raw: raw) : nil
+            if let visible {
+                streamState.emit(visible, snapshotReason: snapshotReason)
             }
-            streamState.emit(visible, snapshotReason: snapshotReason)
+            phasedStreamState?.emit(
+                raw: raw,
+                plan: streamPhasePlan,
+                finalText: visible,
+                allowsParserDerivedFinalText: visible != nil,
+                snapshotReason: LLMGenerationContentSnapshotReason(snapshotReason)
+            )
         }
 
         let contextMaxNew = Self.maxGenerationTokens(
@@ -1183,6 +1405,12 @@ private extension LlamaEngine {
                 : accumulatedText
         }
 
+        updatePhase(Self.streamContentPhase(in: rawForReturn, plan: streamPhasePlan))
+        if stopReason == "max-tokens", currentPhase == .thinking {
+            stopReason = "thinking-not-closed"
+        }
+        let shouldReturnIncompleteThinking = stopReason == "thinking-not-closed"
+
         if interceptedToolCalls.isEmpty, let plan = structuredOutputPlan {
             let finalPhase = structuredPhase ?? Self.structuredOutputPhase(in: rawForReturn, plan: plan)
             if finalPhase == .thinking || finalPhase == .awaitingFinal {
@@ -1192,37 +1420,57 @@ private extension LlamaEngine {
                 llamaRuntimeLog.error(
                     "Structured output phase failed before sanitization: phase=\(finalPhase.rawValue, privacy: .public) rawBytes=\(rawForReturn.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
                 )
-                throw LLMEngineError.structuredOutputPhaseFailed(
-                    "Generation ended before final structured output began."
-                )
+                if !(shouldReturnIncompleteThinking && finalPhase == .thinking) {
+                    throw LLMEngineError.structuredOutputPhaseFailed(
+                        "Generation ended before final structured output began."
+                    )
+                }
             }
         }
 
+        let phasedText = Self.phasedGeneratedText(rawForReturn, plan: streamPhasePlan)
         let returnedText: String
-        do {
-            returnedText = try Self.sanitizedGeneratedText(
-                rawForReturn,
-                profile: activeOutputProfile,
-                continuingOpenThinkingPairs: continuingOpenThinkingPairs,
-                requiresNonEmptyStructuredOutput: options.grammar != nil && !activeOutputProfile.isEmpty
-            )
-        } catch let error as LLMEngineError {
-            if case .structuredOutputPhaseFailed = error {
-                stopReason = "structured-sanitization-empty"
-                llamaRuntimeLog.error(
-                    "Structured output sanitization failed: rawBytes=\(rawForReturn.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+        if stopReason == "thinking-not-closed" {
+            returnedText = phasedText.finalText
+        } else {
+            do {
+                returnedText = try Self.sanitizedGeneratedText(
+                    rawForReturn,
+                    profile: activeOutputProfile,
+                    continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+                    requiresNonEmptyStructuredOutput: options.grammar != nil && !activeOutputProfile.isEmpty
                 )
+            } catch let error as LLMEngineError {
+                if case .structuredOutputPhaseFailed = error {
+                    stopReason = "structured-sanitization-empty"
+                    llamaRuntimeLog.error(
+                        "Structured output sanitization failed: rawBytes=\(rawForReturn.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
+                    )
+                }
+                throw error
             }
-            throw error
         }
 
         if interceptedToolCalls.isEmpty {
             streamState.emit(returnedText, snapshotReason: .completed)
+            phasedStreamState?.emit(
+                phasedText: phasedText.replacingPhaseText(.final, with: returnedText),
+                snapshotReason: .completed
+            )
         } else if Self.shouldEmitFinalAnswerProgress(
             currentPhase: currentPhase,
             structuredPhase: structuredPhase
         ) {
             streamState.emit(returnedText, snapshotReason: .streamCorrection)
+            phasedStreamState?.emit(
+                phasedText: phasedText.replacingPhaseText(.final, with: returnedText),
+                snapshotReason: .streamCorrection
+            )
+        } else {
+            phasedStreamState?.emit(
+                phasedText: phasedText.replacingPhaseText(.final, with: ""),
+                snapshotReason: .streamCorrection
+            )
         }
 
         llamaRuntimeLog.info(
@@ -1260,6 +1508,7 @@ private extension LlamaEngine {
         _ override: ToolAwareGenerationSegmentOverride,
         promptFormatting: PromptFormattingResult,
         streamState: LlamaToolFinalAnswerStreamState,
+        phasedStreamState: LlamaToolPhasedGenerationStreamState?,
         stats: LlamaToolGenerationStatsAccumulator,
         isInternalContinuation: Bool,
         emitDoneOnCompletion: Bool,
@@ -1301,6 +1550,11 @@ private extension LlamaEngine {
         if let finalText = output.finalText {
             streamState.emit(
                 finalText,
+                snapshotReason: output.toolCalls.isEmpty ? .completed : .streamCorrection
+            )
+            phasedStreamState?.emitFinalText(
+                finalText,
+                rawGeneratedText: finalText,
                 snapshotReason: output.toolCalls.isEmpty ? .completed : .streamCorrection
             )
         }
@@ -1427,21 +1681,163 @@ private final class LlamaToolFinalAnswerStreamState: @unchecked Sendable {
     }
 }
 
+final class LlamaToolPhasedGenerationStreamState: @unchecked Sendable {
+    private let lock = NSLock()
+    private let onEvent: @Sendable (LLMToolPhasedStreamEvent) -> Void
+    private var committedSegments: [LLMGenerationPhaseSegment] = []
+    private var currentSegments: [LLMGenerationPhaseSegment] = []
+    private var committedRawGeneratedText: [String] = []
+    private var currentRawGeneratedText: String?
+    private var emittedPhaseText: [LLMStreamContentPhase: String] = [:]
+
+    init(onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void) {
+        self.onEvent = onEvent
+    }
+
+    func beginSegment() {
+        lock.lock()
+        committedSegments.append(contentsOf: currentSegments)
+        currentSegments = []
+        if let currentRawGeneratedText, !currentRawGeneratedText.isEmpty {
+            committedRawGeneratedText.append(currentRawGeneratedText)
+        }
+        currentRawGeneratedText = nil
+        lock.unlock()
+    }
+
+    func emit(
+        raw: String,
+        plan: LlamaEngine.StreamPhasePlan,
+        finalText: String?,
+        allowsParserDerivedFinalText: Bool = true,
+        snapshotReason: LLMGenerationContentSnapshotReason
+    ) {
+        var phasedText = LlamaEngine.phasedGeneratedText(raw, plan: plan)
+        if let finalText {
+            phasedText = phasedText.replacingPhaseText(.final, with: finalText)
+        } else if !allowsParserDerivedFinalText {
+            phasedText = phasedText.replacingPhaseText(.final, with: "")
+        }
+        emit(phasedText: phasedText, snapshotReason: snapshotReason)
+    }
+
+    func emitFinalText(
+        _ finalText: String,
+        rawGeneratedText: String,
+        snapshotReason: LLMFinalAnswerSnapshotReason
+    ) {
+        emit(
+            phasedText: LlamaEngine.PhasedGenerationText(
+                thinkingText: "",
+                finalText: finalText,
+                phaseSegments: finalText.isEmpty
+                    ? []
+                    : [LLMGenerationPhaseSegment(phase: .final, text: finalText)],
+                rawGeneratedText: rawGeneratedText
+            ),
+            snapshotReason: LLMGenerationContentSnapshotReason(snapshotReason)
+        )
+    }
+
+    func emit(
+        phasedText: LlamaEngine.PhasedGenerationText,
+        snapshotReason: LLMGenerationContentSnapshotReason
+    ) {
+        var events: [LLMGenerationStreamEvent] = []
+        lock.lock()
+        currentSegments = phasedText.phaseSegments
+        currentRawGeneratedText = phasedText.rawGeneratedText
+        let allSegments = committedSegments + currentSegments
+
+        for phase in [LLMStreamContentPhase.thinking, .final] {
+            let nextText = Self.joinedText(for: phase, in: allSegments)
+            let previousText = emittedPhaseText[phase] ?? ""
+            guard nextText != previousText else { continue }
+
+            if nextText.hasPrefix(previousText) {
+                let delta = String(nextText.dropFirst(previousText.count))
+                if !delta.isEmpty {
+                    events.append(.contentDelta(
+                        phase: phase,
+                        text: delta,
+                        bytesSoFar: nextText.utf8.count
+                    ))
+                }
+            } else {
+                events.append(.contentSnapshot(
+                    phase: phase,
+                    text: nextText,
+                    bytesSoFar: nextText.utf8.count,
+                    reason: snapshotReason
+                ))
+            }
+            emittedPhaseText[phase] = nextText
+        }
+        lock.unlock()
+
+        for event in events {
+            onEvent(.generationEvent(event))
+        }
+    }
+
+    func result(
+        stopReason: String,
+        promptTokens: Int,
+        generatedTokens: Int,
+        templateMode: LLMChatTemplateMode,
+        accelerationStats: LLMGenerationAccelerationStats?
+    ) -> LLMGenerationResult {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let allSegments = committedSegments + currentSegments
+        var rawSegments = committedRawGeneratedText
+        if let currentRawGeneratedText, !currentRawGeneratedText.isEmpty {
+            rawSegments.append(currentRawGeneratedText)
+        }
+        let rawGeneratedText = rawSegments.isEmpty ? nil : rawSegments.joined(separator: "\n")
+
+        return LLMGenerationResult(
+            thinkingText: Self.joinedText(for: .thinking, in: allSegments),
+            finalText: Self.joinedText(for: .final, in: allSegments),
+            phaseSegments: allSegments,
+            stopReason: stopReason,
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            templateMode: templateMode,
+            accelerationStats: accelerationStats,
+            rawGeneratedText: rawGeneratedText
+        )
+    }
+
+    private static func joinedText(
+        for phase: LLMStreamContentPhase,
+        in segments: [LLMGenerationPhaseSegment]
+    ) -> String {
+        segments
+            .filter { $0.phase == phase }
+            .map(\.text)
+            .joined(separator: "\n")
+    }
+}
+
 private final class LlamaToolGenerationStatsAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var promptTokens = 0
     private var generatedTokens = 0
     private var stopReason: String?
+    private var templateMode = LLMChatTemplateMode.unavailable
     private var accelerationStats: LLMGenerationAccelerationStats?
 
     func record(_ event: LLMPhaseAwareStreamEvent) {
         switch event {
-        case .generationStats(let promptTokens, let generatedTokens, let stopReason, _, _):
+        case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, _):
             lock.lock()
             defer { lock.unlock() }
             self.promptTokens += promptTokens
             self.generatedTokens += generatedTokens
             self.stopReason = stopReason
+            self.templateMode = templateMode
         case .accelerationStats(let stats):
             lock.lock()
             defer { lock.unlock() }
@@ -1461,6 +1857,7 @@ private final class LlamaToolGenerationStatsAccumulator: @unchecked Sendable {
         promptTokens: Int,
         generatedTokens: Int,
         stopReason: String,
+        templateMode: LLMChatTemplateMode,
         accelerationStats: LLMGenerationAccelerationStats?
     ) {
         lock.lock()
@@ -1469,6 +1866,7 @@ private final class LlamaToolGenerationStatsAccumulator: @unchecked Sendable {
             promptTokens,
             generatedTokens,
             stopReason ?? fallbackStopReason,
+            templateMode,
             accelerationStats
         )
     }

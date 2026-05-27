@@ -509,6 +509,369 @@ extension LlamaEngine {
         return returnedText
     }
 
+    struct PhasedGenerationText: Equatable {
+        var thinkingText: String
+        var finalText: String
+        var phaseSegments: [LLMGenerationPhaseSegment]
+        var rawGeneratedText: String
+
+        func replacingPhaseText(
+            _ phase: LLMStreamContentPhase,
+            with text: String
+        ) -> PhasedGenerationText {
+            guard phase == .thinking || phase == .final else { return self }
+            let currentText = joinedText(for: phase)
+            guard text != currentText else { return self }
+
+            let segments = replacingSegments(for: phase, with: text)
+            return PhasedGenerationText(
+                thinkingText: phase == .thinking ? text : thinkingText,
+                finalText: phase == .final ? text : finalText,
+                phaseSegments: segments,
+                rawGeneratedText: rawGeneratedText
+            )
+        }
+
+        private func replacingSegments(
+            for phase: LLMStreamContentPhase,
+            with text: String
+        ) -> [LLMGenerationPhaseSegment] {
+            let phaseSegmentsWithIndices = phaseSegments.enumerated().filter { _, segment in
+                segment.phase == phase
+            }
+
+            guard !text.isEmpty else {
+                return phaseSegments.filter { $0.phase != phase }
+            }
+
+            let replacementTexts = replacementTextsPreservingBoundaries(
+                originalTexts: phaseSegmentsWithIndices.map { $0.element.text },
+                replacementText: text
+            ) ?? [text]
+
+            guard let firstPhaseIndex = phaseSegmentsWithIndices.first?.offset else {
+                var segments = phaseSegments
+                let insertionIndex = phase == .thinking
+                    ? segments.firstIndex { $0.phase == .final } ?? segments.endIndex
+                    : segments.endIndex
+                segments.insert(contentsOf: replacementTexts.map {
+                    LLMGenerationPhaseSegment(phase: phase, text: $0)
+                }, at: insertionIndex)
+                return segments
+            }
+
+            if replacementTexts.count == phaseSegmentsWithIndices.count {
+                var replacementIndex = 0
+                return phaseSegments.map { segment in
+                    guard segment.phase == phase else { return segment }
+                    defer { replacementIndex += 1 }
+                    return LLMGenerationPhaseSegment(
+                        phase: phase,
+                        text: replacementTexts[replacementIndex]
+                    )
+                }
+            }
+
+            var insertedReplacement = false
+            var segments: [LLMGenerationPhaseSegment] = []
+            for (index, segment) in phaseSegments.enumerated() {
+                guard segment.phase == phase else {
+                    segments.append(segment)
+                    continue
+                }
+
+                if index == firstPhaseIndex {
+                    segments.append(contentsOf: replacementTexts.map {
+                        LLMGenerationPhaseSegment(phase: phase, text: $0)
+                    })
+                    insertedReplacement = true
+                } else if insertedReplacement {
+                    continue
+                }
+            }
+
+            return segments
+        }
+
+        private func replacementTextsPreservingBoundaries(
+            originalTexts: [String],
+            replacementText: String
+        ) -> [String]? {
+            let originalTexts = originalTexts.filter { !$0.isEmpty }
+            guard !originalTexts.isEmpty else { return nil }
+
+            let joinedOriginal = originalTexts.joined(separator: "\n")
+            if replacementText == joinedOriginal {
+                return originalTexts
+            }
+
+            let newlineParts = replacementText.components(separatedBy: "\n")
+            if newlineParts.count == originalTexts.count,
+               newlineParts.allSatisfy({ !$0.isEmpty }) {
+                return newlineParts
+            }
+
+            guard let aligned = replacementTextsByExactAlignment(
+                originalTexts: originalTexts,
+                replacementText: replacementText
+            ) else {
+                return nil
+            }
+
+            return aligned.joined(separator: "\n") == replacementText
+                ? aligned
+                : nil
+        }
+
+        private func replacementTextsByExactAlignment(
+            originalTexts: [String],
+            replacementText: String
+        ) -> [String]? {
+            var cursor = replacementText.startIndex
+            var aligned: [String] = []
+
+            for originalText in originalTexts {
+                guard let range = replacementText.range(
+                    of: originalText,
+                    range: cursor..<replacementText.endIndex
+                ) else {
+                    return nil
+                }
+
+                if range.lowerBound > cursor {
+                    let interstitial = String(replacementText[cursor..<range.lowerBound])
+                    if interstitial == "\n", !aligned.isEmpty {
+                        // The result joiner already represents segment boundaries with a newline.
+                    } else if aligned.isEmpty {
+                        aligned.append(interstitial + originalText)
+                    } else {
+                        aligned[aligned.count - 1] += interstitial
+                        aligned.append(originalText)
+                    }
+                } else {
+                    aligned.append(originalText)
+                }
+
+                cursor = range.upperBound
+            }
+
+            if cursor < replacementText.endIndex {
+                guard !aligned.isEmpty else { return nil }
+                aligned[aligned.count - 1] += replacementText[cursor..<replacementText.endIndex]
+            }
+
+            return aligned
+        }
+
+        private func joinedText(for phase: LLMStreamContentPhase) -> String {
+            phaseSegments
+                .filter { $0.phase == phase }
+                .map(\.text)
+                .joined(separator: "\n")
+        }
+
+        func generationResult(
+            stopReason: String,
+            promptTokens: Int,
+            generatedTokens: Int,
+            templateMode: LLMChatTemplateMode,
+            accelerationStats: LLMGenerationAccelerationStats?
+        ) -> LLMGenerationResult {
+            LLMGenerationResult(
+                thinkingText: thinkingText,
+                finalText: finalText,
+                phaseSegments: phaseSegments,
+                stopReason: stopReason,
+                promptTokens: promptTokens,
+                generatedTokens: generatedTokens,
+                templateMode: templateMode,
+                accelerationStats: accelerationStats,
+                rawGeneratedText: rawGeneratedText
+            )
+        }
+    }
+
+    static func phasedGeneratedText(
+        _ text: String,
+        plan: StreamPhasePlan
+    ) -> PhasedGenerationText {
+        var parser = PhasedGenerationTextParser(text: text, plan: plan)
+        return parser.parse()
+    }
+
+    private struct PhasedGenerationTextParser {
+        let text: String
+        let plan: StreamPhasePlan
+        var index: String.Index
+        var segments: [LLMGenerationPhaseSegment] = []
+        var hasSeenFinalMarker = false
+
+        init(text: String, plan: StreamPhasePlan) {
+            self.text = text
+            self.plan = plan
+            self.index = text.startIndex
+        }
+
+        mutating func parse() -> PhasedGenerationText {
+            parseContinuingThinkingPrefix()
+            guard index < text.endIndex else {
+                return snapshot()
+            }
+
+            if plan.startsInThinking == true,
+               plan.continuingOpenThinkingPairs.isEmpty,
+               let pair = plan.profile.thinkingPairs.first(where: { !$0.close.isEmpty }) {
+                guard parseThinkingUntilClose(pair.close) else {
+                    return snapshot()
+                }
+            }
+
+            while index < text.endIndex {
+                let contentStart = LlamaEngine.indexAfterWhitespace(in: text, from: index)
+
+                if let pair = prefixedThinkingPair(at: contentStart) {
+                    if contentStart > index {
+                        index = contentStart
+                    }
+                    index = text.index(index, offsetBy: pair.open.count)
+                    guard parseThinkingUntilClose(pair.close) else {
+                        return snapshot()
+                    }
+                    continue
+                }
+
+                if let markerRange = LlamaEngine.firstFinalMarkerRange(
+                    in: text,
+                    markers: plan.profile.allFinalMarkers,
+                    range: index..<text.endIndex
+                ) {
+                    appendSegment(defaultPhase, text[index..<markerRange.lowerBound])
+                    index = markerRange.upperBound
+                    hasSeenFinalMarker = true
+                    continue
+                }
+
+                let markers = plan.profile.thinkingPairs.map(\.open) + plan.profile.allFinalMarkers
+                if let partialMarkerRange = trailingPartialMarkerPrefixRange(
+                    in: index..<text.endIndex,
+                    markers: markers
+                ) {
+                    appendSegment(defaultPhase, text[index..<partialMarkerRange.lowerBound])
+                    index = text.endIndex
+                    continue
+                }
+
+                appendSegment(defaultPhase, text[index..<text.endIndex])
+                index = text.endIndex
+            }
+
+            return snapshot()
+        }
+
+        private mutating func parseContinuingThinkingPrefix() {
+            for pair in plan.continuingOpenThinkingPairs where index < text.endIndex {
+                guard !pair.close.isEmpty,
+                      let closeRange = text.range(of: pair.close, range: index..<text.endIndex) else {
+                    appendSegment(.thinking, text[index..<text.endIndex])
+                    index = text.endIndex
+                    return
+                }
+
+                appendSegment(.thinking, text[index..<closeRange.lowerBound])
+                index = closeRange.upperBound
+            }
+        }
+
+        private mutating func parseThinkingUntilClose(_ close: String) -> Bool {
+            guard !close.isEmpty,
+                  let closeRange = text.range(of: close, range: index..<text.endIndex) else {
+                appendSegment(.thinking, text[index..<text.endIndex])
+                index = text.endIndex
+                return false
+            }
+
+            appendSegment(.thinking, text[index..<closeRange.lowerBound])
+            index = closeRange.upperBound
+            return true
+        }
+
+        private func prefixedThinkingPair(at start: String.Index) -> OutputDelimiterPair? {
+            guard start < text.endIndex else { return nil }
+            return plan.profile.thinkingPairs.first { pair in
+                !pair.open.isEmpty && text[start...].hasPrefix(pair.open)
+            }
+        }
+
+        private var defaultPhase: LLMStreamContentPhase {
+            (hasSeenFinalMarker || plan.profile.allFinalMarkers.isEmpty) ? .final : .thinking
+        }
+
+        private func trailingPartialMarkerPrefixRange(
+            in range: Range<String.Index>,
+            markers: [String]
+        ) -> Range<String.Index>? {
+            guard range.lowerBound < range.upperBound else { return nil }
+            let candidate = String(text[range])
+            var bestRange: Range<String.Index>?
+            var bestLength = 0
+
+            for marker in markers where !marker.isEmpty {
+                let maxLength = min(marker.count - 1, candidate.count)
+                guard maxLength > 0 else { continue }
+
+                for length in stride(from: maxLength, through: 1, by: -1) {
+                    let prefix = String(marker.prefix(length))
+                    guard candidate.hasSuffix(prefix), length > bestLength else {
+                        continue
+                    }
+
+                    let lowerBound = text.index(range.upperBound, offsetBy: -length)
+                    bestRange = lowerBound..<range.upperBound
+                    bestLength = length
+                    break
+                }
+            }
+
+            return bestRange
+        }
+
+        private mutating func appendSegment(
+            _ phase: LLMStreamContentPhase,
+            _ substring: Substring
+        ) {
+            guard phase == .thinking || phase == .final else { return }
+            let sanitized = sanitizedPhaseText(String(substring))
+            guard !sanitized.isEmpty else { return }
+            segments.append(LLMGenerationPhaseSegment(phase: phase, text: sanitized))
+        }
+
+        private func sanitizedPhaseText(_ value: String) -> String {
+            var output = value
+            for token in plan.profile.scrubTokens {
+                output = output.replacingOccurrences(of: token, with: "")
+            }
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private func snapshot() -> PhasedGenerationText {
+            let thinkingText = joinedText(for: .thinking)
+            let finalText = joinedText(for: .final)
+            return PhasedGenerationText(
+                thinkingText: thinkingText,
+                finalText: finalText,
+                phaseSegments: segments,
+                rawGeneratedText: text
+            )
+        }
+
+        private func joinedText(for phase: LLMStreamContentPhase) -> String {
+            segments
+                .filter { $0.phase == phase }
+                .map(\.text)
+                .joined(separator: "\n")
+        }
+    }
+
     static func trimmingAtFirstStopSequence(
         _ text: String,
         stopSequences: [String]
