@@ -140,6 +140,23 @@ public enum CuratedModelCatalog {
             )
         ),
         CuratedModel(
+            id: "gemma-4-26b-a4b-it-heretic-q6k",
+            displayName: "Gemma 4 26B A4B Uncensored Instruct (Q6_K)",
+            subtitle: "Abliterated/uncensored Gemma MoE at Q6_K fidelity. Top 48 GB tier pick; about 23 GB on disk.",
+            hfRepo: "nohurry/gemma-4-26B-A4B-it-heretic-GUFF",
+            hfFilename: "gemma-4-26b-a4b-it-heretic.q6_k.gguf",
+            approxSizeBytes: 23_172_471_776,
+            contextLength: 262_144,
+            quantization: "Q6_K",
+            recommendedRAMGB: 48,
+            sha256: nil,
+            samplingDefaults: LLMSamplingDefaults(
+                temperature: 1.0,
+                topP: 0.95,
+                topK: 64
+            )
+        ),
+        CuratedModel(
             id: "qwen3.6-27b-dense-q4km",
             displayName: "Qwen3.6 27B Dense (Q4_K_M)",
             subtitle: "Dense high-memory Qwen option. Strong coding and reasoning; needs about 48 GB RAM.",
