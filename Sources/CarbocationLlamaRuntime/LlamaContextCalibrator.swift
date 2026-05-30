@@ -180,12 +180,20 @@ public extension LlamaEngine {
     static func contextCalibrationRuntimeFingerprint(
         configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()
     ) -> LlamaContextCalibrationRuntimeFingerprint {
-        LlamaContextCalibrationRuntimeFingerprint(
+        let mtpAccelerationEnabled = configuration.accelerationPolicy == .automatic
+        let mtpMaxDraftTokens = mtpAccelerationEnabled
+            ? effectiveMTPMaxDraftTokens(
+                requested: clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
+            )
+            : 0
+        return LlamaContextCalibrationRuntimeFingerprint(
             platform: contextCalibrationPlatformName(),
             gpuLayerCount: Int(configuration.gpuLayerCount),
             useMemoryMap: configuration.useMemoryMap,
             batchSizeLimit: configuration.batchSizeLimit,
             threadCount: Int(effectiveThreadCount(for: configuration)),
+            mtpAccelerationEnabled: mtpAccelerationEnabled,
+            mtpMaxDraftTokens: mtpMaxDraftTokens,
             algorithmVersion: LlamaContextCalibrationAlgorithm.version
         )
     }
@@ -245,6 +253,17 @@ private enum LlamaContextCalibrator {
         let key = store.key(for: installed, runtime: runtime)
         let modelURL = installed.weightsURL(in: root)
         let descriptor = LlamaModelDescriptor(model: installed, root: root)
+
+        // Mirror LlamaEngine.load(): MTP-capable models stand up an additional
+        // draft context when the acceleration policy is automatic. The probe
+        // below builds the same runtime so calibration measures the footprint
+        // chat will actually allocate.
+        let supportsMTPAcceleration = GGUFMetadata.supportsMTPAcceleration(at: modelURL)
+        let shouldPrepareMTPAcceleration = supportsMTPAcceleration
+            && configuration.accelerationPolicy == .automatic
+        let maxMTPDraftTokens = LlamaEngine.effectiveMTPMaxDraftTokens(
+            requested: LlamaEngine.clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
+        )
 
         await onProgress(LlamaContextCalibrationProgress(
             phase: .loadingModel,
@@ -336,7 +355,9 @@ private enum LlamaContextCalibrator {
                 threads: threads,
                 memoryBudgetBytes: LlamaContextMemoryGuardrail.defaultBudgetBytes(
                     gpuLayerCount: configuration.gpuLayerCount
-                )
+                ),
+                shouldPrepareMTPAcceleration: shouldPrepareMTPAcceleration,
+                maxMTPDraftTokens: maxMTPDraftTokens
             )
             let succeeded = outcome.succeeded
 
@@ -422,10 +443,11 @@ private enum LlamaContextCalibrator {
         contextSize: Int,
         batchSizeLimit: Int,
         threads: Int32,
-        memoryBudgetBytes: UInt64
+        memoryBudgetBytes: UInt64,
+        shouldPrepareMTPAcceleration: Bool,
+        maxMTPDraftTokens: Int
     ) -> LlamaContextDecodeProbeOutcome {
-        let probeTokens = decodeProbeTokens(vocabulary: vocabulary)
-        guard !probeTokens.isEmpty else {
+        guard let safeToken = decodeProbeTokens(vocabulary: vocabulary).first else {
             return LlamaContextDecodeProbeOutcome(
                 succeeded: false,
                 shouldReloadModelBeforeNextProbe: false
@@ -440,7 +462,8 @@ private enum LlamaContextCalibrator {
             let params = LlamaEngine.contextParams(
                 contextSize: contextSize,
                 batchSize: batchSize,
-                threads: threads
+                threads: threads,
+                recurrentStateSnapshots: shouldPrepareMTPAcceleration ? maxMTPDraftTokens : 0
             )
             let estimate = LlamaContextMemoryGuardrail.estimate(
                 profile: LlamaContextMemoryGuardrail.profile(
@@ -455,30 +478,105 @@ private enum LlamaContextCalibrator {
                 continue
             }
 
-            if let context = llama_init_from_model(model, params) {
-                var tokens = probeTokens
-                let decodeResult = tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
-                    guard let baseAddress = buffer.baseAddress else { return -1 }
-                    let batch = llama_batch_get_one(baseAddress, Int32(buffer.count))
-                    return llama_decode(context, batch)
-                }
-                llama_free(context)
-                if decodeResult == 0 {
-                    return LlamaContextDecodeProbeOutcome(
-                        succeeded: true,
-                        shouldReloadModelBeforeNextProbe: false
-                    )
-                }
-                return LlamaContextDecodeProbeOutcome(
-                    succeeded: false,
-                    shouldReloadModelBeforeNextProbe: true
-                )
+            guard let context = llama_init_from_model(model, params) else {
+                continue
             }
+
+            // When the live loader would enable MTP, stand up the same draft
+            // context here and decode through the MTP path, so the probe
+            // exercises the two-context footprint chat actually allocates. If the
+            // draft context cannot be built at this size the live loader falls
+            // back to standard decoding, and so does the probe (mtpContext == nil).
+            let mtpContext: UnsafeMutableRawPointer? = shouldPrepareMTPAcceleration
+                ? carbocation_llama_mtp_create_bridge(
+                    model,
+                    context,
+                    UInt32(contextSize),
+                    UInt32(batchSize),
+                    threads,
+                    Int32(maxMTPDraftTokens),
+                    0
+                )
+                : nil
+
+            let succeeded = runRepresentativeDecodeProbe(
+                context: context,
+                mtpContext: mtpContext,
+                safeToken: safeToken,
+                contextSize: contextSize,
+                batchSize: batchSize
+            )
+
+            // The bridge owns only the draft context; free it before the
+            // caller-owned target context (matches LlamaEngine teardown).
+            if let mtpContext {
+                carbocation_llama_mtp_free_bridge(mtpContext)
+            }
+            llama_free(context)
+            return LlamaContextDecodeProbeOutcome(
+                succeeded: succeeded,
+                shouldReloadModelBeforeNextProbe: !succeeded
+            )
         }
         return LlamaContextDecodeProbeOutcome(
             succeeded: false,
             shouldReloadModelBeforeNextProbe: false
         )
+    }
+
+    /// Runs a decode that's representative of what chat actually does, so the
+    /// probe surfaces the same failures.
+    ///
+    /// Two things matter beyond simply creating the contexts:
+    ///   1. A real prompt prefills a full micro-batch. That builds a far larger
+    ///      Metal command buffer than a single token, and it's that command
+    ///      buffer — not context allocation — that exhausts GPU memory
+    ///      (kIOGPUCommandBufferCallbackErrorOutOfMemory) at an over-sized
+    ///      context. So we prime with a full `batchSize` micro-batch.
+    ///   2. Graph compute is enqueued asynchronously, so an over-budget command
+    ///      buffer can fail *after* `llama_decode` has already returned 0. We
+    ///      therefore `llama_synchronize` to force completion (which records the
+    ///      failure in the Metal backend's sticky error state) and then issue a
+    ///      follow-up decode, which the backend fails fast once that state is set.
+    ///
+    /// Returns true only if every decode succeeds.
+    private static func runRepresentativeDecodeProbe(
+        context: OpaquePointer,
+        mtpContext: UnsafeMutableRawPointer?,
+        safeToken: llama_token,
+        contextSize: Int,
+        batchSize: Int
+    ) -> Bool {
+        func decode(_ tokens: [llama_token], startPosition: Int) -> Int32 {
+            var tokens = tokens
+            return tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                guard let baseAddress = buffer.baseAddress else { return -1 }
+                if let mtpContext {
+                    return carbocation_llama_mtp_decode_target_tokens_bridge(
+                        mtpContext,
+                        baseAddress,
+                        Int32(buffer.count),
+                        Int32(startPosition)
+                    )
+                }
+                let batch = llama_batch_get_one(baseAddress, Int32(buffer.count))
+                return llama_decode(context, batch)
+            }
+        }
+
+        // Prime with a worst-case micro-batch, leaving one position free for the
+        // follow-up decode that reads the backend's post-synchronize state.
+        let primingTokenCount = max(1, min(batchSize, contextSize - 1))
+        let primingTokens = [llama_token](repeating: safeToken, count: primingTokenCount)
+        guard decode(primingTokens, startPosition: 0) == 0 else {
+            return false
+        }
+
+        // Force the GPU to finish so an asynchronous command-buffer failure is
+        // recorded before we decide the candidate succeeded.
+        llama_synchronize(context)
+
+        return decode([safeToken], startPosition: primingTokenCount) == 0
     }
 
     private static func decodeProbeTokens(vocabulary: OpaquePointer) -> [llama_token] {

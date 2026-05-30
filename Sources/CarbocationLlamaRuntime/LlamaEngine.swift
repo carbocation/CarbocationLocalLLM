@@ -23,7 +23,7 @@ let platformMaximumContextSize = Int.max
 public struct LlamaEngineConfiguration: Hashable, Sendable {
     public static var defaultGPULayerCount: Int32 { platformDefaultGPULayerCount }
     public static var defaultBatchSizeLimit: Int { platformDefaultBatchSizeLimit }
-    public static let defaultMTPMaxDraftTokens = 3
+    public static let defaultMTPMaxDraftTokens = 1
 
     public var gpuLayerCount: Int32
     public var useMemoryMap: Bool

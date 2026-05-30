@@ -42,6 +42,13 @@ public struct LlamaContextCalibrationRuntimeFingerprint: Codable, Hashable, Send
     public var useMemoryMap: Bool
     public var batchSizeLimit: Int
     public var threadCount: Int
+    /// Whether MTP acceleration is permitted for this runtime (i.e. the
+    /// acceleration policy is automatic). When enabled, MTP-capable models load
+    /// a second draft `llama_context`, which changes the memory footprint a
+    /// given context size requires — so calibration must be keyed to it.
+    public var mtpAccelerationEnabled: Bool
+    /// Effective MTP draft-token count for this runtime (0 when disabled).
+    public var mtpMaxDraftTokens: Int
     public var algorithmVersion: Int
 
     public init(
@@ -50,6 +57,8 @@ public struct LlamaContextCalibrationRuntimeFingerprint: Codable, Hashable, Send
         useMemoryMap: Bool,
         batchSizeLimit: Int,
         threadCount: Int,
+        mtpAccelerationEnabled: Bool = true,
+        mtpMaxDraftTokens: Int = 1,
         algorithmVersion: Int = LlamaContextCalibrationAlgorithm.version
     ) {
         self.platform = platform
@@ -57,6 +66,8 @@ public struct LlamaContextCalibrationRuntimeFingerprint: Codable, Hashable, Send
         self.useMemoryMap = useMemoryMap
         self.batchSizeLimit = batchSizeLimit
         self.threadCount = threadCount
+        self.mtpAccelerationEnabled = mtpAccelerationEnabled
+        self.mtpMaxDraftTokens = mtpMaxDraftTokens
         self.algorithmVersion = algorithmVersion
     }
 }
@@ -90,6 +101,8 @@ public struct LlamaContextCalibrationKey: Codable, Hashable, Sendable {
             "mmap=\(runtime.useMemoryMap)",
             "batchLimit=\(runtime.batchSizeLimit)",
             "threads=\(runtime.threadCount)",
+            "mtpAccel=\(runtime.mtpAccelerationEnabled)",
+            "mtpDraft=\(runtime.mtpMaxDraftTokens)",
             "algorithm=\(runtime.algorithmVersion)"
         ].joined(separator: "|")
     }
@@ -184,7 +197,11 @@ public struct LlamaContextCalibrationSearchResult: Hashable, Sendable {
 }
 
 public enum LlamaContextCalibrationAlgorithm {
-    public static let version = 6
+    // v7: the decode probe now stands up the same MTP draft context the live
+    // chat runtime builds and prefills a full micro-batch (synchronizing to
+    // surface asynchronous Metal command-buffer OOMs), so it reproduces the
+    // GPU-memory failures real chat hits instead of only allocating contexts.
+    public static let version = 7
 
     public static func powerOfTwoTiers(
         upTo upperBound: Int,

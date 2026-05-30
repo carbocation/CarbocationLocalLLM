@@ -209,6 +209,48 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil(store.record(for: model, runtime: currentRuntime))
     }
 
+    func testContextCalibrationKeyDistinguishesMTPRuntime() {
+        let model = InstalledModel(
+            displayName: "Calibration Model",
+            filename: "model-Q4_K_M.gguf",
+            sizeBytes: 2_000_000,
+            contextLength: 65_536,
+            quantization: "Q4_K_M",
+            source: .imported,
+            sha256: "abc123"
+        )
+        func storageKey(mtpEnabled: Bool, draftTokens: Int) -> String {
+            LlamaContextCalibrationKey(
+                deviceID: "device-a",
+                model: LlamaContextCalibrationModelFingerprint(model: model),
+                runtime: LlamaContextCalibrationRuntimeFingerprint(
+                    platform: "macOS",
+                    gpuLayerCount: 999,
+                    useMemoryMap: true,
+                    batchSizeLimit: 2_048,
+                    threadCount: 4,
+                    mtpAccelerationEnabled: mtpEnabled,
+                    mtpMaxDraftTokens: draftTokens
+                )
+            ).storageKey
+        }
+
+        // Toggling MTP, or changing the draft-token count, changes the runtime's
+        // memory footprint, so calibration records must not be shared across them.
+        XCTAssertNotEqual(
+            storageKey(mtpEnabled: true, draftTokens: 1),
+            storageKey(mtpEnabled: false, draftTokens: 0)
+        )
+        XCTAssertNotEqual(
+            storageKey(mtpEnabled: true, draftTokens: 1),
+            storageKey(mtpEnabled: true, draftTokens: 4)
+        )
+        XCTAssertEqual(
+            storageKey(mtpEnabled: true, draftTokens: 1),
+            storageKey(mtpEnabled: true, draftTokens: 1)
+        )
+    }
+
     func testContextCalibrationSearchUsesCoarsePowerOfTwoBisect() async throws {
         let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: 65_536)
         var probed: [Int] = []
