@@ -170,7 +170,12 @@ let package = Package(
                 .headerSearchPath("../../ggml/src"),
                 .headerSearchPath("../../src"),
                 .headerSearchPath("../../vendor"),
-                .unsafeFlags(["-UDEBUG", "-Wno-cast-qual"])
+                .unsafeFlags([
+                    "-iquote", "\(packageRoot)/Vendor/llama.cpp/include",
+                    "-iquote", "\(packageRoot)/Vendor/llama.cpp/ggml/include",
+                    "-UDEBUG",
+                    "-Wno-cast-qual"
+                ])
             ]
         ),
         .target(
