@@ -3,9 +3,44 @@ import Foundation
 import llama
 
 extension LlamaEngine {
+    enum PromptRuntimeResetPath: Equatable {
+        case llamaMemory
+        case mtpBridge
+    }
+
+    struct PromptRuntimeResetPlan: Equatable {
+        var clearsPromptCaches: Bool
+        var resetPath: PromptRuntimeResetPath
+    }
+
     func clearPromptCaches() {
         cachedPromptTokens = nil
         mtpCachedPromptTokens = nil
+    }
+
+    static func promptRuntimeResetPlan(
+        mtpContext: UnsafeMutableRawPointer?
+    ) -> PromptRuntimeResetPlan {
+        PromptRuntimeResetPlan(
+            clearsPromptCaches: true,
+            resetPath: mtpContext == nil ? .llamaMemory : .mtpBridge
+        )
+    }
+
+    func clearPromptRuntimeState(
+        context: OpaquePointer,
+        mtpContext: UnsafeMutableRawPointer?
+    ) {
+        let plan = Self.promptRuntimeResetPlan(mtpContext: mtpContext)
+        if plan.clearsPromptCaches {
+            clearPromptCaches()
+        }
+        switch plan.resetPath {
+        case .llamaMemory:
+            llama_memory_clear(llama_get_memory(context), false)
+        case .mtpBridge:
+            carbocation_llama_mtp_clear_bridge(mtpContext)
+        }
     }
 
     func commitPromptCache(_ promptTokens: [llama_token], mtpSynchronized: Bool) {

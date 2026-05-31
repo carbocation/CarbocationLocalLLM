@@ -384,6 +384,21 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(oneTokenExact.decodeStartIndex, 0)
     }
 
+    func testPromptRuntimeResetPlanClearsLlamaMemoryWhenMTPIsNotLoaded() {
+        let plan = LlamaEngine.promptRuntimeResetPlan(mtpContext: nil)
+
+        XCTAssertTrue(plan.clearsPromptCaches)
+        XCTAssertEqual(plan.resetPath, .llamaMemory)
+    }
+
+    func testPromptRuntimeResetPlanClearsLoadedMTPBridgeWhenPresent() {
+        let loadedMTPContext = UnsafeMutableRawPointer(bitPattern: 0x1)
+        let plan = LlamaEngine.promptRuntimeResetPlan(mtpContext: loadedMTPContext)
+
+        XCTAssertTrue(plan.clearsPromptCaches)
+        XCTAssertEqual(plan.resetPath, .mtpBridge)
+    }
+
     func testContextClampRespectsTrainingLimitAndMinimum() {
         XCTAssertEqual(
             LlamaEngine.clampedContextSize(requestedContext: 32_768, trainingContext: 16_384),
@@ -1969,6 +1984,65 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             }
         }
 
+        await engine.unload()
+    }
+
+    func testVisionLiveClearsKVCacheAfterPriorTextGenerationWhenModelPathsProvided() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let modelPath = environment["CLLM_VISION_MODEL_PATH"],
+              let mmprojPath = environment["CLLM_VISION_MMPROJ_PATH"],
+              !modelPath.isEmpty,
+              !mmprojPath.isEmpty
+        else {
+            throw XCTSkip("Set CLLM_VISION_MODEL_PATH and CLLM_VISION_MMPROJ_PATH to run the live vision KV reset test.")
+        }
+
+        let requestedContext = environment["CLLM_VISION_CONTEXT"].flatMap(Int.init) ?? 4_096
+        let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
+            gpuLayerCount: 0,
+            useMemoryMap: true,
+            batchSizeLimit: 128,
+            threadCount: 2,
+            promptReserveTokens: 16,
+            accelerationPolicy: .disabled
+        ))
+        let loaded = try await engine.load(
+            descriptor: LlamaModelDescriptor(
+                url: URL(fileURLWithPath: modelPath),
+                mmprojURL: URL(fileURLWithPath: mmprojPath),
+                displayName: "Live Vision Test Model"
+            ),
+            requestedContext: requestedContext
+        )
+        XCTAssertTrue(loaded.supportsVision)
+
+        _ = try await engine.generate(
+            system: "You are concise.",
+            prompt: "Reply with one word: ok.",
+            options: GenerationOptions(temperature: 0, maxOutputTokens: 2),
+            onPhaseAwareEvent: { _ in }
+        )
+
+        let image = LLMImageInput.rgb8(
+            width: 2,
+            height: 2,
+            data: Data([
+                255, 0, 0, 0, 255, 0,
+                0, 0, 255, 255, 255, 255
+            ])
+        )
+        let result = try await engine.generatePhased(
+            messages: [
+                LLMChatMessage(role: .user, content: [
+                    .text("Describe the attached test image in a short phrase."),
+                    .image(image)
+                ])
+            ],
+            options: GenerationOptions(temperature: 0, maxOutputTokens: 8),
+            onEvent: { _ in }
+        )
+
+        XCTAssertGreaterThan(result.promptTokens, 0)
         await engine.unload()
     }
 

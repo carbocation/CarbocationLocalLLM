@@ -1119,7 +1119,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         )
 
         if let multimodalPrefill {
-            clearPromptCaches()
+            clearPromptRuntimeState(context: context, mtpContext: mtpContext)
             try multimodalPrefill.evaluate(
                 mtmdContext: mtmdContext,
                 llamaContext: context,
