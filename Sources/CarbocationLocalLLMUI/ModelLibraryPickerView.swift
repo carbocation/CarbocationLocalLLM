@@ -188,7 +188,7 @@ public struct ModelLibraryPickerView: View {
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [Self.ggufContentType],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
             importLocalGGUF(result)
         }
@@ -838,21 +838,27 @@ public struct ModelLibraryPickerView: View {
     }
 
     private func importLocalGGUF(_ result: Result<[URL], Error>) {
-        let url: URL
+        let urls: [URL]
         do {
-            guard let firstURL = try result.get().first else { return }
-            url = firstURL
+            urls = try result.get()
+            guard !urls.isEmpty else { return }
         } catch {
             downloadError = error.localizedDescription
             return
         }
 
         Task {
-            let didStart = url.startAccessingSecurityScopedResource()
-            defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+            let scopedURLs = urls.map { url in
+                (url, url.startAccessingSecurityScopedResource())
+            }
+            defer {
+                for (url, didStart) in scopedURLs where didStart {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
 
             do {
-                let model = try await library.importFile(at: url)
+                let model = try await library.importFiles(at: urls)
                 if selectedModelID.isEmpty {
                     selectedModelID = model.id.uuidString
                 }

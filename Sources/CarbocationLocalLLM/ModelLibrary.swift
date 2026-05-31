@@ -167,6 +167,12 @@ public final class ModelLibrary {
         return result.model
     }
 
+    public func importFiles(at sourceURLs: [URL], displayName: String? = nil) async throws -> InstalledModel {
+        let result = try await fileWorker.importFiles(at: sourceURLs, displayName: displayName)
+        apply(result.snapshot)
+        return result.model
+    }
+
     public func delete(id: UUID) async throws {
         apply(try await fileWorker.delete(id: id))
     }
@@ -294,28 +300,26 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     }
 
     func importFile(at sourceURL: URL, displayName: String?) async throws -> ModelLibraryInstallResult {
+        try await importFiles(at: [sourceURL], displayName: displayName)
+    }
+
+    func importFiles(at sourceURLs: [URL], displayName: String?) async throws -> ModelLibraryInstallResult {
         try await run {
-            let filename = sourceURL.lastPathComponent
-            guard filename.lowercased().hasSuffix(".gguf") else {
-                throw ModelLibraryError.notAGGUF(filename)
+            guard let primaryURL = sourceURLs.first(where: { Self.isModelGGUF($0.lastPathComponent) }) else {
+                if let invalid = sourceURLs.first(where: { !$0.lastPathComponent.lowercased().hasSuffix(".gguf") }) {
+                    throw ModelLibraryError.notAGGUF(invalid.lastPathComponent)
+                }
+                throw ModelLibraryError.missingPrimaryArtifact
             }
-            guard self.fileManager.fileExists(atPath: sourceURL.path) else {
-                throw ModelLibraryError.sourceFileMissing(sourceURL)
+            guard self.fileManager.fileExists(atPath: primaryURL.path) else {
+                throw ModelLibraryError.sourceFileMissing(primaryURL)
             }
 
             let resolvedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                ?? filename.replacingOccurrences(of: ".gguf", with: "")
+                ?? primaryURL.lastPathComponent.replacingOccurrences(of: ".gguf", with: "")
 
             return try self.install(
-                artifacts: [
-                    ModelLibraryInstallArtifact(
-                        sourceURL: sourceURL,
-                        role: .primaryModel,
-                        relativePath: filename,
-                        sizeBytes: 0,
-                        copySource: true
-                    )
-                ],
+                artifacts: self.importArtifacts(primaryURL: primaryURL, selectedURLs: sourceURLs),
                 displayName: resolvedName,
                 source: .imported,
                 hfRepo: nil,
@@ -325,6 +329,71 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
                 quantization: nil
             )
         }
+    }
+
+    private func importArtifacts(primaryURL: URL, selectedURLs: [URL]) -> [ModelLibraryInstallArtifact] {
+        var artifacts = [
+            ModelLibraryInstallArtifact(
+                sourceURL: primaryURL,
+                role: .primaryModel,
+                relativePath: primaryURL.lastPathComponent,
+                sizeBytes: 0,
+                copySource: true
+            )
+        ]
+
+        if let mmprojURL = selectMMProj(for: primaryURL, selectedURLs: selectedURLs) {
+            artifacts.append(ModelLibraryInstallArtifact(
+                sourceURL: mmprojURL,
+                role: .mmproj,
+                relativePath: mmprojURL.lastPathComponent,
+                sizeBytes: 0,
+                copySource: true
+            ))
+        }
+
+        return artifacts
+    }
+
+    private func selectMMProj(for primaryURL: URL, selectedURLs: [URL]) -> URL? {
+        let selectedPaths = Set(selectedURLs.map { $0.standardizedFileURL.path })
+        let primaryPath = primaryURL.standardizedFileURL.path
+        var candidates = selectedURLs
+
+        if let siblingURLs = try? fileManager.contentsOfDirectory(
+            at: primaryURL.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            candidates.append(contentsOf: siblingURLs)
+        }
+
+        var seen: Set<String> = []
+        let primaryBits = Self.quantBits(for: primaryURL.lastPathComponent)
+        var best: (url: URL, selected: Bool, diff: Int)?
+
+        for candidate in candidates {
+            let path = candidate.standardizedFileURL.path
+            guard path != primaryPath,
+                  seen.insert(path).inserted,
+                  Self.isMMProj(candidate.lastPathComponent),
+                  fileManager.fileExists(atPath: path),
+                  fileManager.isReadableFile(atPath: path)
+            else { continue }
+
+            let isSelected = selectedPaths.contains(path)
+            let diff = abs(Self.quantBits(for: candidate.lastPathComponent) - primaryBits)
+            if best == nil
+                || (isSelected && !best!.selected)
+                || (isSelected == best!.selected && diff < best!.diff)
+                || (isSelected == best!.selected
+                    && diff == best!.diff
+                    && candidate.lastPathComponent.localizedStandardCompare(best!.url.lastPathComponent) == .orderedAscending) {
+                best = (candidate, isSelected, diff)
+            }
+        }
+
+        return best?.url
     }
 
     func delete(id: UUID) async throws -> ModelLibrarySnapshot {
@@ -672,6 +741,50 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     private func exactContentKey(_ model: InstalledModel) -> String? {
         guard let repoFile = repoFileKey(model) else { return nil }
         return "\(repoFile)|\(model.sha256?.lowercased() ?? "-")"
+    }
+
+    private struct SplitInfo {
+        var tag: String
+    }
+
+    private static func isModelGGUF(_ path: String) -> Bool {
+        let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+        return filename.hasSuffix(".gguf")
+            && !filename.contains("mmproj")
+            && !filename.contains("imatrix")
+    }
+
+    private static func isMMProj(_ path: String) -> Bool {
+        let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+        return filename.hasSuffix(".gguf") && filename.contains("mmproj")
+    }
+
+    private static func quantBits(for path: String) -> Int {
+        let tag = splitInfo(for: path).tag
+        guard let digit = tag.firstIndex(where: { $0.isNumber }) else { return 0 }
+        return Int(tag[digit...].prefix { $0.isNumber }) ?? 0
+    }
+
+    private static func splitInfo(for path: String) -> SplitInfo {
+        var prefix = path
+        if prefix.lowercased().hasSuffix(".gguf") {
+            prefix.removeLast(5)
+        }
+        if let range = prefix.range(
+            of: "-[0-9]{5}-of-[0-9]{5}$",
+            options: [.regularExpression, .caseInsensitive]
+        ) {
+            prefix.removeSubrange(range)
+        }
+
+        var tag = ""
+        if let range = prefix.range(
+            of: "[-.][A-Za-z0-9_]+$",
+            options: [.regularExpression]
+        ) {
+            tag = String(prefix[range].dropFirst()).uppercased()
+        }
+        return SplitInfo(tag: tag)
     }
 
     private func removeDirectoryIfOwned(_ directory: URL, expectedID: UUID) {

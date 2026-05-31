@@ -43,6 +43,12 @@ guard info?.supportsVision == true else {
 }
 ```
 
+For GGUF model families that ship vision separately, install the text model and its companion
+`mmproj` GGUF. Hugging Face downloads and Hugging Face cache discovery include matching
+`mmproj` artifacts automatically when the repository exposes them. For local file import,
+select both files, or keep the companion `mmproj*.gguf`/`*-mmproj.*.gguf` readable next to the
+text model file.
+
 Run preflight before generation:
 
 ```swift

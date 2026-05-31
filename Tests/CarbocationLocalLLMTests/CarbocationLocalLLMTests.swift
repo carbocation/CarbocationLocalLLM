@@ -833,6 +833,36 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     @MainActor
+    func testModelLibraryImportIncludesCompanionMMProj() async throws {
+        let root = try makeTemporaryDirectory()
+        let source = root.appendingPathComponent("model.q4_k_m.gguf")
+        let autoMMProj = root.appendingPathComponent("model-mmproj.q8_0.gguf")
+        let explicitMMProj = root.appendingPathComponent("model-mmproj.bf16.gguf")
+        let primaryData = makeMinimalGGUF(contextLength: 262_144)
+        let autoMMProjData = Data("q8 mmproj".utf8)
+        let explicitMMProjData = Data("bf16 mmproj".utf8)
+        try primaryData.write(to: source)
+        try autoMMProjData.write(to: autoMMProj)
+        try explicitMMProjData.write(to: explicitMMProj)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
+
+        let model = try await library.importFiles(at: [source, explicitMMProj])
+
+        XCTAssertEqual(model.artifacts.map(\.role), [.primaryModel, .mmproj])
+        XCTAssertEqual(
+            model.artifacts.map(\.relativePath),
+            [
+                "model.q4_k_m.gguf",
+                "model-mmproj.bf16.gguf"
+            ]
+        )
+        XCTAssertEqual(model.sizeBytes, Int64(primaryData.count + explicitMMProjData.count))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: model.weightsURL(in: modelsRoot).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: model.mmprojURL(in: modelsRoot)?.path ?? ""))
+    }
+
+    @MainActor
     func testModelLibraryDiscoversHuggingFaceCacheSnapshotsReadOnly() async throws {
         let root = try makeTemporaryDirectory()
         let hubRoot = root.appendingPathComponent("hub", isDirectory: true)
@@ -1244,6 +1274,35 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertTrue(client.requests.contains {
             $0.value(forHTTPHeaderField: "Authorization") == "Bearer hf_testtoken"
         })
+    }
+
+    func testHuggingFaceResolverPairsRootModelWithNearestMMProjQuant() async throws {
+        let client = MockHuggingFaceHTTPClient(
+            refsJSON: refsJSON(commit: Self.mockCommit),
+            treeJSON: #"""
+            [
+              {"type":"file","path":"README.md","size":10},
+              {"type":"file","path":"model-mmproj.bf16.gguf","size":1190000000},
+              {"type":"file","path":"model-mmproj.f16.gguf","size":1190000000},
+              {"type":"file","path":"model-mmproj.f32.gguf","size":2290000000},
+              {"type":"file","path":"model-mmproj.q8_0.gguf","size":806000000},
+              {"type":"file","path":"model.q4_k_m.gguf","size":16900000000},
+              {"type":"file","path":"model.q6_k.gguf","size":23200000000}
+            ]
+            """#
+        )
+        let endpoint = URL(string: "https://huggingface.test")!
+        let resolver = HuggingFaceModelResolver(endpoint: endpoint, httpClient: client)
+        let reference = HuggingFaceModelReference(
+            repo: "org/model",
+            endpoint: endpoint
+        )
+
+        let resolution = try await resolver.resolve(reference)
+
+        XCTAssertEqual(resolution.primaryArtifact.path, "model.q4_k_m.gguf")
+        XCTAssertEqual(resolution.mmprojArtifact?.path, "model-mmproj.q8_0.gguf")
+        XCTAssertEqual(resolution.totalSizeBytes, 17_706_000_000)
     }
 
     func testHuggingFaceResolverChoosesRequestedSplitQuant() async throws {
