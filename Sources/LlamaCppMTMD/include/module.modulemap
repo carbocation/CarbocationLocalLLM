@@ -1,0 +1,4 @@
+module LlamaCppMTMDAudio {
+  header "LlamaCppMTMDAudio.h"
+  export *
+}
