@@ -424,21 +424,7 @@ public struct HuggingFaceModelResolver: Sendable {
     }
 
     private func selectMMProj(for primary: RepoFile, in files: [RepoFile]) -> RepoFile? {
-        let primaryDirectory = directoryPath(primary.path)
-        let primaryBits = quantBits(for: primary.path)
-        var best: (file: RepoFile, depth: Int, diff: Int)?
-
-        for file in files where Self.isMMProj(file.path) {
-            let directory = directoryPath(file.path)
-            guard primaryDirectory.hasPrefix(directory) || directory == primaryDirectory else { continue }
-            let depth = directory.split(separator: "/").count
-            let diff = abs(quantBits(for: file.path) - primaryBits)
-            if best == nil || depth > best!.depth || (depth == best!.depth && diff < best!.diff) {
-                best = (file, depth, diff)
-            }
-        }
-
-        return best?.file
+        MMProjSelector.selectBest(primaryPath: primary.path, candidates: files) { $0.path }
     }
 
     private func apiURL(path: String) throws -> URL {
@@ -504,11 +490,6 @@ public struct HuggingFaceModelResolver: Sendable {
             && !filename.contains("imatrix")
     }
 
-    private static func isMMProj(_ path: String) -> Bool {
-        let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-        return filename.hasSuffix(".gguf") && filename.contains("mmproj")
-    }
-
     private static func path(_ path: String, matchesQuantization quantization: String) -> Bool {
         let escaped = NSRegularExpression.escapedPattern(for: quantization)
         return path.range(
@@ -549,18 +530,6 @@ public struct HuggingFaceModelResolver: Sendable {
             tag = String(prefix[range].dropFirst()).uppercased()
         }
         return SplitInfo(prefix: prefix, tag: tag, index: index, count: count)
-    }
-
-    private func quantBits(for path: String) -> Int {
-        let tag = splitInfo(for: path).tag
-        guard let digit = tag.firstIndex(where: { $0.isNumber }) else { return 0 }
-        return Int(tag[digit...].prefix { $0.isNumber }) ?? 0
-    }
-
-    private func directoryPath(_ path: String) -> String {
-        let url = URL(fileURLWithPath: path)
-        let directory = url.deletingLastPathComponent().relativePath
-        return directory == "." ? "" : directory
     }
 
     private func displayName(for path: String) -> String {

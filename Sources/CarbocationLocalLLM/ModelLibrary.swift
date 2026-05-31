@@ -356,7 +356,6 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
     }
 
     private func selectMMProj(for primaryURL: URL, selectedURLs: [URL]) -> URL? {
-        let selectedPaths = Set(selectedURLs.map { $0.standardizedFileURL.path })
         let primaryPath = primaryURL.standardizedFileURL.path
         var candidates = selectedURLs
 
@@ -369,31 +368,17 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
         }
 
         var seen: Set<String> = []
-        let primaryBits = Self.quantBits(for: primaryURL.lastPathComponent)
-        var best: (url: URL, selected: Bool, diff: Int)?
-
-        for candidate in candidates {
+        let readableCandidates = candidates.filter { candidate in
             let path = candidate.standardizedFileURL.path
-            guard path != primaryPath,
-                  seen.insert(path).inserted,
-                  Self.isMMProj(candidate.lastPathComponent),
-                  fileManager.fileExists(atPath: path),
-                  fileManager.isReadableFile(atPath: path)
-            else { continue }
-
-            let isSelected = selectedPaths.contains(path)
-            let diff = abs(Self.quantBits(for: candidate.lastPathComponent) - primaryBits)
-            if best == nil
-                || (isSelected && !best!.selected)
-                || (isSelected == best!.selected && diff < best!.diff)
-                || (isSelected == best!.selected
-                    && diff == best!.diff
-                    && candidate.lastPathComponent.localizedStandardCompare(best!.url.lastPathComponent) == .orderedAscending) {
-                best = (candidate, isSelected, diff)
-            }
+            return path != primaryPath
+                && seen.insert(path).inserted
+                && fileManager.fileExists(atPath: path)
+                && fileManager.isReadableFile(atPath: path)
         }
 
-        return best?.url
+        return MMProjSelector.selectBest(primaryPath: primaryPath, candidates: readableCandidates) {
+            $0.standardizedFileURL.path
+        }
     }
 
     func delete(id: UUID) async throws -> ModelLibrarySnapshot {
@@ -743,48 +728,11 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
         return "\(repoFile)|\(model.sha256?.lowercased() ?? "-")"
     }
 
-    private struct SplitInfo {
-        var tag: String
-    }
-
     private static func isModelGGUF(_ path: String) -> Bool {
         let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
         return filename.hasSuffix(".gguf")
             && !filename.contains("mmproj")
             && !filename.contains("imatrix")
-    }
-
-    private static func isMMProj(_ path: String) -> Bool {
-        let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-        return filename.hasSuffix(".gguf") && filename.contains("mmproj")
-    }
-
-    private static func quantBits(for path: String) -> Int {
-        let tag = splitInfo(for: path).tag
-        guard let digit = tag.firstIndex(where: { $0.isNumber }) else { return 0 }
-        return Int(tag[digit...].prefix { $0.isNumber }) ?? 0
-    }
-
-    private static func splitInfo(for path: String) -> SplitInfo {
-        var prefix = path
-        if prefix.lowercased().hasSuffix(".gguf") {
-            prefix.removeLast(5)
-        }
-        if let range = prefix.range(
-            of: "-[0-9]{5}-of-[0-9]{5}$",
-            options: [.regularExpression, .caseInsensitive]
-        ) {
-            prefix.removeSubrange(range)
-        }
-
-        var tag = ""
-        if let range = prefix.range(
-            of: "[-.][A-Za-z0-9_]+$",
-            options: [.regularExpression]
-        ) {
-            tag = String(prefix[range].dropFirst()).uppercased()
-        }
-        return SplitInfo(tag: tag)
     }
 
     private func removeDirectoryIfOwned(_ directory: URL, expectedID: UUID) {

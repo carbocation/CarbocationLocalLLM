@@ -184,8 +184,10 @@ struct CustomHFSheet: View {
                 if resolution.splitCount > 1 {
                     Text("\(resolution.splitCount) split files")
                 }
-                if resolution.mmprojArtifact != nil {
-                    Text("mmproj included")
+                if let mmproj = resolution.mmprojArtifact {
+                    Text("mmproj \(mmproj.path)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
             .font(.caption)

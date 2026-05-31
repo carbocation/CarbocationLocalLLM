@@ -45,6 +45,43 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testCapabilitiesKeepModelTextOnlyWhenMMProjIsNotRecognizedByMTMD() async throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
+        let model = InstalledModel(
+            displayName: "Invalid Projector",
+            filename: "Fixture-Q4_K_M.gguf",
+            sizeBytes: 20,
+            contextLength: 4_096,
+            quantization: "Q4_K_M",
+            source: .imported,
+            artifacts: [
+                InstalledModelArtifact(
+                    role: .primaryModel,
+                    relativePath: "Fixture-Q4_K_M.gguf",
+                    sizeBytes: 9
+                ),
+                InstalledModelArtifact(
+                    role: .mmproj,
+                    relativePath: "Fixture-mmproj-Q8_0.gguf",
+                    sizeBytes: 11
+                )
+            ]
+        )
+        let directory = model.directory(in: root)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("fake gguf".utf8).write(to: model.weightsURL(in: root))
+        try Data("fake mmproj".utf8).write(to: try XCTUnwrap(model.mmprojURL(in: root)))
+        try LocalLLMJSON.makePrettyEncoder().encode(model).write(to: model.metadataURL(in: root))
+
+        await library.refresh()
+
+        let capabilities = LocalLLMEngine.capabilities(for: .installed(model.id), in: library)
+        XCTAssertEqual(capabilities.supportedInputModalities, [.text])
+        XCTAssertFalse(capabilities.supportsVision)
+    }
+
+    @MainActor
     func testLoadPlanRefreshesBeforeResolvingInstalledModel() async throws {
         let root = try makeTemporaryDirectory()
         let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })

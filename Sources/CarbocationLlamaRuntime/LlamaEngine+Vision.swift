@@ -73,19 +73,24 @@ extension LlamaEngine {
         guard let mmprojURL else {
             return VisionProjectorLoadResult(context: nil, unsupportedDetail: nil)
         }
+        llamaRuntimeLog.info("Loading vision projector at \(mmprojURL.path, privacy: .public)")
         guard FileManager.default.fileExists(atPath: mmprojURL.path) else {
+            let detail = "The mmproj artifact file was not found."
+            llamaRuntimeLog.info("Vision projector unavailable: \(detail, privacy: .public)")
             return VisionProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: "The mmproj artifact file was not found."
+                unsupportedDetail: detail
             )
         }
         let caps = mmprojURL.path.withCString { cPath in
             carbocation_mtmd_get_cap_from_file_bridge(cPath)
         }
         guard caps.inp_vision else {
+            let detail = "mtmd_get_cap_from_file did not report image input support."
+            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
             return VisionProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: "mtmd_get_cap_from_file did not report image input support."
+                unsupportedDetail: detail
             )
         }
 
@@ -97,17 +102,21 @@ extension LlamaEngine {
                 Int32(max(1, threads))
             )
         }) else {
+            let detail = "mtmd_init_from_file returned null."
+            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
             return VisionProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: "mtmd_init_from_file returned null."
+                unsupportedDetail: detail
             )
         }
 
         guard carbocation_mtmd_support_vision_bridge(context) else {
             carbocation_mtmd_free_bridge(context)
+            let detail = "The initialized mtmd context does not support image input."
+            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
             return VisionProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: "The initialized mtmd context does not support image input."
+                unsupportedDetail: detail
             )
         }
 

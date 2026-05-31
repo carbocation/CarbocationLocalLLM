@@ -833,7 +833,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
     }
 
     @MainActor
-    func testModelLibraryImportIncludesCompanionMMProj() async throws {
+    func testModelLibraryImportUsesLlamaStyleCompanionMMProjSelection() async throws {
         let root = try makeTemporaryDirectory()
         let source = root.appendingPathComponent("model.q4_k_m.gguf")
         let autoMMProj = root.appendingPathComponent("model-mmproj.q8_0.gguf")
@@ -854,12 +854,51 @@ final class CarbocationLocalLLMTests: XCTestCase {
             model.artifacts.map(\.relativePath),
             [
                 "model.q4_k_m.gguf",
-                "model-mmproj.bf16.gguf"
+                "model-mmproj.q8_0.gguf"
             ]
         )
-        XCTAssertEqual(model.sizeBytes, Int64(primaryData.count + explicitMMProjData.count))
+        XCTAssertEqual(model.sizeBytes, Int64(primaryData.count + autoMMProjData.count))
         XCTAssertTrue(FileManager.default.fileExists(atPath: model.weightsURL(in: modelsRoot).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: model.mmprojURL(in: modelsRoot)?.path ?? ""))
+    }
+
+    func testMMProjSelectorMatchesLlamaCppDirectoryDepthBeforeQuant() {
+        let selected = MMProjSelector.selectBest(
+            primaryPath: "models/deep/model-Q4_K_M.gguf",
+            candidatePaths: [
+                "mmproj-Q4_K_M.gguf",
+                "models/mmproj-Q4_K_M.gguf",
+                "models/deep/mmproj-F16.gguf",
+                "models/deep/mmproj-Q8_0.gguf",
+                "models/deep/child/mmproj-Q4_K_M.gguf"
+            ]
+        )
+
+        XCTAssertEqual(selected, "models/deep/mmproj-Q8_0.gguf")
+    }
+
+    func testMMProjSelectorRejectsStringPrefixDirectories() {
+        let selected = MMProjSelector.selectBest(
+            primaryPath: "models-v2/model-Q4_K_M.gguf",
+            candidatePaths: [
+                "models/mmproj-Q4_K_M.gguf"
+            ]
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testMMProjSelectorReturnsNilWithoutMMProjGGUF() {
+        let selected = MMProjSelector.selectBest(
+            primaryPath: "models/model-Q4_K_M.gguf",
+            candidatePaths: [
+                "models/mmproj.txt",
+                "models/projector-Q4_K_M.gguf",
+                "models/child/mmproj-Q4_K_M.gguf"
+            ]
+        )
+
+        XCTAssertNil(selected)
     }
 
     @MainActor
@@ -1065,6 +1104,57 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(library.models[0].id, modelID)
         XCTAssertEqual(library.models[0].displayName, "Orphan-Q5_K_M")
         XCTAssertEqual(library.models[0].quantization, "Q5_K_M")
+    }
+
+    @MainActor
+    func testModelLibraryKeepsManagedMetadataMMProjWhenSiblingWouldScoreBetter() async throws {
+        let root = try makeTemporaryDirectory()
+        let sourcesRoot = root.appendingPathComponent("Sources", isDirectory: true)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourcesRoot, withIntermediateDirectories: true)
+
+        let primary = sourcesRoot.appendingPathComponent("model-Q4_K_M.gguf")
+        let metadataMMProj = sourcesRoot.appendingPathComponent("metadata-mmproj-F16.gguf")
+        try Data("primary".utf8).write(to: primary)
+        try Data("metadata mmproj".utf8).write(to: metadataMMProj)
+
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
+        let model = try await library.add(
+            artifacts: [
+                ModelLibraryInstallArtifact(
+                    sourceURL: primary,
+                    role: .primaryModel,
+                    relativePath: "model-Q4_K_M.gguf",
+                    sizeBytes: 0
+                ),
+                ModelLibraryInstallArtifact(
+                    sourceURL: metadataMMProj,
+                    role: .mmproj,
+                    relativePath: "metadata-mmproj-F16.gguf",
+                    sizeBytes: 0
+                )
+            ],
+            displayName: "Managed Metadata",
+            source: .imported,
+            hfRepo: nil,
+            hfFilename: nil,
+            sha256: nil,
+            contextLength: 0,
+            quantization: "Q4_K_M"
+        )
+
+        try Data("better sibling".utf8).write(
+            to: model.directory(in: modelsRoot).appendingPathComponent("model-mmproj-Q8_0.gguf")
+        )
+
+        await library.refresh()
+        let refreshed = try XCTUnwrap(library.model(id: model.id))
+
+        XCTAssertEqual(
+            refreshed.artifacts.filter { $0.role == .mmproj }.map(\.relativePath),
+            ["metadata-mmproj-F16.gguf"]
+        )
+        XCTAssertEqual(refreshed.mmprojURL(in: modelsRoot)?.lastPathComponent, "metadata-mmproj-F16.gguf")
     }
 
     @MainActor

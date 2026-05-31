@@ -4,6 +4,7 @@ import CarbocationLocalLLMRuntimeUI
 import Foundation
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
@@ -74,6 +75,7 @@ private enum CLLMSmokeMetadata {
 private struct SmokeRootView: View {
     private let library: ModelLibrary
     @State private var selectedModelID: String
+    @State private var showImageImporter = false
     @State private var smoke = SmokeState()
 
     init() {
@@ -87,6 +89,13 @@ private struct SmokeRootView: View {
         rootContent
             .onChange(of: selectedModelID) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: CLLMSmokeMetadata.selectedModelDefaultsKey)
+            }
+            .fileImporter(
+                isPresented: $showImageImporter,
+                allowedContentTypes: [.png, .jpeg, .heic, .heif],
+                allowsMultipleSelection: false
+            ) { result in
+                smoke.handleImageImport(result)
             }
     }
 
@@ -159,6 +168,8 @@ private struct SmokeRootView: View {
                 .disabled(smoke.output.isEmpty || smoke.isRunning)
             }
 
+            imageControls
+
             ScrollView {
                 Text(smoke.output.isEmpty ? "Select a model and run the smoke test." : smoke.output)
                     .font(.system(.caption, design: .monospaced))
@@ -168,6 +179,57 @@ private struct SmokeRootView: View {
             .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 6))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var imageControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Vision Input")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    showImageImporter = true
+                } label: {
+                    Label(smoke.selectedImage == nil ? "Attach Image" : "Replace Image", systemImage: "photo.badge.plus")
+                }
+                .disabled(smoke.isRunning)
+
+                Button {
+                    smoke.clearImage()
+                } label: {
+                    Label("Remove", systemImage: "xmark.circle")
+                }
+                .disabled(smoke.selectedImage == nil || smoke.isRunning)
+            }
+
+            if let selectedImage = smoke.selectedImage {
+                HStack(spacing: 10) {
+#if os(macOS)
+                    if let image = NSImage(data: selectedImage.data) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 64, height: 64)
+                            .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 4))
+                    }
+#endif
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectedImage.filename)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(selectedImage.detailText)
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+            } else {
+                Text("No image attached")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 6))
     }
 
     private static func makeLibrary() -> ModelLibrary {
@@ -195,23 +257,43 @@ private final class SmokeState {
 
     var output = ""
     var isRunning = false
+    var selectedImage: SmokeImageSelection?
 
     func clear() {
         output = ""
+    }
+
+    func clearImage() {
+        selectedImage = nil
+    }
+
+    func handleImageImport(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else { return }
+            selectedImage = try SmokeImageSelection(url: url)
+            append("image: selected \(selectedImage?.filename ?? url.lastPathComponent)")
+        } catch {
+            append("image: failed: \(error.localizedDescription)")
+        }
     }
 
     func run(selection: LLMModelSelection, library: ModelLibrary) {
         guard !isRunning else { return }
         isRunning = true
         output = ""
+        let image = selectedImage
 
         Task { @MainActor in
-            await runSmoke(selection: selection, library: library)
+            await runSmoke(selection: selection, library: library, image: image)
             isRunning = false
         }
     }
 
-    private func runSmoke(selection: LLMModelSelection, library: ModelLibrary) async {
+    private func runSmoke(
+        selection: LLMModelSelection,
+        library: ModelLibrary,
+        image: SmokeImageSelection?
+    ) async {
         do {
             let engine = LocalLLMEngine(configuration: LocalLLMEngineConfiguration(
                 heartbeatInterval: 0.5
@@ -239,20 +321,37 @@ private final class SmokeState {
             append("trainingContext: \(loaded.trainingContextSize)")
             append("supportsGrammar: \(loaded.supportsGrammar)")
             append("supportsMTPAcceleration: \(loaded.supportsMTPAcceleration)")
+            append("supportsVision: \(loaded.supportsVision)")
+            if let image {
+                append("image: \(image.filename) \(image.detailText)")
+            }
 
             let options = generationOptions(for: loaded)
 
-            let response = try await engine.generate(
-                system: systemPrompt(for: loaded),
-                prompt: #"Return {"ok": true, "message": "hello"}."#,
-                options: options,
-                onPhaseAwareEvent: { [weak self] event in
-                    Task { @MainActor [weak self] in
-                        self?.append(Self.format(event: event))
+            let response: String
+            if let image {
+                response = try await engine.generate(
+                    messages: messages(for: loaded, image: image),
+                    options: options,
+                    onPhaseAwareEvent: { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.append(Self.format(event: event))
+                        }
                     }
-                },
-                ()
-            )
+                )
+            } else {
+                response = try await engine.generate(
+                    system: systemPrompt(for: loaded),
+                    prompt: #"Return {"ok": true, "message": "hello"}."#,
+                    options: options,
+                    onPhaseAwareEvent: { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.append(Self.format(event: event))
+                        }
+                    },
+                    ()
+                )
+            }
 
             let normalized = try Self.validatedNormalizedJSON(from: response)
             append("rawResponse:")
@@ -355,6 +454,19 @@ private final class SmokeState {
         return "Return only JSON matching the requested schema. Do not include prose."
     }
 
+    private func messages(
+        for loaded: LocalLLMLoadedModelInfo,
+        image: SmokeImageSelection
+    ) -> [LLMChatMessage] {
+        [
+            LLMChatMessage(role: .system, text: systemPrompt(for: loaded)),
+            LLMChatMessage(role: .user, content: [
+                .text(#"Inspect the attached image. Return {"ok": true, "message": "<short image description>"}."#),
+                .image(image.input)
+            ])
+        ]
+    }
+
     private func providerLabel(for selection: LLMModelSelection) -> String {
         switch selection {
         case .installed:
@@ -362,6 +474,45 @@ private final class SmokeState {
         case .system(.appleIntelligence):
             return "Apple Intelligence"
         }
+    }
+}
+
+private struct SmokeImageSelection: Hashable, Sendable {
+    var filename: String
+    var data: Data
+    var mimeType: String?
+
+    init(url: URL) throws {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let data = try Data(contentsOf: url)
+        self.filename = url.lastPathComponent
+        self.data = data
+        self.mimeType = Self.mimeType(for: url, data: data)
+    }
+
+    var input: LLMImageInput {
+        .encoded(data: data, mimeType: mimeType)
+    }
+
+    var detailText: String {
+        let byteCount = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+        if let mimeType {
+            return "\(byteCount), \(mimeType)"
+        }
+        return byteCount
+    }
+
+    private static func mimeType(for url: URL, data: Data) -> String? {
+        if let format = LLMImageInput.sniffEncodedFormat(data) {
+            return format.mimeType
+        }
+        return UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
     }
 }
 
