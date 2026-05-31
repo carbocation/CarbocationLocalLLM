@@ -800,7 +800,35 @@ Scripts/set-llama-binary-artifact.sh \
   "$(cat Vendor/llama-artifacts/release/llama.xcframework.zip.checksum)"
 ```
 
-### Publish a binary release
+### Publish a binary release locally
+
+Use the local release script when you want to avoid waiting for a fresh GitHub
+Actions runner. It uses an ignored reusable worktree at
+`.build/llama-release-worktree`, so repeated local release attempts can reuse
+the llama build cache.
+
+First run a dry run:
+
+```sh
+Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease
+```
+
+The dry run builds the artifact, stamps `Package.swift` inside the isolated
+worktree, validates the package against the local XCFramework, and restores the
+worktree manifest without committing, tagging, or uploading.
+
+Then publish from the same machine:
+
+```sh
+Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease --publish
+```
+
+The publish run creates the same tag-only release commit as CI, pushes only the
+tag, uploads `llama.xcframework.zip` with `gh release create`, and validates the
+published release from a clean consumer package plus app-style links. Pass
+`--prerelease` for shakedown releases.
+
+### Publish a binary release with GitHub Actions
 
 Use the **Publish Llama Binary Artifact** GitHub workflow.
 
@@ -826,7 +854,7 @@ The release workflow runs a consumer import check after uploading the GitHub rel
 
 ### Quick release checklist
 
-For a normal release, use the GitHub workflow rather than creating the tag by hand. For example, to cut `v0.3.0`:
+For example, to cut `v0.3.0`:
 
 1. Finish and push the source changes that should be released.
 2. Confirm the package is clean locally:
@@ -859,8 +887,8 @@ For a normal release, use the GitHub workflow rather than creating the tag by ha
      CODE_SIGNING_ALLOWED=NO
    ```
 
-3. In GitHub Actions, run `Publish Llama Binary Artifact` with `tag: v0.3.0`, `prerelease: false`, `dry_run: true`.
-4. If the dry run passes, run the same workflow again with `dry_run: false`.
+3. Run `Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease`.
+4. If the dry run passes, run `Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease --publish`. If local publishing is unavailable, run the GitHub workflow with `dry_run: true`, then `dry_run: false`.
 5. Optionally verify from a clean consumer package:
 
    ```sh
@@ -947,6 +975,9 @@ Scripts/
   build-llama-from-xcode.sh               Adjacent-checkout build helper for host apps
   build-llama-xcframework.sh              Binary artifact packager
   set-llama-binary-artifact.sh            Release manifest stamper
+  publish-llama-binary-local.sh           Local binary release publisher
+  validate-local-binary-artifact.sh       Local binary artifact validation
+  validate-published-binary-release.sh    Published release validation
   test-binary-release.sh                  Clean downstream release import check
 Vendor/
   llama.cpp/                              git submodule

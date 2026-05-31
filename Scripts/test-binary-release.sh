@@ -56,7 +56,8 @@ let package = Package(
             dependencies: [
                 .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
+                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
             ]
         ),
         .target(
@@ -64,7 +65,8 @@ let package = Package(
             dependencies: [
                 .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
+                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
             ]
         )
     ]
@@ -75,6 +77,7 @@ cat > "$WORK_DIR/Sources/ReleaseImportCheck/main.swift" <<'EOF'
 import CarbocationLocalLLM
 import CarbocationLocalLLMUI
 import CarbocationLocalLLMRuntime
+import CarbocationLocalLLMRuntimeUI
 import Foundation
 
 let curatedCount = CuratedModelCatalog.all.count
@@ -102,6 +105,7 @@ EOF
 cat > "$WORK_DIR/Sources/ReleaseIOSImportCheck/ImportCheck.swift" <<'EOF'
 import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
+import CarbocationLocalLLMRuntimeUI
 import CarbocationLocalLLMUI
 import Foundation
 
