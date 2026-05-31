@@ -13,6 +13,82 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(LlamaRuntimeSmoke.defaultContextBatchSize(), 0)
     }
 
+    func testRuntimeImportsAndLinksMTMDSymbols() {
+        XCTAssertEqual(LlamaRuntimeSmoke.defaultMediaMarker(), "<__media__>")
+    }
+
+    func testLoadedModelInfoReportsVisionCapability() {
+        let textOnly = LlamaLoadedModelInfo(
+            modelID: nil,
+            modelPath: "/tmp/model.gguf",
+            displayName: nil,
+            filename: "model.gguf",
+            contextSize: 4_096,
+            trainingContextSize: 4_096,
+            hasEmbeddedChatTemplate: true
+        )
+        XCTAssertEqual(textOnly.supportedInputModalities, [.text])
+        XCTAssertFalse(textOnly.supportsVision)
+
+        let vision = LlamaLoadedModelInfo(
+            modelID: nil,
+            modelPath: "/tmp/model.gguf",
+            displayName: nil,
+            filename: "model.gguf",
+            contextSize: 4_096,
+            trainingContextSize: 4_096,
+            hasEmbeddedChatTemplate: true,
+            supportedInputModalities: [.text, .image]
+        )
+        XCTAssertTrue(vision.supportsVision)
+    }
+
+    func testVisionPromptRenderingUsesMediaMarkersAndKeepsImagesSeparate() async throws {
+        let engine = LlamaEngine()
+        let rendered = try await engine.publicChatTemplateMessages(
+            from: [
+                LLMChatMessage(role: .user, content: [
+                    .text("before "),
+                    .image(.rgb8(width: 1, height: 1, data: Data([1, 2, 3]))),
+                    .text(" after")
+                ])
+            ],
+            mediaMarker: "<__media__>"
+        )
+
+        XCTAssertEqual(rendered.messages.count, 1)
+        XCTAssertEqual(rendered.messages[0].content.stringValue, "before <__media__> after")
+        XCTAssertEqual(rendered.images.count, 1)
+        XCTAssertEqual(rendered.images[0].location, LLMContentLocation(messageIndex: 0, partIndex: 1))
+        XCTAssertEqual(rendered.images[0].image.data, Data([1, 2, 3]))
+    }
+
+    func testVisionPromptRenderingRejectsAssistantImagesWithLocation() async throws {
+        let engine = LlamaEngine()
+
+        do {
+            _ = try await engine.publicChatTemplateMessages(
+                from: [
+                    LLMChatMessage(role: .assistant, content: [
+                        .image(.rgb8(width: 1, height: 1, data: Data([0, 0, 0])))
+                    ])
+                ],
+                mediaMarker: "<__media__>"
+            )
+            XCTFail("Expected assistant image placement rejection.")
+        } catch let error as LLMEngineError {
+            guard case .unsupportedImagePlacement(let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 0))
+        }
+    }
+
+    func testVisionTokenAccountingUsesContextPositionCostWhenHigher() {
+        XCTAssertEqual(LlamaVisionTokenAccounting.contextCost(tokenCount: 12, positionCount: 9), 12)
+        XCTAssertEqual(LlamaVisionTokenAccounting.contextCost(tokenCount: 12, positionCount: 20), 20)
+    }
+
     func testMTPAccelerationPolicyAllowsGrammarAndControlObject() {
         let opaqueMTPContext = UnsafeMutableRawPointer(bitPattern: 0x1)
         XCTAssertTrue(LlamaEngine.shouldUseMTPAcceleration(

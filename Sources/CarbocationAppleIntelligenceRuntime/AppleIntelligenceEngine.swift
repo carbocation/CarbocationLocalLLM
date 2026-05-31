@@ -452,6 +452,18 @@ public actor AppleIntelligenceEngine: LLMEngine {
         )
     }
 
+    public func preflight(
+        messages: [LLMChatMessage],
+        options: CarbocationLocalLLM.GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        let textOnly = try LLMChatTextRenderer.textOnlySystemAndPrompt(from: messages)
+        return try await preflight(
+            system: textOnly.system,
+            prompt: textOnly.prompt,
+            options: options
+        )
+    }
+
     public func generate(
         system: String,
         prompt: String,
@@ -650,6 +662,37 @@ public actor AppleIntelligenceSession {
         return AppleIntelligencePromptBudget.preflight(
             system: system,
             prompt: prompt,
+            options: options,
+            contextSize: availability.contextSize,
+            promptReserveTokens: configuration.promptReserveTokens
+        )
+    }
+
+    public func preflight(
+        messages: [LLMChatMessage],
+        options: CarbocationLocalLLM.GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        let combinedMessages: [LLMChatMessage]
+        if system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            combinedMessages = messages
+        } else {
+            combinedMessages = [LLMChatMessage(role: .system, text: system)] + messages
+        }
+        let textOnly = try LLMChatTextRenderer.textOnlySystemAndPrompt(from: combinedMessages)
+        let availability = AppleIntelligenceEngine.availability()
+        guard availability.isAvailable else {
+            throw AppleIntelligenceEngineError.unavailable(availability)
+        }
+
+        let resolvedOptions = AppleIntelligenceOptionsMapper.resolve(options)
+        if configuration.unsupportedFeatureBehavior == .fail,
+           !resolvedOptions.unsupportedFeatures.isEmpty {
+            throw AppleIntelligenceEngineError.unsupportedFeatures(resolvedOptions.unsupportedFeatures)
+        }
+
+        return AppleIntelligencePromptBudget.preflight(
+            system: textOnly.system,
+            prompt: textOnly.prompt,
             options: options,
             contextSize: availability.contextSize,
             promptReserveTokens: configuration.promptReserveTokens

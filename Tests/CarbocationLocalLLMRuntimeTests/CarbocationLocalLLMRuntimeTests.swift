@@ -34,10 +34,14 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
         let installed = LocalLLMEngine.capabilities(for: .installed(installedID))
         XCTAssertTrue(installed.supportsGrammar)
         XCTAssertTrue(installed.usesExactTokenCounts)
+        XCTAssertEqual(installed.supportedInputModalities, [.text])
+        XCTAssertFalse(installed.supportsVision)
 
         let system = LocalLLMEngine.capabilities(for: .system(.appleIntelligence))
         XCTAssertFalse(system.supportsGrammar)
         XCTAssertFalse(system.usesExactTokenCounts)
+        XCTAssertEqual(system.supportedInputModalities, [.text])
+        XCTAssertFalse(system.supportsVision)
     }
 
     @MainActor

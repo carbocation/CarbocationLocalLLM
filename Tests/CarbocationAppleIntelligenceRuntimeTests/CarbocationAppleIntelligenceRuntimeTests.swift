@@ -309,6 +309,29 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
     }
     #endif
 
+    func testAppleIntelligencePreflightRejectsImageMessagesBeforeAvailabilityCheck() async {
+        let engine = AppleIntelligenceEngine()
+
+        do {
+            _ = try await engine.preflight(
+                messages: [
+                    LLMChatMessage(role: .user, content: [
+                        .image(.rgb8(width: 1, height: 1, data: Data([0, 0, 0])))
+                    ])
+                ],
+                options: .extractionSafe
+            )
+            XCTFail("Expected image modality rejection.")
+        } catch let error as LLMEngineError {
+            guard case .unsupportedInputModality(.image, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 0))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testLiveGenerationWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
             throw XCTSkip("Set CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 to run the live Apple Intelligence smoke test.")

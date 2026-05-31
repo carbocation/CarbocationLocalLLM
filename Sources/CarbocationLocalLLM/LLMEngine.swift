@@ -6,11 +6,22 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
     case contextInitFailed(String)
     case tokenizationFailed
     case insufficientGenerationBudget(contextSize: Int, promptTokens: Int, reserve: Int)
+    case contextBudgetExceeded(contextSize: Int, promptTokens: Int, reserve: Int)
     case decodeFailed
     case samplerInitFailed
     case grammarParseFailed
     case chatTemplateUnavailable(String)
     case structuredOutputPhaseFailed(String)
+    case unsupportedInputModality(LLMInputModality, location: LLMContentLocation? = nil)
+    case unsupportedImagePlacement(location: LLMContentLocation)
+    case invalidImageData(String, location: LLMContentLocation? = nil)
+    case unsupportedImageFormat(String, location: LLMContentLocation? = nil)
+    case imageMIMEMismatch(declared: String, detected: String, location: LLMContentLocation? = nil)
+    case imageDecodeFailed(String, location: LLMContentLocation? = nil)
+    case visionProjectorMissing
+    case visionProjectorUnsupported(String)
+    case imageTokenizationFailed(String, location: LLMContentLocation? = nil)
+    case unsupportedMultimodalToolGeneration
 
     public var errorDescription: String? {
         switch self {
@@ -24,6 +35,8 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
             return "Failed to tokenize the prompt."
         case .insufficientGenerationBudget(let contextSize, let promptTokens, let reserve):
             return "Prompt used \(promptTokens) tokens in a \(contextSize)-token context, leaving fewer than \(reserve) tokens to generate a response."
+        case .contextBudgetExceeded(let contextSize, let promptTokens, let reserve):
+            return "Prompt used \(promptTokens) tokens in a \(contextSize)-token context, leaving fewer than \(reserve) tokens to generate a response."
         case .decodeFailed:
             return "llama_decode failed."
         case .samplerInitFailed:
@@ -34,7 +47,32 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
             return "Loaded model has no supported chat template. \(detail)"
         case .structuredOutputPhaseFailed(let detail):
             return "Structured output generation failed: \(detail)"
+        case .unsupportedInputModality(let modality, let location):
+            return "Input modality '\(modality.rawValue)' is not supported\(Self.locationSuffix(location))."
+        case .unsupportedImagePlacement(let location):
+            return "Images are only supported in user messages\(Self.locationSuffix(location))."
+        case .invalidImageData(let detail, let location):
+            return "Invalid image data\(Self.locationSuffix(location)): \(detail)"
+        case .unsupportedImageFormat(let detail, let location):
+            return "Unsupported image format\(Self.locationSuffix(location)): \(detail)"
+        case .imageMIMEMismatch(let declared, let detected, let location):
+            return "Image MIME type mismatch\(Self.locationSuffix(location)): declared \(declared), detected \(detected)."
+        case .imageDecodeFailed(let detail, let location):
+            return "Image decode failed\(Self.locationSuffix(location)): \(detail)"
+        case .visionProjectorMissing:
+            return "The loaded model does not have a vision projector."
+        case .visionProjectorUnsupported(let detail):
+            return "The vision projector is unsupported: \(detail)"
+        case .imageTokenizationFailed(let detail, let location):
+            return "Image tokenization failed\(Self.locationSuffix(location)): \(detail)"
+        case .unsupportedMultimodalToolGeneration:
+            return "Tool generation with image inputs is not supported."
         }
+    }
+
+    private static func locationSuffix(_ location: LLMContentLocation?) -> String {
+        guard let location else { return "" }
+        return " at message \(location.messageIndex), part \(location.partIndex)"
     }
 }
 
@@ -665,6 +703,22 @@ extension LLMPhasedGenerationProvider {
     }
 }
 
+public protocol LLMMultimodalGenerationProvider: LLMEngine {
+    func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String
+
+    func generatePhased(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void
+    ) async throws -> LLMGenerationResult
+}
+
 public protocol LLMEngine: Sendable {
     func currentModelID() async -> UUID?
     func currentContextSize() async -> Int
@@ -714,6 +768,117 @@ public protocol LLMEngine: Sendable {
 }
 
 extension LLMEngine {
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        if let provider = self as? any LLMMultimodalGenerationProvider {
+            return try await provider.generate(
+                messages: messages,
+                options: options,
+                control: control,
+                onPhaseAwareEvent: onPhaseAwareEvent
+            )
+        }
+
+        let textOnly = try LLMChatTextRenderer.textOnlySystemAndPrompt(from: messages)
+        return try await generate(
+            system: textOnly.system,
+            prompt: textOnly.prompt,
+            options: options,
+            control: control,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        onEvent: @escaping @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: control,
+            onPhaseAwareEvent: { event in
+                if let streamEvent = event.streamEvent {
+                    onEvent(streamEvent)
+                }
+            }
+        )
+    }
+
+    public func generatePhased(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        try await generatePhased(
+            messages: messages,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generatePhased(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        if let provider = self as? any LLMMultimodalGenerationProvider {
+            return try await provider.generatePhased(
+                messages: messages,
+                options: options,
+                control: control,
+                onEvent: onEvent
+            )
+        }
+
+        let textOnly = try LLMChatTextRenderer.textOnlySystemAndPrompt(from: messages)
+        return try await generatePhased(
+            system: textOnly.system,
+            prompt: textOnly.prompt,
+            options: options,
+            control: control,
+            onEvent: onEvent
+        )
+    }
+
     public func generatePhased(
         system: String,
         prompt: String,

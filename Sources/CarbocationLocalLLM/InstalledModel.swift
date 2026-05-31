@@ -262,6 +262,17 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         directory(in: root).appendingPathComponent(filename)
     }
 
+    public func artifactURL(role: InstalledModelArtifactRole, in root: URL) -> URL? {
+        guard let artifact = artifacts.first(where: { $0.role == role }) else {
+            return nil
+        }
+        return directory(in: root).appendingPathComponent(artifact.relativePath)
+    }
+
+    public func mmprojURL(in root: URL) -> URL? {
+        artifactURL(role: .mmproj, in: root)
+    }
+
     public func metadataURL(in root: URL) -> URL {
         directory(in: root).appendingPathComponent("metadata.json")
     }

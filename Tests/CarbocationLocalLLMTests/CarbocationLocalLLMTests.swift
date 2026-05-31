@@ -1,3 +1,6 @@
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import CarbocationLocalLLM
 
@@ -2202,6 +2205,151 @@ final class CarbocationLocalLLMTests: XCTestCase {
             threadCount: 4,
             algorithmVersion: algorithmVersion
         )
+    }
+    func testRGB8ImageValidationRequiresTightThreeByteLayout() throws {
+        let valid = try LLMImageInput.rgb8(
+            width: 2,
+            height: 1,
+            data: Data([255, 0, 0, 0, 255, 0])
+        ).normalizedRGB8()
+
+        XCTAssertEqual(valid.width, 2)
+        XCTAssertEqual(valid.height, 1)
+        XCTAssertEqual(valid.data.count, 6)
+
+        do {
+            _ = try LLMImageInput.rgb8(width: 2, height: 2, data: Data(repeating: 0, count: 11))
+                .normalizedRGB8(location: LLMContentLocation(messageIndex: 3, partIndex: 1))
+            XCTFail("Expected RGB8 layout validation to fail.")
+        } catch let error as LLMEngineError {
+            guard case .invalidImageData(_, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 3, partIndex: 1))
+        }
+    }
+
+    func testEncodedImageMIMEMismatchIncludesLocation() throws {
+        let pngData = try makeOnePixelPNGData()
+        let location = LLMContentLocation(messageIndex: 0, partIndex: 2)
+
+        do {
+            _ = try LLMImageInput.encoded(data: pngData, mimeType: "image/jpeg")
+                .normalizedRGB8(location: location)
+            XCTFail("Expected MIME mismatch.")
+        } catch let error as LLMEngineError {
+            guard case .imageMIMEMismatch(let declared, let detected, let errorLocation) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(declared, "image/jpeg")
+            XCTAssertEqual(detected, "image/png")
+            XCTAssertEqual(errorLocation, location)
+        }
+    }
+
+    func testTextOnlyEngineRejectsImageMessagesWithRequestLocation() async throws {
+        let engine = TextOnlyScriptedEngine()
+        let messages = [
+            LLMChatMessage(role: .user, content: [
+                .text("Look at this"),
+                .image(.rgb8(width: 1, height: 1, data: Data([0, 0, 0])))
+            ])
+        ]
+
+        do {
+            _ = try await engine.generate(messages: messages, options: .extractionSafe) { _ in }
+            XCTFail("Expected image modality rejection.")
+        } catch let error as LLMEngineError {
+            guard case .unsupportedInputModality(.image, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 1))
+        }
+    }
+
+    func testMessageAPIKeepsTextOnlyEnginesSourceCompatible() async throws {
+        let engine = TextOnlyScriptedEngine(response: "ok")
+
+        let response = try await engine.generate(
+            messages: [
+                LLMChatMessage(role: .system, text: "System rule"),
+                LLMChatMessage(role: .user, text: "Hello")
+            ],
+            options: .extractionSafe
+        ) { _ in }
+
+        let invocation = await engine.lastInvocation()
+        XCTAssertEqual(response, "ok")
+        XCTAssertEqual(invocation?.system, "System rule")
+        XCTAssertEqual(invocation?.prompt, "Hello")
+    }
+
+    private func makeOnePixelPNGData() throws -> Data {
+        let rgba = Data([0x11, 0x22, 0x33, 0xFF])
+        let provider = CGDataProvider(data: rgba as CFData)!
+        let image = CGImage(
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )!
+
+        let output = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(
+            output,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        )!
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return output as Data
+    }
+}
+
+private actor TextOnlyScriptedEngine: LLMEngine {
+    private var response: String
+    private var invocation: (system: String, prompt: String)?
+
+    init(response: String = "") {
+        self.response = response
+    }
+
+    func currentModelID() async -> UUID? {
+        nil
+    }
+
+    func currentContextSize() async -> Int {
+        4_096
+    }
+
+    func generate(
+        system: String,
+        prompt: String,
+        options: GenerationOptions,
+        onEvent: @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        invocation = (system, prompt)
+        onEvent(.requestSent)
+        onEvent(.generationStats(
+            promptTokens: 1,
+            generatedTokens: response.isEmpty ? 0 : 1,
+            stopReason: "complete",
+            templateMode: .unavailable
+        ))
+        onEvent(.done(totalBytes: response.utf8.count, duration: 0))
+        return response
+    }
+
+    func lastInvocation() -> (system: String, prompt: String)? {
+        invocation
     }
 }
 

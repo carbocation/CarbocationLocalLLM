@@ -1,5 +1,6 @@
 import CarbocationLocalLLM
 import CarbocationLlamaCommonBridge
+import CarbocationLlamaMTMDBridge
 import Foundation
 import OSLog
 import llama
@@ -61,6 +62,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
 public struct LlamaModelDescriptor: Hashable, Sendable {
     public var id: UUID?
     public var url: URL
+    public var mmprojURL: URL?
     public var displayName: String?
     public var filename: String
     public var hfRepo: String?
@@ -69,6 +71,7 @@ public struct LlamaModelDescriptor: Hashable, Sendable {
     public init(
         id: UUID? = nil,
         url: URL,
+        mmprojURL: URL? = nil,
         displayName: String? = nil,
         filename: String? = nil,
         hfRepo: String? = nil,
@@ -76,6 +79,7 @@ public struct LlamaModelDescriptor: Hashable, Sendable {
     ) {
         self.id = id
         self.url = url
+        self.mmprojURL = mmprojURL
         self.displayName = displayName
         self.filename = filename ?? url.lastPathComponent
         self.hfRepo = hfRepo
@@ -86,6 +90,7 @@ public struct LlamaModelDescriptor: Hashable, Sendable {
         self.init(
             id: model.id,
             url: model.weightsURL(in: root),
+            mmprojURL: model.mmprojURL(in: root),
             displayName: model.displayName,
             filename: model.filename,
             hfRepo: model.hfRepo,
@@ -103,6 +108,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var trainingContextSize: Int
     public var hasEmbeddedChatTemplate: Bool
     public var supportsMTPAcceleration: Bool
+    public var supportedInputModalities: Set<LLMInputModality>
     public var architecture: String?
     public var nextNPredictLayers: Int?
 
@@ -115,6 +121,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         trainingContextSize: Int,
         hasEmbeddedChatTemplate: Bool,
         supportsMTPAcceleration: Bool = false,
+        supportedInputModalities: Set<LLMInputModality> = [.text],
         architecture: String? = nil,
         nextNPredictLayers: Int? = nil
     ) {
@@ -126,12 +133,17 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         self.trainingContextSize = trainingContextSize
         self.hasEmbeddedChatTemplate = hasEmbeddedChatTemplate
         self.supportsMTPAcceleration = supportsMTPAcceleration
+        self.supportedInputModalities = supportedInputModalities
         self.architecture = architecture
         self.nextNPredictLayers = nextNPredictLayers
     }
+
+    public var supportsVision: Bool {
+        supportedInputModalities.contains(.image)
+    }
 }
 
-public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedGenerationProvider {
+public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalGenerationProvider, LLMToolPhasedGenerationProvider {
     public static let shared = LlamaEngine()
 
     struct PromptPrefillPlan: Equatable {
@@ -256,13 +268,15 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
 
     let configuration: LlamaEngineConfiguration
 
-    private var model: OpaquePointer?
+    var model: OpaquePointer?
     var context: OpaquePointer?
     var vocabulary: OpaquePointer?
     private var mtpContext: UnsafeMutableRawPointer?
+    var mtmdContext: UnsafeMutableRawPointer?
+    var visionProjectorUnsupportedDetail: String?
     var mtpCachedPromptTokens: [llama_token]?
     var loadedDescriptor: LlamaModelDescriptor?
-    private var loadedInfo: LlamaLoadedModelInfo?
+    var loadedInfo: LlamaLoadedModelInfo?
     var chatTemplate: String?
     var preparedChatTemplate: PreparedChatTemplate?
     var outputSanitizationProfile: OutputSanitizationProfile = .empty
@@ -277,6 +291,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
     }
 
     deinit {
+        if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
@@ -386,11 +401,22 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         prompt: String,
         options: GenerationOptions
     ) async throws -> LLMGenerationPreflight {
-        guard context != nil, let vocabulary, let loadedInfo else {
+        guard context != nil, loadedInfo != nil else {
             throw LLMEngineError.noModelLoaded
         }
 
         let promptFormatting = try applyChatTemplate(system: system, user: prompt, options: options)
+        return try preflight(promptFormatting: promptFormatting, options: options)
+    }
+
+    func preflight(
+        promptFormatting: PromptFormattingResult,
+        options: GenerationOptions
+    ) throws -> LLMGenerationPreflight {
+        guard context != nil, let vocabulary, let loadedInfo else {
+            throw LLMEngineError.noModelLoaded
+        }
+
         let renderedPrompt = promptFormatting.text
         let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
             renderedPrompt,
@@ -591,6 +617,15 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
         let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+        let loadedVisionProjector = Self.loadVisionProjectorIfAvailable(
+            mmprojURL: descriptor.mmprojURL,
+            model: loadedModel,
+            threads: threads,
+            useGPU: configuration.gpuLayerCount > 0
+        )
+        let supportedInputModalities: Set<LLMInputModality> = loadedVisionProjector.context == nil
+            ? [.text]
+            : [.text, .image]
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
             modelPath: path,
@@ -600,6 +635,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
             trainingContextSize: max(0, trainingContext),
             hasEmbeddedChatTemplate: template != nil,
             supportsMTPAcceleration: supportsMTPAcceleration,
+            supportedInputModalities: supportedInputModalities,
             architecture: ggufMetadata.architecture,
             nextNPredictLayers: ggufMetadata.nextNPredictLayers
         )
@@ -626,6 +662,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         self.model = loadedModel
         self.context = loadedContext
         self.mtpContext = loadedMTPContext
+        self.mtmdContext = loadedVisionProjector.context
+        self.visionProjectorUnsupportedDetail = loadedVisionProjector.unsupportedDetail
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
@@ -697,6 +735,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         self.model = loadedModel
         self.context = nil
         self.mtpContext = nil
+        self.mtmdContext = nil
+        self.visionProjectorUnsupportedDetail = nil
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
@@ -736,6 +776,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
     }
 
     private func performUnload() {
+        if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
@@ -744,6 +785,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         self.model = nil
         self.context = nil
         self.mtpContext = nil
+        self.mtmdContext = nil
+        self.visionProjectorUnsupportedDetail = nil
         self.vocabulary = nil
         self.loadedDescriptor = nil
         self.loadedInfo = nil
@@ -919,6 +962,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
 
     func generatePhased(
         promptFormatting: PromptFormattingResult,
+        multimodalPrefill: LlamaPreparedMultimodalPrompt? = nil,
         options: GenerationOptions,
         control: LLMGenerationControl? = nil,
         controlGenerationID: UInt64? = nil,
@@ -980,19 +1024,38 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         let renderedPrompt = promptFormatting.text
         templateMode = promptFormatting.mode
 
-        let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
-            renderedPrompt,
-            vocab: vocabulary
-        )
-        let promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
-        promptTokenCount = promptTokens.count
-        guard !promptTokens.isEmpty else {
-            throw LLMEngineError.tokenizationFailed
+        let promptTokens: [llama_token]
+        let promptPositionCount: Int
+        if let multimodalPrefill {
+            promptTokens = []
+            promptTokenCount = multimodalPrefill.promptTokenCount
+            promptPositionCount = multimodalPrefill.promptPositionCount
+        } else {
+            let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
+                renderedPrompt,
+                vocab: vocabulary
+            )
+            promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
+            promptTokenCount = promptTokens.count
+            promptPositionCount = promptTokens.count
         }
-        guard promptTokens.count < currentContextSize() else {
-            throw LLMEngineError.insufficientGenerationBudget(
+        guard promptTokenCount > 0 else {
+            if multimodalPrefill == nil {
+                throw LLMEngineError.tokenizationFailed
+            }
+            throw LLMEngineError.imageTokenizationFailed("mtmd produced no prompt tokens.")
+        }
+        guard promptPositionCount < currentContextSize() else {
+            if multimodalPrefill == nil {
+                throw LLMEngineError.insufficientGenerationBudget(
+                    contextSize: currentContextSize(),
+                    promptTokens: promptTokenCount,
+                    reserve: configuration.promptReserveTokens
+                )
+            }
+            throw LLMEngineError.contextBudgetExceeded(
                 contextSize: currentContextSize(),
-                promptTokens: promptTokens.count,
+                promptTokens: promptTokenCount,
                 reserve: configuration.promptReserveTokens
             )
         }
@@ -1040,7 +1103,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         let sampler = samplerRuntime.chain
         defer { llama_sampler_free(sampler) }
 
-        let hasIncompatibleMTPControlPath = false
+        let hasIncompatibleMTPControlPath = multimodalPrefill != nil
         let maxMTPDraftTokens = mtpMaxDraftTokens
         let mtpStatus = Self.mtpAccelerationStatus(
             policy: configuration.accelerationPolicy,
@@ -1055,7 +1118,16 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
             maxDraftTokens: activeMTPContext == nil ? 0 : maxMTPDraftTokens
         )
 
-        try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
+        if let multimodalPrefill {
+            clearPromptCaches()
+            try multimodalPrefill.evaluate(
+                mtmdContext: mtmdContext,
+                llamaContext: context,
+                batchSize: Int32(max(1, llama_n_batch(context)))
+            )
+        } else {
+            try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
+        }
         promptContextPrepared = true
 
         var accumulatedData = Data()
@@ -1168,7 +1240,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
 
         let contextMaxNew = Self.maxGenerationTokens(
             contextSize: currentContextSize(),
-            promptTokenCount: promptTokens.count,
+            promptTokenCount: promptPositionCount,
             reserve: configuration.promptReserveTokens
         )
         let maxNew: Int
@@ -1179,9 +1251,16 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         }
 
         guard maxNew > 0 else {
-            throw LLMEngineError.insufficientGenerationBudget(
+            if multimodalPrefill == nil {
+                throw LLMEngineError.insufficientGenerationBudget(
+                    contextSize: currentContextSize(),
+                    promptTokens: promptTokenCount,
+                    reserve: configuration.promptReserveTokens
+                )
+            }
+            throw LLMEngineError.contextBudgetExceeded(
                 contextSize: currentContextSize(),
-                promptTokens: promptTokens.count,
+                promptTokens: promptTokenCount,
                 reserve: configuration.promptReserveTokens
             )
         }
@@ -1198,7 +1277,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
             source: String
         ) {
             guard tokenDiagnosticsEnabled else { return }
-            let position = promptTokens.count + generatedTokensIncludingThisToken - 1
+            let position = promptPositionCount + generatedTokensIncludingThisToken - 1
             onPhaseAwareEvent(.diagnostic(
                 message: "token-diagnostic generated index=\(generatedTokensIncludingThisToken) pos=\(position) source=\(source) token=\(diagnosticTokenDescription(token, vocab: vocabulary))"
             ))
@@ -1384,7 +1463,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
                 )
             }
 
-            let tokenPosition = promptTokens.count + generatedTokenHistory.count
+            let tokenPosition = promptPositionCount + generatedTokenHistory.count
             let next: llama_token
             let nextDiagnosticSource: String
             let reasoningBudgetState: carbocation_llama_reasoning_budget_state?
@@ -1660,12 +1739,14 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
             "Generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(accumulatedText.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
 
-        commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
-        promptCacheCommitted = true
+        if multimodalPrefill == nil {
+            commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
+            promptCacheCommitted = true
+        }
         emitAccelerationStatsIfNeeded()
         emittedStats = true
         onPhaseAwareEvent(.generationStats(
-            promptTokens: promptTokens.count,
+            promptTokens: promptTokenCount,
             generatedTokens: generatedTokenCount,
             stopReason: stopReason,
             templateMode: templateMode,
@@ -1678,7 +1759,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedG
         ))
         return resultPhases.generationResult(
             stopReason: stopReason,
-            promptTokens: promptTokens.count,
+            promptTokens: promptTokenCount,
             generatedTokens: generatedTokenCount,
             templateMode: templateMode,
             accelerationStats: accelerationStats

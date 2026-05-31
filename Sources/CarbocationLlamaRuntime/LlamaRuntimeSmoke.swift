@@ -1,4 +1,5 @@
 import CarbocationLocalLLM
+import CarbocationLlamaMTMDBridge
 import Foundation
 import llama
 
@@ -10,6 +11,10 @@ public enum LlamaRuntimeSmoke {
 
     public static func defaultContextBatchSize() -> UInt32 {
         llama_context_default_params().n_batch
+    }
+
+    public static func defaultMediaMarker() -> String {
+        String(cString: carbocation_mtmd_default_marker_bridge())
     }
 }
 

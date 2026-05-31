@@ -123,6 +123,57 @@ let package = Package(
             ]
         ),
         .target(
+            name: "LlamaCppMTMD",
+            dependencies: [],
+            path: "Vendor/llama.cpp/tools/mtmd",
+            sources: [
+                "mtmd.cpp",
+                "mtmd-audio.cpp",
+                "mtmd-image.cpp",
+                "mtmd-helper.cpp",
+                "clip.cpp",
+                "models/cogvlm.cpp",
+                "models/conformer.cpp",
+                "models/dotsocr.cpp",
+                "models/gemma4a.cpp",
+                "models/gemma4v.cpp",
+                "models/glm4v.cpp",
+                "models/granite-speech.cpp",
+                "models/hunyuanvl.cpp",
+                "models/internvl.cpp",
+                "models/kimivl.cpp",
+                "models/kimik25.cpp",
+                "models/nemotron-v2-vl.cpp",
+                "models/llama4.cpp",
+                "models/llava.cpp",
+                "models/minicpmv.cpp",
+                "models/paddleocr.cpp",
+                "models/pixtral.cpp",
+                "models/qwen2vl.cpp",
+                "models/qwen3vl.cpp",
+                "models/mimovl.cpp",
+                "models/qwen3a.cpp",
+                "models/step3vl.cpp",
+                "models/siglip.cpp",
+                "models/whisper-enc.cpp",
+                "models/deepseekocr.cpp",
+                "models/mobilenetv5.cpp",
+                "models/youtuvl.cpp",
+                "models/yasa2.cpp"
+            ],
+            publicHeadersPath: ".",
+            cxxSettings: [
+                .headerSearchPath("."),
+                .headerSearchPath("../.."),
+                .headerSearchPath("../../include"),
+                .headerSearchPath("../../ggml/include"),
+                .headerSearchPath("../../ggml/src"),
+                .headerSearchPath("../../src"),
+                .headerSearchPath("../../vendor"),
+                .unsafeFlags(["-UDEBUG", "-Wno-cast-qual"])
+            ]
+        ),
+        .target(
             name: "CarbocationLlamaCommonBridge",
             dependencies: [
                 "llama",
@@ -143,10 +194,22 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CarbocationLlamaMTMDBridge",
+            dependencies: [],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../Vendor/llama.cpp/tools/mtmd"),
+                .headerSearchPath("../../Vendor/llama.cpp/include"),
+                .headerSearchPath("../../Vendor/llama.cpp/ggml/include")
+            ]
+        ),
+        .target(
             name: "CarbocationLlamaRuntime",
             dependencies: [
                 "CarbocationLocalLLM",
                 "CarbocationLlamaCommonBridge",
+                "CarbocationLlamaMTMDBridge",
+                "LlamaCppMTMD",
                 "llama",
                 .product(name: "Jinja", package: "swift-jinja")
             ],

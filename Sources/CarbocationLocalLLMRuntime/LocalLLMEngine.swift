@@ -59,6 +59,7 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
     public var supportsGrammar: Bool
     public var usesExactTokenCounts: Bool
     public var supportsMTPAcceleration: Bool
+    public var supportedInputModalities: Set<LLMInputModality>
 
     public init(
         selection: LLMModelSelection,
@@ -67,7 +68,8 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         trainingContextSize: Int,
         supportsGrammar: Bool,
         usesExactTokenCounts: Bool,
-        supportsMTPAcceleration: Bool = false
+        supportsMTPAcceleration: Bool = false,
+        supportedInputModalities: Set<LLMInputModality> = [.text]
     ) {
         self.selection = selection
         self.displayName = displayName
@@ -76,6 +78,11 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         self.supportsGrammar = supportsGrammar
         self.usesExactTokenCounts = usesExactTokenCounts
         self.supportsMTPAcceleration = supportsMTPAcceleration
+        self.supportedInputModalities = supportedInputModalities
+    }
+
+    public var supportsVision: Bool {
+        supportedInputModalities.contains(.image)
     }
 }
 
@@ -84,17 +91,24 @@ public struct LocalLLMModelCapabilities: Hashable, Sendable {
     public var usesExactTokenCounts: Bool
     public var contextSize: Int
     public var supportsMTPAcceleration: Bool
+    public var supportedInputModalities: Set<LLMInputModality>
 
     public init(
         supportsGrammar: Bool,
         usesExactTokenCounts: Bool,
         contextSize: Int,
-        supportsMTPAcceleration: Bool = false
+        supportsMTPAcceleration: Bool = false,
+        supportedInputModalities: Set<LLMInputModality> = [.text]
     ) {
         self.supportsGrammar = supportsGrammar
         self.usesExactTokenCounts = usesExactTokenCounts
         self.contextSize = contextSize
         self.supportsMTPAcceleration = supportsMTPAcceleration
+        self.supportedInputModalities = supportedInputModalities
+    }
+
+    public var supportsVision: Bool {
+        supportedInputModalities.contains(.image)
     }
 }
 
@@ -140,7 +154,7 @@ public enum LocalLLMEngineError: Error, LocalizedError, Sendable {
     }
 }
 
-public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhasedGenerationProvider {
+public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalGenerationProvider, LLMToolPhasedGenerationProvider {
     public static let shared = LocalLLMEngine()
 
     private let llamaEngine: LlamaEngine
@@ -193,18 +207,28 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
             } else {
                 false
             }
+            let supportedInputModalities: Set<LLMInputModality> = if let library,
+                                                                     let installedModel,
+                                                                     let mmprojURL = installedModel.mmprojURL(in: library.root),
+                                                                     LlamaEngine.projectorSupportsVision(at: mmprojURL) {
+                [.text, .image]
+            } else {
+                [.text]
+            }
             return LocalLLMModelCapabilities(
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
                 contextSize: contextSize,
-                supportsMTPAcceleration: supportsMTPAcceleration
+                supportsMTPAcceleration: supportsMTPAcceleration,
+                supportedInputModalities: supportedInputModalities
             )
         case .system(.appleIntelligence):
             return LocalLLMModelCapabilities(
                 supportsGrammar: false,
                 usesExactTokenCounts: false,
                 contextSize: AppleIntelligenceEngine.availability().contextSize,
-                supportsMTPAcceleration: false
+                supportsMTPAcceleration: false,
+                supportedInputModalities: [.text]
             )
         }
     }
@@ -291,7 +315,8 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
                 trainingContextSize: loaded.trainingContextSize,
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
-                supportsMTPAcceleration: loaded.supportsMTPAcceleration
+                supportsMTPAcceleration: loaded.supportsMTPAcceleration,
+                supportedInputModalities: loaded.supportedInputModalities
             )
             loadedInfo = info
             return info
@@ -307,7 +332,8 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
                 trainingContextSize: availability.contextSize,
                 supportsGrammar: false,
                 usesExactTokenCounts: false,
-                supportsMTPAcceleration: false
+                supportsMTPAcceleration: false,
+                supportedInputModalities: [.text]
             )
             loadedInfo = info
             await llamaEngine.unload()
@@ -383,6 +409,28 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
         }
     }
 
+    public func preflight(
+        messages: [LLMChatMessage],
+        options: GenerationOptions
+    ) async throws -> LLMGenerationPreflight {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.preflight(messages: messages, options: options)
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.preflight(messages: messages, options: options)
+            } catch let error as LLMEngineError {
+                throw error
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
     public func generate(
         system: String,
         prompt: String,
@@ -427,6 +475,101 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
                     control: control,
                     onEvent: onEvent
                 )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        onEvent: @escaping @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: nil,
+            onEvent: onEvent
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMStreamEvent) -> Void
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: control,
+            onPhaseAwareEvent: { event in
+                if let streamEvent = event.streamEvent {
+                    onEvent(streamEvent)
+                }
+            }
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: nil,
+            onPhaseAwareEvent: onPhaseAwareEvent,
+            phaseAwareOverload
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void,
+        _ phaseAwareOverload: Void = ()
+    ) async throws -> String {
+        try await generate(
+            messages: messages,
+            options: options,
+            control: control,
+            onPhaseAwareEvent: onPhaseAwareEvent
+        )
+    }
+
+    public func generate(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl?,
+        onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void
+    ) async throws -> String {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.generate(
+                messages: messages,
+                options: options,
+                control: control,
+                onPhaseAwareEvent: onPhaseAwareEvent
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.generate(
+                    messages: messages,
+                    options: options,
+                    control: control,
+                    onPhaseAwareEvent: onPhaseAwareEvent
+                )
+            } catch let error as LLMEngineError {
+                throw error
             } catch {
                 throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
             }
@@ -515,6 +658,40 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMToolPhas
                     control: control,
                     onEvent: onEvent
                 )
+            } catch {
+                throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func generatePhased(
+        messages: [LLMChatMessage],
+        options: GenerationOptions,
+        control: LLMGenerationControl? = nil,
+        onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
+    ) async throws -> LLMGenerationResult {
+        guard let loadedInfo else {
+            throw LocalLLMEngineError.noSelectionLoaded
+        }
+
+        switch loadedInfo.selection {
+        case .installed:
+            return try await llamaEngine.generatePhased(
+                messages: messages,
+                options: options,
+                control: control,
+                onEvent: onEvent
+            )
+        case .system(.appleIntelligence):
+            do {
+                return try await appleIntelligenceEngine.generatePhased(
+                    messages: messages,
+                    options: options,
+                    control: control,
+                    onEvent: onEvent
+                )
+            } catch let error as LLMEngineError {
+                throw error
             } catch {
                 throw LocalLLMEngineError.systemModelGenerationFailed(error.localizedDescription)
             }
@@ -632,7 +809,8 @@ public actor LocalLLMSession {
                 trainingContextSize: loaded.trainingContextSize,
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
-                supportsMTPAcceleration: loaded.supportsMTPAcceleration
+                supportsMTPAcceleration: loaded.supportsMTPAcceleration,
+                supportedInputModalities: loaded.supportedInputModalities
             )
 
         case .system(.appleIntelligence):
@@ -651,7 +829,8 @@ public actor LocalLLMSession {
                 contextSize: availability.contextSize,
                 trainingContextSize: availability.contextSize,
                 supportsGrammar: false,
-                usesExactTokenCounts: false
+                usesExactTokenCounts: false,
+                supportedInputModalities: [.text]
             )
         }
     }
