@@ -1,6 +1,32 @@
 import Foundation
 
-public enum LLMEngineError: Error, LocalizedError, Sendable {
+public struct LLMAudioSampleRateMismatch: Hashable, Sendable {
+    public var expected: Int
+    public var actual: Int
+    // Keep a reference-backed field so Swift error observers bridge this value reliably.
+    private var bridgeDescription: String
+
+    public init(expected: Int, actual: Int) {
+        self.expected = expected
+        self.actual = actual
+        self.bridgeDescription = "expected \(expected) Hz, got \(actual) Hz"
+    }
+}
+
+public struct LLMAudioDurationLimit: Hashable, Sendable {
+    public var maxSeconds: TimeInterval
+    public var actualSeconds: TimeInterval
+    // Keep a reference-backed field so Swift error observers bridge this value reliably.
+    private var bridgeDescription: String
+
+    public init(maxSeconds: TimeInterval, actualSeconds: TimeInterval) {
+        self.maxSeconds = maxSeconds
+        self.actualSeconds = actualSeconds
+        self.bridgeDescription = "maximum \(maxSeconds)s, got \(actualSeconds)s"
+    }
+}
+
+public enum LLMEngineError: Error, LocalizedError, CustomNSError, Sendable {
     case noModelLoaded
     case modelLoadFailed(String)
     case contextInitFailed(String)
@@ -14,14 +40,96 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
     case structuredOutputPhaseFailed(String)
     case unsupportedInputModality(LLMInputModality, location: LLMContentLocation? = nil)
     case unsupportedImagePlacement(location: LLMContentLocation)
+    case unsupportedAudioPlacement(location: LLMContentLocation)
     case invalidImageData(String, location: LLMContentLocation? = nil)
     case unsupportedImageFormat(String, location: LLMContentLocation? = nil)
     case imageMIMEMismatch(declared: String, detected: String, location: LLMContentLocation? = nil)
     case imageDecodeFailed(String, location: LLMContentLocation? = nil)
+    case invalidAudioData(String, location: LLMContentLocation? = nil)
+    case unsupportedAudioFormat(String, location: LLMContentLocation? = nil)
+    case audioMIMEMismatch(declared: String, detected: String, location: LLMContentLocation? = nil)
+    case audioSampleRateMismatch(LLMAudioSampleRateMismatch, location: LLMContentLocation? = nil)
+    case audioDurationExceeded(LLMAudioDurationLimit, location: LLMContentLocation? = nil)
+    case audioTokenizationFailed(String, location: LLMContentLocation? = nil)
     case visionProjectorMissing
     case visionProjectorUnsupported(String)
     case imageTokenizationFailed(String, location: LLMContentLocation? = nil)
+    case multimodalProjectorMissing
+    case multimodalProjectorUnsupported(String)
     case unsupportedMultimodalToolGeneration
+
+    public static var errorDomain: String {
+        "CarbocationLocalLLM.LLMEngineError"
+    }
+
+    public var errorCode: Int {
+        switch self {
+        case .noModelLoaded:
+            return 1
+        case .modelLoadFailed:
+            return 2
+        case .contextInitFailed:
+            return 3
+        case .tokenizationFailed:
+            return 4
+        case .insufficientGenerationBudget:
+            return 5
+        case .contextBudgetExceeded:
+            return 6
+        case .decodeFailed:
+            return 7
+        case .samplerInitFailed:
+            return 8
+        case .grammarParseFailed:
+            return 9
+        case .chatTemplateUnavailable:
+            return 10
+        case .structuredOutputPhaseFailed:
+            return 11
+        case .unsupportedInputModality:
+            return 12
+        case .unsupportedImagePlacement:
+            return 13
+        case .unsupportedAudioPlacement:
+            return 14
+        case .invalidImageData:
+            return 15
+        case .unsupportedImageFormat:
+            return 16
+        case .imageMIMEMismatch:
+            return 17
+        case .imageDecodeFailed:
+            return 18
+        case .invalidAudioData:
+            return 19
+        case .unsupportedAudioFormat:
+            return 20
+        case .audioMIMEMismatch:
+            return 21
+        case .audioSampleRateMismatch:
+            return 22
+        case .audioDurationExceeded:
+            return 23
+        case .audioTokenizationFailed:
+            return 24
+        case .visionProjectorMissing:
+            return 25
+        case .visionProjectorUnsupported:
+            return 26
+        case .imageTokenizationFailed:
+            return 27
+        case .multimodalProjectorMissing:
+            return 28
+        case .multimodalProjectorUnsupported:
+            return 29
+        case .unsupportedMultimodalToolGeneration:
+            return 30
+        }
+    }
+
+    public var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: errorDescription ?? "LLM engine error."]
+    }
 
     public var errorDescription: String? {
         switch self {
@@ -51,6 +159,8 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
             return "Input modality '\(modality.rawValue)' is not supported\(Self.locationSuffix(location))."
         case .unsupportedImagePlacement(let location):
             return "Images are only supported in user messages\(Self.locationSuffix(location))."
+        case .unsupportedAudioPlacement(let location):
+            return "Audio is only supported in user messages\(Self.locationSuffix(location))."
         case .invalidImageData(let detail, let location):
             return "Invalid image data\(Self.locationSuffix(location)): \(detail)"
         case .unsupportedImageFormat(let detail, let location):
@@ -59,20 +169,40 @@ public enum LLMEngineError: Error, LocalizedError, Sendable {
             return "Image MIME type mismatch\(Self.locationSuffix(location)): declared \(declared), detected \(detected)."
         case .imageDecodeFailed(let detail, let location):
             return "Image decode failed\(Self.locationSuffix(location)): \(detail)"
+        case .invalidAudioData(let detail, let location):
+            return "Invalid audio data\(Self.locationSuffix(location)): \(detail)"
+        case .unsupportedAudioFormat(let detail, let location):
+            return "Unsupported audio format\(Self.locationSuffix(location)): \(detail)"
+        case .audioMIMEMismatch(let declared, let detected, let location):
+            return "Audio MIME type mismatch\(Self.locationSuffix(location)): declared \(declared), detected \(detected)."
+        case .audioSampleRateMismatch(let mismatch, let location):
+            return "Audio sample rate mismatch\(Self.locationSuffix(location)): expected \(mismatch.expected) Hz, got \(mismatch.actual) Hz."
+        case .audioDurationExceeded(let limit, let location):
+            return "Audio duration exceeded\(Self.locationSuffix(location)): maximum \(Self.duration(limit.maxSeconds)), got \(Self.duration(limit.actualSeconds))."
+        case .audioTokenizationFailed(let detail, let location):
+            return "Audio tokenization failed\(Self.locationSuffix(location)): \(detail)"
         case .visionProjectorMissing:
             return "The loaded model does not have a vision projector."
         case .visionProjectorUnsupported(let detail):
             return "The vision projector is unsupported: \(detail)"
         case .imageTokenizationFailed(let detail, let location):
             return "Image tokenization failed\(Self.locationSuffix(location)): \(detail)"
+        case .multimodalProjectorMissing:
+            return "The loaded model does not have a multimodal projector."
+        case .multimodalProjectorUnsupported(let detail):
+            return "The multimodal projector is unsupported: \(detail)"
         case .unsupportedMultimodalToolGeneration:
-            return "Tool generation with image inputs is not supported."
+            return "Tool generation with multimodal inputs is not supported."
         }
     }
 
     private static func locationSuffix(_ location: LLMContentLocation?) -> String {
         guard let location else { return "" }
         return " at message \(location.messageIndex), part \(location.partIndex)"
+    }
+
+    private static func duration(_ value: TimeInterval) -> String {
+        String(format: "%.2fs", value)
     }
 }
 

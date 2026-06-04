@@ -2416,6 +2416,26 @@ final class CarbocationLocalLLMTests: XCTestCase {
         }
     }
 
+    func testTextOnlyEngineRejectsAudioMessagesWithRequestLocation() async throws {
+        let engine = TextOnlyScriptedEngine()
+        let messages = [
+            LLMChatMessage(role: .user, content: [
+                .text("Listen to this"),
+                .audio(.pcmFloat32Mono(sampleRate: 16_000, data: Data([0, 0, 0, 0])))
+            ])
+        ]
+
+        do {
+            _ = try await engine.generate(messages: messages, options: .extractionSafe) { _ in }
+            XCTFail("Expected audio modality rejection.")
+        } catch let error as LLMEngineError {
+            guard case .unsupportedInputModality(.audio, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 1))
+        }
+    }
+
     func testMessageAPIKeepsTextOnlyEnginesSourceCompatible() async throws {
         let engine = TextOnlyScriptedEngine(response: "ok")
 

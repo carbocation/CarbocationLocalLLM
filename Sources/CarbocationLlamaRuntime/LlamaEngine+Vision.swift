@@ -24,7 +24,7 @@ final class LlamaPreparedMultimodalPrompt: @unchecked Sendable {
         batchSize: Int32
     ) throws {
         guard let mtmdContext else {
-            throw LLMEngineError.visionProjectorMissing
+            throw LLMEngineError.multimodalProjectorMissing
         }
         let result = carbocation_mtmd_helper_eval_chunks_bridge(
             mtmdContext,
@@ -45,52 +45,103 @@ struct LlamaVisionTokenAccounting {
 }
 
 extension LlamaEngine {
-    struct VisionProjectorLoadResult {
+    struct MultimodalProjectorLoadResult {
         var context: UnsafeMutableRawPointer?
         var unsupportedDetail: String?
+        var supportedInputModalities: Set<LLMInputModality>
+    }
+
+    enum LlamaMediaPayload {
+        case image(LLMRGBImage)
+        case audio(LLMAudioInput)
+
+        var inputModality: LLMInputModality {
+            switch self {
+            case .image:
+                return .image
+            case .audio:
+                return .audio
+            }
+        }
     }
 
     struct PublicMessageFormatting {
         var messages: [ChatTemplateMessage]
-        var images: [(location: LLMContentLocation, image: LLMRGBImage)]
+        var media: [(location: LLMContentLocation, payload: LlamaMediaPayload)]
+
+        var images: [(location: LLMContentLocation, image: LLMRGBImage)] {
+            media.compactMap { item in
+                if case .image(let image) = item.payload {
+                    return (item.location, image)
+                }
+                return nil
+            }
+        }
+
+        var audio: [(location: LLMContentLocation, audio: LLMAudioInput)] {
+            media.compactMap { item in
+                if case .audio(let audio) = item.payload {
+                    return (item.location, audio)
+                }
+                return nil
+            }
+        }
     }
 
     public nonisolated static func projectorSupportsVision(at url: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return false
-        }
-        return url.path.withCString { cPath in
-            carbocation_mtmd_get_cap_from_file_bridge(cPath).inp_vision
-        }
+        projectorSupportedInputModalities(at: url).contains(.image)
     }
 
-    static func loadVisionProjectorIfAvailable(
+    public nonisolated static func projectorSupportsAudio(at url: URL) -> Bool {
+        projectorSupportedInputModalities(at: url).contains(.audio)
+    }
+
+    public nonisolated static func projectorSupportedInputModalities(at url: URL) -> Set<LLMInputModality> {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return []
+        }
+        let caps = url.path.withCString { cPath in
+            carbocation_mtmd_get_cap_from_file_bridge(cPath)
+        }
+        var modalities: Set<LLMInputModality> = []
+        if caps.inp_vision { modalities.insert(.image) }
+        if caps.inp_audio { modalities.insert(.audio) }
+        return modalities
+    }
+
+    static func loadMultimodalProjectorIfAvailable(
         mmprojURL: URL?,
         model: OpaquePointer,
         threads: Int32,
         useGPU: Bool
-    ) -> VisionProjectorLoadResult {
+    ) -> MultimodalProjectorLoadResult {
         guard let mmprojURL else {
-            return VisionProjectorLoadResult(context: nil, unsupportedDetail: nil)
+            return MultimodalProjectorLoadResult(
+                context: nil,
+                unsupportedDetail: nil,
+                supportedInputModalities: [.text]
+            )
         }
-        llamaRuntimeLog.info("Loading vision projector at \(mmprojURL.path, privacy: .public)")
+        llamaRuntimeLog.info("Loading multimodal projector at \(mmprojURL.path, privacy: .public)")
         guard FileManager.default.fileExists(atPath: mmprojURL.path) else {
             let detail = "The mmproj artifact file was not found."
-            llamaRuntimeLog.info("Vision projector unavailable: \(detail, privacy: .public)")
-            return VisionProjectorLoadResult(
+            llamaRuntimeLog.info("Multimodal projector unavailable: \(detail, privacy: .public)")
+            return MultimodalProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: detail
+                unsupportedDetail: detail,
+                supportedInputModalities: [.text]
             )
         }
         let caps = mmprojURL.path.withCString { cPath in
             carbocation_mtmd_get_cap_from_file_bridge(cPath)
         }
-        guard caps.inp_vision else {
-            let detail = "mtmd_get_cap_from_file did not report image input support."
-            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
-            return VisionProjectorLoadResult(
+        guard caps.inp_vision || caps.inp_audio else {
+            let detail = "mtmd_get_cap_from_file did not report image or audio input support."
+            llamaRuntimeLog.info("Multimodal projector rejected: \(detail, privacy: .public)")
+            return MultimodalProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: detail
+                unsupportedDetail: detail,
+                supportedInputModalities: [.text]
             )
         }
 
@@ -103,24 +154,38 @@ extension LlamaEngine {
             )
         }) else {
             let detail = "mtmd_init_from_file returned null."
-            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
-            return VisionProjectorLoadResult(
+            llamaRuntimeLog.info("Multimodal projector rejected: \(detail, privacy: .public)")
+            return MultimodalProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: detail
+                unsupportedDetail: detail,
+                supportedInputModalities: [.text]
             )
         }
 
-        guard carbocation_mtmd_support_vision_bridge(context) else {
+        var supportedInputModalities: Set<LLMInputModality> = [.text]
+        if carbocation_mtmd_support_vision_bridge(context) {
+            supportedInputModalities.insert(.image)
+        }
+        if carbocation_mtmd_support_audio_bridge(context) {
+            supportedInputModalities.insert(.audio)
+        }
+
+        guard supportedInputModalities.count > 1 else {
             carbocation_mtmd_free_bridge(context)
-            let detail = "The initialized mtmd context does not support image input."
-            llamaRuntimeLog.info("Vision projector rejected: \(detail, privacy: .public)")
-            return VisionProjectorLoadResult(
+            let detail = "The initialized mtmd context does not support image or audio input."
+            llamaRuntimeLog.info("Multimodal projector rejected: \(detail, privacy: .public)")
+            return MultimodalProjectorLoadResult(
                 context: nil,
-                unsupportedDetail: detail
+                unsupportedDetail: detail,
+                supportedInputModalities: [.text]
             )
         }
 
-        return VisionProjectorLoadResult(context: context, unsupportedDetail: nil)
+        return MultimodalProjectorLoadResult(
+            context: context,
+            unsupportedDetail: nil,
+            supportedInputModalities: supportedInputModalities
+        )
     }
 
     public func preflight(
@@ -131,7 +196,7 @@ extension LlamaEngine {
             throw LLMEngineError.noModelLoaded
         }
 
-        if LLMChatMessage.inputModalities(in: messages).contains(.image) {
+        if LLMChatMessage.containsMultimodalInput(in: messages) {
             let prepared = try prepareMultimodalPrompt(messages: messages, options: options)
             try validateSamplerForPreflight(promptFormatting: prepared.promptFormatting, options: options)
             let promptCost = LlamaVisionTokenAccounting.contextCost(
@@ -222,7 +287,7 @@ extension LlamaEngine {
             }
         }
 
-        if LLMChatMessage.inputModalities(in: messages).contains(.image) {
+        if LLMChatMessage.containsMultimodalInput(in: messages) {
             let prepared = try prepareMultimodalPrompt(messages: messages, options: options)
             return try await generatePhased(
                 promptFormatting: prepared.promptFormatting,
@@ -268,9 +333,18 @@ extension LlamaEngine {
         messages: [LLMChatMessage],
         options: GenerationOptions
     ) throws -> (promptFormatting: PromptFormattingResult, multimodalPrefill: LlamaPreparedMultimodalPrompt) {
-        let mtmdContext = try requireVisionProjector()
+        let mtmdContext = try requireMultimodalProjector()
         let marker = String(cString: carbocation_mtmd_default_marker_bridge())
         let formattedMessages = try publicChatTemplateMessages(from: messages, mediaMarker: marker)
+        let supportedInputModalities = loadedInfo?.supportedInputModalities ?? [.text]
+        if let unsupported = formattedMessages.media.first(where: {
+            !supportedInputModalities.contains($0.payload.inputModality)
+        }) {
+            throw LLMEngineError.unsupportedInputModality(
+                unsupported.payload.inputModality,
+                location: unsupported.location
+            )
+        }
         let promptFormatting = try applyChatTemplate(
             messages: formattedMessages.messages,
             tools: [],
@@ -278,23 +352,24 @@ extension LlamaEngine {
         )
         let prefill = try makeMultimodalPrefill(
             prompt: promptFormatting.text,
-            images: formattedMessages.images,
+            media: formattedMessages.media,
             mtmdContext: mtmdContext
         )
         return (promptFormatting, prefill)
     }
 
-    func requireVisionProjector() throws -> UnsafeMutableRawPointer {
-        if let mtmdContext, loadedInfo?.supportedInputModalities.contains(.image) == true {
+    func requireMultimodalProjector() throws -> UnsafeMutableRawPointer {
+        if let mtmdContext,
+           loadedInfo?.supportedInputModalities.contains(where: { $0 != .text }) == true {
             return mtmdContext
         }
         guard let mmprojURL = loadedDescriptor?.mmprojURL,
               FileManager.default.fileExists(atPath: mmprojURL.path)
         else {
-            throw LLMEngineError.visionProjectorMissing
+            throw LLMEngineError.multimodalProjectorMissing
         }
-        throw LLMEngineError.visionProjectorUnsupported(
-            visionProjectorUnsupportedDetail ?? "The loaded mmproj artifact does not support image input."
+        throw LLMEngineError.multimodalProjectorUnsupported(
+            visionProjectorUnsupportedDetail ?? "The loaded mmproj artifact does not support image or audio input."
         )
     }
 
@@ -303,7 +378,7 @@ extension LlamaEngine {
         mediaMarker: String?
     ) throws -> PublicMessageFormatting {
         var chatMessages: [ChatTemplateMessage] = []
-        var images: [(location: LLMContentLocation, image: LLMRGBImage)] = []
+        var media: [(location: LLMContentLocation, payload: LlamaMediaPayload)] = []
 
         for (messageIndex, message) in messages.enumerated() {
             var renderedContent = ""
@@ -320,54 +395,83 @@ extension LlamaEngine {
                         throw LLMEngineError.unsupportedInputModality(.image, location: location)
                     }
                     let image = try imageInput.normalizedRGB8(location: location)
-                    images.append((location, image))
+                    media.append((location, .image(image)))
+                    renderedContent += mediaMarker
+                case .audio(let audioInput):
+                    let location = LLMContentLocation(messageIndex: messageIndex, partIndex: partIndex)
+                    guard message.role == .user else {
+                        throw LLMEngineError.unsupportedAudioPlacement(location: location)
+                    }
+                    guard let mediaMarker else {
+                        throw LLMEngineError.unsupportedInputModality(.audio, location: location)
+                    }
+                    if case .encoded = audioInput {
+                        _ = try audioInput.encodedFormat(location: location)
+                    }
+                    media.append((location, .audio(audioInput)))
                     renderedContent += mediaMarker
                 }
             }
             chatMessages.append(ChatTemplateMessage(role: message.role.rawValue, content: renderedContent))
         }
 
-        return PublicMessageFormatting(messages: chatMessages, images: images)
+        return PublicMessageFormatting(messages: chatMessages, media: media)
     }
 
     func makeMultimodalPrefill(
         prompt: String,
-        images: [(location: LLMContentLocation, image: LLMRGBImage)],
+        media: [(location: LLMContentLocation, payload: LlamaMediaPayload)],
         mtmdContext: UnsafeMutableRawPointer
     ) throws -> LlamaPreparedMultimodalPrompt {
-        guard !images.isEmpty else {
-            throw LLMEngineError.imageTokenizationFailed("No image payloads were supplied.")
+        guard !media.isEmpty else {
+            throw LLMEngineError.imageTokenizationFailed("No media payloads were supplied.")
         }
 
         var bitmaps: [UnsafeMutableRawPointer] = []
-        bitmaps.reserveCapacity(images.count)
+        bitmaps.reserveCapacity(media.count)
         defer {
             for bitmap in bitmaps {
                 carbocation_mtmd_bitmap_free_bridge(bitmap)
             }
         }
 
-        for item in images {
-            guard item.image.width <= Int(UInt32.max),
-                  item.image.height <= Int(UInt32.max) else {
-                throw LLMEngineError.invalidImageData(
-                    "Image dimensions exceed mtmd bitmap limits.",
+        for item in media {
+            let bitmap: UnsafeMutableRawPointer?
+            switch item.payload {
+            case .image(let image):
+                guard image.width <= Int(UInt32.max),
+                      image.height <= Int(UInt32.max) else {
+                    throw LLMEngineError.invalidImageData(
+                        "Image dimensions exceed mtmd bitmap limits.",
+                        location: item.location
+                    )
+                }
+                bitmap = image.data.withUnsafeBytes { rawBuffer -> UnsafeMutableRawPointer? in
+                    guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                        return nil
+                    }
+                    return carbocation_mtmd_bitmap_init_bridge(
+                        UInt32(image.width),
+                        UInt32(image.height),
+                        baseAddress
+                    )
+                }
+                guard bitmap != nil else {
+                    throw LLMEngineError.imageTokenizationFailed(
+                        "mtmd_bitmap_init returned null.",
+                        location: item.location
+                    )
+                }
+            case .audio(let audio):
+                bitmap = try makeAudioBitmap(
+                    audio,
+                    mtmdContext: mtmdContext,
                     location: item.location
                 )
             }
-            let bitmap = item.image.data.withUnsafeBytes { rawBuffer -> UnsafeMutableRawPointer? in
-                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
-                    return nil
-                }
-                return carbocation_mtmd_bitmap_init_bridge(
-                    UInt32(item.image.width),
-                    UInt32(item.image.height),
-                    baseAddress
-                )
-            }
             guard let bitmap else {
-                throw LLMEngineError.imageTokenizationFailed(
-                    "mtmd_bitmap_init returned null.",
+                throw LLMEngineError.invalidImageData(
+                    "Failed to create media bitmap.",
                     location: item.location
                 )
             }
@@ -396,23 +500,20 @@ extension LlamaEngine {
             let detail: String
             switch tokenizationResult {
             case 1:
-                detail = "The rendered prompt media-marker count did not match the image count."
+                detail = "The rendered prompt media-marker count did not match the media count."
             case 2:
-                detail = "Image preprocessing failed."
+                detail = "Media preprocessing failed."
             default:
                 detail = "mtmd_tokenize returned \(tokenizationResult)."
             }
-            throw LLMEngineError.imageTokenizationFailed(detail, location: images.first?.location)
+            throw mediaTokenizationFailed(detail, media: media)
         }
 
         let tokenCount = Int(carbocation_mtmd_helper_get_n_tokens_bridge(chunks))
         let positionCount = Int(carbocation_mtmd_helper_get_n_pos_bridge(chunks))
         guard tokenCount > 0, positionCount > 0 else {
             carbocation_mtmd_input_chunks_free_bridge(chunks)
-            throw LLMEngineError.imageTokenizationFailed(
-                "mtmd produced empty prompt chunks.",
-                location: images.first?.location
-            )
+            throw mediaTokenizationFailed("mtmd produced empty prompt chunks.", media: media)
         }
 
         return LlamaPreparedMultimodalPrompt(
@@ -420,6 +521,96 @@ extension LlamaEngine {
             promptTokenCount: tokenCount,
             promptPositionCount: positionCount
         )
+    }
+
+    func mediaTokenizationFailed(
+        _ detail: String,
+        media: [(location: LLMContentLocation, payload: LlamaMediaPayload)]
+    ) -> LLMEngineError {
+        let hasAudio = media.contains { $0.payload.inputModality == .audio }
+        let hasImage = media.contains { $0.payload.inputModality == .image }
+        if hasAudio, !hasImage {
+            return .audioTokenizationFailed(detail, location: media.first?.location)
+        }
+        return .imageTokenizationFailed(detail, location: media.first?.location)
+    }
+
+    func makeAudioBitmap(
+        _ audio: LLMAudioInput,
+        mtmdContext: UnsafeMutableRawPointer,
+        location: LLMContentLocation
+    ) throws -> UnsafeMutableRawPointer {
+        let sampleRate = Int(carbocation_mtmd_get_audio_sample_rate_bridge(mtmdContext))
+        guard sampleRate > 0 else {
+            throw LLMEngineError.unsupportedInputModality(.audio, location: location)
+        }
+
+        switch audio {
+        case .encoded(let data, let mimeType):
+            _ = try LLMAudioInput.encodedFormat(data: data, mimeType: mimeType, location: location)
+            guard let bitmap = data.withUnsafeBytes({ rawBuffer -> UnsafeMutableRawPointer? in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return nil
+                }
+                return carbocation_mtmd_helper_bitmap_init_from_buf_bridge(
+                    mtmdContext,
+                    baseAddress,
+                    rawBuffer.count
+                )
+            }) else {
+                throw LLMEngineError.audioTokenizationFailed(
+                    "mtmd_helper_bitmap_init_from_buf returned null.",
+                    location: location
+                )
+            }
+            guard carbocation_mtmd_bitmap_is_audio_bridge(bitmap) else {
+                carbocation_mtmd_bitmap_free_bridge(bitmap)
+                throw LLMEngineError.unsupportedAudioFormat(
+                    "encoded bytes did not decode as audio",
+                    location: location
+                )
+            }
+            let sampleCount = Int(carbocation_mtmd_bitmap_get_nx_bridge(bitmap))
+            let duration = TimeInterval(sampleCount) / TimeInterval(sampleRate)
+            guard duration <= LLMAudioInput.maximumDuration else {
+                carbocation_mtmd_bitmap_free_bridge(bitmap)
+                throw LLMEngineError.audioDurationExceeded(
+                    LLMAudioDurationLimit(
+                        maxSeconds: LLMAudioInput.maximumDuration,
+                        actualSeconds: duration
+                    ),
+                    location: location
+                )
+            }
+            return bitmap
+
+        case .pcmFloat32Mono:
+            let samples = try audio.validatedPCMFloat32Mono(
+                expectedSampleRate: sampleRate,
+                location: location
+            )
+            guard samples.count <= Int(UInt32.max) else {
+                throw LLMEngineError.invalidAudioData(
+                    "PCM sample count exceeds mtmd audio limits.",
+                    location: location
+                )
+            }
+            guard let bitmap = samples.withUnsafeBufferPointer({ buffer -> UnsafeMutableRawPointer? in
+                guard let baseAddress = buffer.baseAddress else {
+                    return nil
+                }
+                return carbocation_mtmd_bitmap_init_from_audio_bridge(
+                    buffer.count,
+                    baseAddress
+                )
+            }) else {
+                throw LLMEngineError.audioTokenizationFailed(
+                    "mtmd_bitmap_init_from_audio returned null.",
+                    location: location
+                )
+            }
+            return bitmap
+        }
     }
 
     func validateSamplerForPreflight(

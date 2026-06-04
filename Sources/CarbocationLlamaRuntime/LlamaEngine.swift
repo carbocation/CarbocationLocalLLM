@@ -141,6 +141,10 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var supportsVision: Bool {
         supportedInputModalities.contains(.image)
     }
+
+    public var supportsAudio: Bool {
+        supportedInputModalities.contains(.audio)
+    }
 }
 
 public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalGenerationProvider, LLMToolPhasedGenerationProvider {
@@ -617,15 +621,12 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
         let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
-        let loadedVisionProjector = Self.loadVisionProjectorIfAvailable(
+        let loadedMultimodalProjector = Self.loadMultimodalProjectorIfAvailable(
             mmprojURL: descriptor.mmprojURL,
             model: loadedModel,
             threads: threads,
             useGPU: configuration.gpuLayerCount > 0
         )
-        let supportedInputModalities: Set<LLMInputModality> = loadedVisionProjector.context == nil
-            ? [.text]
-            : [.text, .image]
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
             modelPath: path,
@@ -635,7 +636,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             trainingContextSize: max(0, trainingContext),
             hasEmbeddedChatTemplate: template != nil,
             supportsMTPAcceleration: supportsMTPAcceleration,
-            supportedInputModalities: supportedInputModalities,
+            supportedInputModalities: loadedMultimodalProjector.supportedInputModalities,
             architecture: ggufMetadata.architecture,
             nextNPredictLayers: ggufMetadata.nextNPredictLayers
         )
@@ -662,8 +663,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.model = loadedModel
         self.context = loadedContext
         self.mtpContext = loadedMTPContext
-        self.mtmdContext = loadedVisionProjector.context
-        self.visionProjectorUnsupportedDetail = loadedVisionProjector.unsupportedDetail
+        self.mtmdContext = loadedMultimodalProjector.context
+        self.visionProjectorUnsupportedDetail = loadedMultimodalProjector.unsupportedDetail
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info

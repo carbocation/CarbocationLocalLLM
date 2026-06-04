@@ -5,6 +5,7 @@ import ImageIO
 public enum LLMInputModality: String, Codable, Hashable, Sendable {
     case text
     case image
+    case audio
 }
 
 public enum LLMChatRole: String, Codable, Hashable, Sendable {
@@ -48,9 +49,32 @@ public enum LLMImageInput: Hashable, Sendable {
     case rgb8(width: Int, height: Int, data: Data)
 }
 
+public enum LLMAudioFormat: String, Codable, Hashable, Sendable {
+    case wav
+    case mp3
+    case flac
+
+    public var mimeType: String {
+        switch self {
+        case .wav:
+            return "audio/wav"
+        case .mp3:
+            return "audio/mpeg"
+        case .flac:
+            return "audio/flac"
+        }
+    }
+}
+
+public enum LLMAudioInput: Hashable, Sendable {
+    case encoded(data: Data, mimeType: String? = nil)
+    case pcmFloat32Mono(sampleRate: Int, data: Data)
+}
+
 public enum LLMContentPart: Hashable, Sendable {
     case text(String)
     case image(LLMImageInput)
+    case audio(LLMAudioInput)
 }
 
 public struct LLMChatMessage: Hashable, Sendable {
@@ -73,12 +97,18 @@ public struct LLMChatMessage: Hashable, Sendable {
                 return .text
             case .image:
                 return .image
+            case .audio:
+                return .audio
             }
         })
     }
 
     public var containsImage: Bool {
         inputModalities.contains(.image)
+    }
+
+    public var containsAudio: Bool {
+        inputModalities.contains(.audio)
     }
 
     public static func inputModalities(in messages: [LLMChatMessage]) -> Set<LLMInputModality> {
@@ -92,6 +122,51 @@ public struct LLMChatMessage: Hashable, Sendable {
             for (partIndex, part) in message.content.enumerated() {
                 if case .image = part {
                     return LLMContentLocation(messageIndex: messageIndex, partIndex: partIndex)
+                }
+            }
+        }
+        return nil
+    }
+
+    public static func firstAudioLocation(in messages: [LLMChatMessage]) -> LLMContentLocation? {
+        firstLocation(of: .audio, in: messages)
+    }
+
+    public static func firstNonTextLocation(
+        in messages: [LLMChatMessage]
+    ) -> (modality: LLMInputModality, location: LLMContentLocation)? {
+        for (messageIndex, message) in messages.enumerated() {
+            for (partIndex, part) in message.content.enumerated() {
+                switch part {
+                case .text:
+                    continue
+                case .image:
+                    return (.image, LLMContentLocation(messageIndex: messageIndex, partIndex: partIndex))
+                case .audio:
+                    return (.audio, LLMContentLocation(messageIndex: messageIndex, partIndex: partIndex))
+                }
+            }
+        }
+        return nil
+    }
+
+    public static func containsMultimodalInput(in messages: [LLMChatMessage]) -> Bool {
+        inputModalities(in: messages).contains { modality in
+            modality != .text
+        }
+    }
+
+    private static func firstLocation(
+        of modality: LLMInputModality,
+        in messages: [LLMChatMessage]
+    ) -> LLMContentLocation? {
+        for (messageIndex, message) in messages.enumerated() {
+            for (partIndex, part) in message.content.enumerated() {
+                switch (modality, part) {
+                case (.image, .image), (.audio, .audio):
+                    return LLMContentLocation(messageIndex: messageIndex, partIndex: partIndex)
+                default:
+                    continue
                 }
             }
         }
@@ -115,8 +190,11 @@ public enum LLMChatTextRenderer {
     public static func textOnlySystemAndPrompt(
         from messages: [LLMChatMessage]
     ) throws -> (system: String, prompt: String) {
-        if let location = LLMChatMessage.firstImageLocation(in: messages) {
-            throw LLMEngineError.unsupportedInputModality(.image, location: location)
+        if let unsupported = LLMChatMessage.firstNonTextLocation(in: messages) {
+            throw LLMEngineError.unsupportedInputModality(
+                unsupported.modality,
+                location: unsupported.location
+            )
         }
 
         let systemParts = messages
@@ -154,6 +232,163 @@ public enum LLMChatTextRenderer {
             return nil
         }
         .joined(separator: "")
+    }
+}
+
+public extension LLMAudioInput {
+    static let maximumDuration: TimeInterval = 30
+
+    func encodedFormat(location: LLMContentLocation? = nil) throws -> LLMAudioFormat? {
+        guard case .encoded(let data, let mimeType) = self else {
+            return nil
+        }
+        return try Self.encodedFormat(data: data, mimeType: mimeType, location: location)
+    }
+
+    static func sniffEncodedFormat(_ data: Data) -> LLMAudioFormat? {
+        if data.count >= 12,
+           data.starts(with: [0x52, 0x49, 0x46, 0x46]),
+           data[data.index(data.startIndex, offsetBy: 8)] == 0x57,
+           data[data.index(data.startIndex, offsetBy: 9)] == 0x41,
+           data[data.index(data.startIndex, offsetBy: 10)] == 0x56,
+           data[data.index(data.startIndex, offsetBy: 11)] == 0x45 {
+            return .wav
+        }
+        if data.starts(with: [0x66, 0x4C, 0x61, 0x43]) {
+            return .flac
+        }
+        if data.starts(with: [0x49, 0x44, 0x33]) {
+            return .mp3
+        }
+        if data.count >= 2 {
+            let first = data[data.startIndex]
+            let second = data[data.index(after: data.startIndex)]
+            if first == 0xFF, (second & 0xE0) == 0xE0 {
+                return .mp3
+            }
+        }
+        return nil
+    }
+
+    static func audioFormat(forMIMEType mimeType: String) -> LLMAudioFormat? {
+        let normalized = mimeType
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "audio/wav", "audio/wave", "audio/x-wav", "audio/vnd.wave":
+            return .wav
+        case "audio/mpeg", "audio/mp3":
+            return .mp3
+        case "audio/flac", "audio/x-flac":
+            return .flac
+        default:
+            return nil
+        }
+    }
+
+    static func encodedFormat(
+        data: Data,
+        mimeType: String?,
+        location: LLMContentLocation?
+    ) throws -> LLMAudioFormat {
+        guard !data.isEmpty else {
+            throw LLMEngineError.invalidAudioData("Encoded audio data is empty.", location: location)
+        }
+
+        let detected = sniffEncodedFormat(data)
+        if let mimeType {
+            guard let declared = audioFormat(forMIMEType: mimeType) else {
+                throw LLMEngineError.unsupportedAudioFormat(mimeType, location: location)
+            }
+            if let detected, declared != detected {
+                throw LLMEngineError.audioMIMEMismatch(
+                    declared: declared.mimeType,
+                    detected: detected.mimeType,
+                    location: location
+                )
+            }
+            return declared
+        }
+
+        guard let detected else {
+            throw LLMEngineError.unsupportedAudioFormat("unknown", location: location)
+        }
+        return detected
+    }
+
+    func validatedPCMFloat32Mono(
+        expectedSampleRate: Int,
+        location: LLMContentLocation? = nil
+    ) throws -> [Float] {
+        guard case .pcmFloat32Mono(let sampleRate, let data) = self else {
+            throw LLMEngineError.invalidAudioData("Expected raw Float32 PCM audio.", location: location)
+        }
+        guard sampleRate > 0 else {
+            throw LLMEngineError.invalidAudioData("PCM audio requires a positive sample rate.", location: location)
+        }
+        guard sampleRate == expectedSampleRate else {
+            throw LLMEngineError.audioSampleRateMismatch(
+                LLMAudioSampleRateMismatch(expected: expectedSampleRate, actual: sampleRate),
+                location: location
+            )
+        }
+        guard !data.isEmpty else {
+            throw LLMEngineError.invalidAudioData("PCM audio data is empty.", location: location)
+        }
+        guard data.count % MemoryLayout<Float>.size == 0 else {
+            throw LLMEngineError.invalidAudioData(
+                "PCM Float32 data byte count must be divisible by 4.",
+                location: location
+            )
+        }
+
+        let samples = data.withUnsafeBytes { rawBuffer -> [Float] in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            var values: [Float] = []
+            values.reserveCapacity(data.count / MemoryLayout<Float>.size)
+            var index = 0
+            while index + 3 < bytes.count {
+                let bitPattern = UInt32(bytes[index])
+                    | (UInt32(bytes[index + 1]) << 8)
+                    | (UInt32(bytes[index + 2]) << 16)
+                    | (UInt32(bytes[index + 3]) << 24)
+                values.append(Float(bitPattern: bitPattern))
+                index += 4
+            }
+            return values
+        }
+
+        try Self.validateSamples(samples, sampleRate: sampleRate, location: location)
+        return samples
+    }
+
+    static func validateSamples(
+        _ samples: [Float],
+        sampleRate: Int,
+        location: LLMContentLocation?
+    ) throws {
+        guard !samples.isEmpty else {
+            throw LLMEngineError.invalidAudioData("PCM audio contains no samples.", location: location)
+        }
+        for sample in samples {
+            guard sample.isFinite, sample >= -1, sample <= 1 else {
+                throw LLMEngineError.invalidAudioData(
+                    "PCM Float32 samples must be finite and normalized to [-1, 1].",
+                    location: location
+                )
+            }
+        }
+        let duration = TimeInterval(samples.count) / TimeInterval(sampleRate)
+        guard duration <= maximumDuration else {
+            throw LLMEngineError.audioDurationExceeded(
+                LLMAudioDurationLimit(maxSeconds: maximumDuration, actualSeconds: duration),
+                location: location
+            )
+        }
     }
 }
 

@@ -84,6 +84,10 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
     public var supportsVision: Bool {
         supportedInputModalities.contains(.image)
     }
+
+    public var supportsAudio: Bool {
+        supportedInputModalities.contains(.audio)
+    }
 }
 
 public struct LocalLLMModelCapabilities: Hashable, Sendable {
@@ -109,6 +113,10 @@ public struct LocalLLMModelCapabilities: Hashable, Sendable {
 
     public var supportsVision: Bool {
         supportedInputModalities.contains(.image)
+    }
+
+    public var supportsAudio: Bool {
+        supportedInputModalities.contains(.audio)
     }
 }
 
@@ -209,9 +217,9 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
             }
             let supportedInputModalities: Set<LLMInputModality> = if let library,
                                                                      let installedModel,
-                                                                     let mmprojURL = installedModel.mmprojURL(in: library.root),
-                                                                     LlamaEngine.projectorSupportsVision(at: mmprojURL) {
-                [.text, .image]
+                                                                     let mmprojURL = installedModel.mmprojURL(in: library.root) {
+                Set<LLMInputModality>([.text])
+                    .union(LlamaEngine.projectorSupportedInputModalities(at: mmprojURL))
             } else {
                 [.text]
             }

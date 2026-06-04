@@ -37,8 +37,32 @@ bool carbocation_mtmd_support_vision_bridge(const void * ctx) {
     return mtmd_support_vision((const mtmd_context *) ctx);
 }
 
+bool carbocation_mtmd_support_audio_bridge(const void * ctx) {
+    return mtmd_support_audio((const mtmd_context *) ctx);
+}
+
+int32_t carbocation_mtmd_get_audio_sample_rate_bridge(const void * ctx) {
+    return mtmd_get_audio_sample_rate((const mtmd_context *) ctx);
+}
+
 void * carbocation_mtmd_bitmap_init_bridge(uint32_t width, uint32_t height, const unsigned char * data) {
     return mtmd_bitmap_init(width, height, data);
+}
+
+void * carbocation_mtmd_bitmap_init_from_audio_bridge(size_t n_samples, const float * data) {
+    return mtmd_bitmap_init_from_audio(n_samples, data);
+}
+
+void * carbocation_mtmd_helper_bitmap_init_from_buf_bridge(void * ctx, const unsigned char * data, size_t n_bytes) {
+    return mtmd_helper_bitmap_init_from_buf((mtmd_context *) ctx, data, n_bytes);
+}
+
+uint32_t carbocation_mtmd_bitmap_get_nx_bridge(const void * bitmap) {
+    return mtmd_bitmap_get_nx((const mtmd_bitmap *) bitmap);
+}
+
+bool carbocation_mtmd_bitmap_is_audio_bridge(const void * bitmap) {
+    return mtmd_bitmap_is_audio((const mtmd_bitmap *) bitmap);
 }
 
 void carbocation_mtmd_bitmap_free_bridge(void * bitmap) {

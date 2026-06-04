@@ -15,9 +15,10 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
     func testRuntimeImportsAndLinksMTMDSymbols() {
         XCTAssertEqual(LlamaRuntimeSmoke.defaultMediaMarker(), "<__media__>")
+        XCTAssertEqual(LlamaRuntimeSmoke.audioBitmapBridgeSummary(), "is_audio=true;samples=1")
     }
 
-    func testLoadedModelInfoReportsVisionCapability() {
+    func testLoadedModelInfoReportsMultimodalCapabilities() {
         let textOnly = LlamaLoadedModelInfo(
             modelID: nil,
             modelPath: "/tmp/model.gguf",
@@ -29,6 +30,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
         XCTAssertEqual(textOnly.supportedInputModalities, [.text])
         XCTAssertFalse(textOnly.supportsVision)
+        XCTAssertFalse(textOnly.supportsAudio)
 
         let vision = LlamaLoadedModelInfo(
             modelID: nil,
@@ -41,15 +43,31 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             supportedInputModalities: [.text, .image]
         )
         XCTAssertTrue(vision.supportsVision)
+        XCTAssertFalse(vision.supportsAudio)
+
+        let audio = LlamaLoadedModelInfo(
+            modelID: nil,
+            modelPath: "/tmp/model.gguf",
+            displayName: nil,
+            filename: "model.gguf",
+            contextSize: 4_096,
+            trainingContextSize: 4_096,
+            hasEmbeddedChatTemplate: true,
+            supportedInputModalities: [.text, .audio]
+        )
+        XCTAssertFalse(audio.supportsVision)
+        XCTAssertTrue(audio.supportsAudio)
     }
 
-    func testVisionPromptRenderingUsesMediaMarkersAndKeepsImagesSeparate() async throws {
+    func testMultimodalPromptRenderingUsesOrderedMediaMarkersAndKeepsPayloadsSeparate() async throws {
         let engine = LlamaEngine()
         let rendered = try await engine.publicChatTemplateMessages(
             from: [
                 LLMChatMessage(role: .user, content: [
                     .text("before "),
                     .image(.rgb8(width: 1, height: 1, data: Data([1, 2, 3]))),
+                    .text(" between "),
+                    .audio(.pcmFloat32Mono(sampleRate: 16_000, data: Data([0, 0, 0, 0]))),
                     .text(" after")
                 ])
             ],
@@ -57,10 +75,16 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         XCTAssertEqual(rendered.messages.count, 1)
-        XCTAssertEqual(rendered.messages[0].content.stringValue, "before <__media__> after")
+        XCTAssertEqual(
+            rendered.messages[0].content.stringValue,
+            "before <__media__> between <__media__> after"
+        )
+        XCTAssertEqual(rendered.media.count, 2)
         XCTAssertEqual(rendered.images.count, 1)
         XCTAssertEqual(rendered.images[0].location, LLMContentLocation(messageIndex: 0, partIndex: 1))
         XCTAssertEqual(rendered.images[0].image.data, Data([1, 2, 3]))
+        XCTAssertEqual(rendered.audio.count, 1)
+        XCTAssertEqual(rendered.audio[0].location, LLMContentLocation(messageIndex: 0, partIndex: 3))
     }
 
     func testVisionPromptRenderingRejectsAssistantImagesWithLocation() async throws {
@@ -81,6 +105,62 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 return XCTFail("Unexpected error: \(error)")
             }
             XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 0))
+        }
+    }
+
+    func testMultimodalPromptRenderingRejectsAssistantAudioWithLocation() async throws {
+        let engine = LlamaEngine()
+
+        do {
+            _ = try await engine.publicChatTemplateMessages(
+                from: [
+                    LLMChatMessage(role: .assistant, content: [
+                        .audio(.pcmFloat32Mono(sampleRate: 16_000, data: Data([0, 0, 0, 0])))
+                    ])
+                ],
+                mediaMarker: "<__media__>"
+            )
+            XCTFail("Expected assistant audio placement rejection.")
+        } catch let error as LLMEngineError {
+            guard case .unsupportedAudioPlacement(let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 0, partIndex: 0))
+        }
+    }
+
+    func testPCMFloat32MonoValidationRejectsBadAudio() throws {
+        let valid = try LLMAudioInput
+            .pcmFloat32Mono(sampleRate: 16_000, data: Data([0, 0, 0, 0]))
+            .validatedPCMFloat32Mono(expectedSampleRate: 16_000)
+        XCTAssertEqual(valid, [0])
+
+        do {
+            _ = try LLMAudioInput
+                .pcmFloat32Mono(sampleRate: 8_000, data: Data([0, 0, 0, 0]))
+                .validatedPCMFloat32Mono(
+                    expectedSampleRate: 16_000,
+                    location: LLMContentLocation(messageIndex: 2, partIndex: 1)
+                )
+            XCTFail("Expected sample rate mismatch.")
+        } catch let error as LLMEngineError {
+            guard case .audioSampleRateMismatch(let mismatch, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(mismatch.expected, 16_000)
+            XCTAssertEqual(mismatch.actual, 8_000)
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 2, partIndex: 1))
+        }
+
+        do {
+            _ = try LLMAudioInput
+                .pcmFloat32Mono(sampleRate: 16_000, data: Data([0, 0, 0]))
+                .validatedPCMFloat32Mono(expectedSampleRate: 16_000)
+            XCTFail("Expected invalid byte count.")
+        } catch let error as LLMEngineError {
+            guard case .invalidAudioData = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
         }
     }
 
@@ -2043,6 +2123,54 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         XCTAssertGreaterThan(result.promptTokens, 0)
+        await engine.unload()
+    }
+
+    func testAudioLiveTranscribesWhenModelPathsProvided() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let modelPath = environment["CLLM_AUDIO_MODEL_PATH"],
+              let mmprojPath = environment["CLLM_AUDIO_MMPROJ_PATH"],
+              let samplePath = environment["CLLM_AUDIO_SAMPLE_PATH"],
+              !modelPath.isEmpty,
+              !mmprojPath.isEmpty,
+              !samplePath.isEmpty
+        else {
+            throw XCTSkip("Set CLLM_AUDIO_MODEL_PATH, CLLM_AUDIO_MMPROJ_PATH, and CLLM_AUDIO_SAMPLE_PATH to run the live audio test.")
+        }
+
+        let requestedContext = environment["CLLM_AUDIO_CONTEXT"].flatMap(Int.init) ?? 4_096
+        let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
+            gpuLayerCount: 0,
+            useMemoryMap: true,
+            batchSizeLimit: 128,
+            threadCount: 2,
+            promptReserveTokens: 16,
+            accelerationPolicy: .disabled
+        ))
+        let loaded = try await engine.load(
+            descriptor: LlamaModelDescriptor(
+                url: URL(fileURLWithPath: modelPath),
+                mmprojURL: URL(fileURLWithPath: mmprojPath),
+                displayName: "Live Audio Test Model"
+            ),
+            requestedContext: requestedContext
+        )
+        XCTAssertTrue(loaded.supportsAudio)
+
+        let sampleData = try Data(contentsOf: URL(fileURLWithPath: samplePath))
+        let result = try await engine.generatePhased(
+            messages: [
+                LLMChatMessage(role: .user, content: [
+                    .text("Transcribe the following speech segment in its original language. Only output the transcription."),
+                    .audio(.encoded(data: sampleData))
+                ])
+            ],
+            options: GenerationOptions(temperature: 0, maxOutputTokens: 64),
+            onEvent: { _ in }
+        )
+
+        XCTAssertGreaterThan(result.promptTokens, 0)
+        XCTAssertFalse(result.finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         await engine.unload()
     }
 

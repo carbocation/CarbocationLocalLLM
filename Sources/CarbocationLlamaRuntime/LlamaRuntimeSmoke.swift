@@ -16,6 +16,17 @@ public enum LlamaRuntimeSmoke {
     public static func defaultMediaMarker() -> String {
         String(cString: carbocation_mtmd_default_marker_bridge())
     }
+
+    public static func audioBitmapBridgeSummary() -> String {
+        var sample: Float = 0
+        guard let bitmap = carbocation_mtmd_bitmap_init_from_audio_bridge(1, &sample) else {
+            return "audio_bitmap=nil"
+        }
+        defer { carbocation_mtmd_bitmap_free_bridge(bitmap) }
+        let isAudio = carbocation_mtmd_bitmap_is_audio_bridge(bitmap)
+        let samples = carbocation_mtmd_bitmap_get_nx_bridge(bitmap)
+        return "is_audio=\(isAudio);samples=\(samples)"
+    }
 }
 
 public enum LlamaRuntimeModelProbe {

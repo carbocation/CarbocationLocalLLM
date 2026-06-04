@@ -28,8 +28,14 @@ void * carbocation_mtmd_init_from_file_bridge(
 );
 void carbocation_mtmd_free_bridge(void * ctx);
 bool carbocation_mtmd_support_vision_bridge(const void * ctx);
+bool carbocation_mtmd_support_audio_bridge(const void * ctx);
+int32_t carbocation_mtmd_get_audio_sample_rate_bridge(const void * ctx);
 
 void * carbocation_mtmd_bitmap_init_bridge(uint32_t width, uint32_t height, const unsigned char * data);
+void * carbocation_mtmd_bitmap_init_from_audio_bridge(size_t n_samples, const float * data);
+void * carbocation_mtmd_helper_bitmap_init_from_buf_bridge(void * ctx, const unsigned char * data, size_t n_bytes);
+uint32_t carbocation_mtmd_bitmap_get_nx_bridge(const void * bitmap);
+bool carbocation_mtmd_bitmap_is_audio_bridge(const void * bitmap);
 void carbocation_mtmd_bitmap_free_bridge(void * bitmap);
 
 void * carbocation_mtmd_input_chunks_init_bridge(void);
