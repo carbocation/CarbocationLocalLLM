@@ -238,6 +238,7 @@ let package = Package(
             ],
             linkerSettings: llamaUnsafeLinkerSettings + [
                 .linkedLibrary("c++"),
+                .linkedFramework("AVFoundation"),
                 .linkedFramework("Metal"),
                 .linkedFramework("Accelerate"),
                 .linkedFramework("Foundation")

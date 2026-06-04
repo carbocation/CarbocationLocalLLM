@@ -53,6 +53,8 @@ public enum LLMAudioFormat: String, Codable, Hashable, Sendable {
     case wav
     case mp3
     case flac
+    case m4a
+    case aac
 
     public var mimeType: String {
         switch self {
@@ -62,6 +64,10 @@ public enum LLMAudioFormat: String, Codable, Hashable, Sendable {
             return "audio/mpeg"
         case .flac:
             return "audio/flac"
+        case .m4a:
+            return "audio/mp4"
+        case .aac:
+            return "audio/aac"
         }
     }
 }
@@ -260,12 +266,14 @@ public extension LLMAudioInput {
         if data.starts(with: [0x49, 0x44, 0x33]) {
             return .mp3
         }
-        if data.count >= 2 {
-            let first = data[data.startIndex]
-            let second = data[data.index(after: data.startIndex)]
-            if first == 0xFF, (second & 0xE0) == 0xE0 {
-                return .mp3
-            }
+        if isM4AFileTypeBox(data) {
+            return .m4a
+        }
+        if isAACADTSHeader(data) {
+            return .aac
+        }
+        if isMP3FrameHeader(data) {
+            return .mp3
         }
         return nil
     }
@@ -285,9 +293,75 @@ public extension LLMAudioInput {
             return .mp3
         case "audio/flac", "audio/x-flac":
             return .flac
+        case "audio/mp4", "audio/x-m4a":
+            return .m4a
+        case "audio/aac":
+            return .aac
         default:
             return nil
         }
+    }
+
+    private static func isM4AFileTypeBox(_ data: Data) -> Bool {
+        guard data.count >= 12 else {
+            return false
+        }
+        let bytes = [UInt8](data.prefix(64))
+        guard String(bytes: bytes[4..<8], encoding: .ascii) == "ftyp" else {
+            return false
+        }
+
+        var brands: [String] = []
+        if let majorBrand = String(bytes: bytes[8..<12], encoding: .ascii) {
+            brands.append(majorBrand)
+        }
+
+        var index = 16
+        while index + 4 <= bytes.count {
+            if let brand = String(bytes: bytes[index..<(index + 4)], encoding: .ascii) {
+                brands.append(brand)
+            }
+            index += 4
+        }
+
+        return brands.contains { brand in
+            ["M4A ", "M4B ", "M4P "].contains(brand)
+        }
+    }
+
+    private static func isAACADTSHeader(_ data: Data) -> Bool {
+        guard data.count >= 7 else {
+            return false
+        }
+        let bytes = [UInt8](data.prefix(4))
+        guard bytes[0] == 0xFF, (bytes[1] & 0xF6) == 0xF0 else {
+            return false
+        }
+        let samplingFrequencyIndex = (bytes[2] & 0x3C) >> 2
+        let channelConfiguration = ((bytes[2] & 0x01) << 2) | ((bytes[3] & 0xC0) >> 6)
+        return samplingFrequencyIndex != 0x0F && channelConfiguration != 0
+    }
+
+    private static func isMP3FrameHeader(_ data: Data) -> Bool {
+        guard data.count >= 4 else {
+            return false
+        }
+        let bytes = [UInt8](data.prefix(4))
+        guard bytes[0] == 0xFF, (bytes[1] & 0xE0) == 0xE0 else {
+            return false
+        }
+        guard !isAACADTSHeader(data) else {
+            return false
+        }
+        let version = (bytes[1] >> 3) & 0x03
+        let layer = (bytes[1] >> 1) & 0x03
+        let bitrateIndex = (bytes[2] >> 4) & 0x0F
+        let samplingFrequencyIndex = (bytes[2] >> 2) & 0x03
+        return version != 0x01
+            && layer != 0x00
+            && bitrateIndex != 0x00
+            && bitrateIndex != 0x0F
+            && samplingFrequencyIndex != 0x03
     }
 
     static func encodedFormat(

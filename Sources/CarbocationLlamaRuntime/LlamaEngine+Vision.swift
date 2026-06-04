@@ -547,7 +547,22 @@ extension LlamaEngine {
 
         switch audio {
         case .encoded(let data, let mimeType):
-            _ = try LLMAudioInput.encodedFormat(data: data, mimeType: mimeType, location: location)
+            let format = try LLMAudioInput.encodedFormat(data: data, mimeType: mimeType, location: location)
+            switch format {
+            case .m4a, .aac:
+                let samples = try LlamaAppleAudioDecoder.decodeFloat32Mono(
+                    data: data,
+                    format: format,
+                    sampleRate: sampleRate,
+                    location: location
+                )
+                return try makeAudioBitmap(
+                    samples: samples,
+                    location: location
+                )
+            case .wav, .mp3, .flac:
+                break
+            }
             guard let bitmap = data.withUnsafeBytes({ rawBuffer -> UnsafeMutableRawPointer? in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
                     return nil
@@ -589,28 +604,35 @@ extension LlamaEngine {
                 expectedSampleRate: sampleRate,
                 location: location
             )
-            guard samples.count <= Int(UInt32.max) else {
-                throw LLMEngineError.invalidAudioData(
-                    "PCM sample count exceeds mtmd audio limits.",
-                    location: location
-                )
-            }
-            guard let bitmap = samples.withUnsafeBufferPointer({ buffer -> UnsafeMutableRawPointer? in
-                guard let baseAddress = buffer.baseAddress else {
-                    return nil
-                }
-                return carbocation_mtmd_bitmap_init_from_audio_bridge(
-                    buffer.count,
-                    baseAddress
-                )
-            }) else {
-                throw LLMEngineError.audioTokenizationFailed(
-                    "mtmd_bitmap_init_from_audio returned null.",
-                    location: location
-                )
-            }
-            return bitmap
+            return try makeAudioBitmap(samples: samples, location: location)
         }
+    }
+
+    private func makeAudioBitmap(
+        samples: [Float],
+        location: LLMContentLocation
+    ) throws -> UnsafeMutableRawPointer {
+        guard samples.count <= Int(UInt32.max) else {
+            throw LLMEngineError.invalidAudioData(
+                "PCM sample count exceeds mtmd audio limits.",
+                location: location
+            )
+        }
+        guard let bitmap = samples.withUnsafeBufferPointer({ buffer -> UnsafeMutableRawPointer? in
+            guard let baseAddress = buffer.baseAddress else {
+                return nil
+            }
+            return carbocation_mtmd_bitmap_init_from_audio_bridge(
+                buffer.count,
+                baseAddress
+            )
+        }) else {
+            throw LLMEngineError.audioTokenizationFailed(
+                "mtmd_bitmap_init_from_audio returned null.",
+                location: location
+            )
+        }
+        return bitmap
     }
 
     func validateSamplerForPreflight(

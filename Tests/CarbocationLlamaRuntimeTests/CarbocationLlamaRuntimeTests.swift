@@ -1,3 +1,4 @@
+import AVFoundation
 import CarbocationLocalLLM
 import XCTest
 @testable import CarbocationLlamaRuntime
@@ -161,6 +162,60 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             guard case .invalidAudioData = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
+        }
+    }
+
+    func testAppleAudioDecoderNormalizesM4A() throws {
+        let data = try makeAACEncodedAudioData(fileExtension: "m4a", duration: 0.25)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(data), .m4a)
+        let samples = try LlamaAppleAudioDecoder.decodeFloat32Mono(
+            data: data,
+            format: .m4a,
+            sampleRate: 16_000,
+            location: LLMContentLocation(messageIndex: 0, partIndex: 0)
+        )
+
+        XCTAssertGreaterThan(samples.count, 1_000)
+        XCTAssertLessThan(samples.count, 8_000)
+        XCTAssertTrue(samples.allSatisfy { $0.isFinite && $0 >= -1 && $0 <= 1 })
+    }
+
+    func testAppleAudioDecoderNormalizesAAC() throws {
+        let data = try makeAACEncodedAudioData(fileExtension: "aac", duration: 0.25)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(data), .aac)
+        let samples = try LlamaAppleAudioDecoder.decodeFloat32Mono(
+            data: data,
+            format: .aac,
+            sampleRate: 16_000,
+            location: LLMContentLocation(messageIndex: 0, partIndex: 1)
+        )
+
+        XCTAssertGreaterThan(samples.count, 1_000)
+        XCTAssertLessThan(samples.count, 8_000)
+        XCTAssertTrue(samples.allSatisfy { $0.isFinite && $0 >= -1 && $0 <= 1 })
+    }
+
+    func testAppleAudioDecoderEnforcesDurationAfterDecode() throws {
+        let data = try makeAACEncodedAudioData(
+            fileExtension: "m4a",
+            duration: LLMAudioInput.maximumDuration + 0.25
+        )
+
+        do {
+            _ = try LlamaAppleAudioDecoder.decodeFloat32Mono(
+                data: data,
+                format: .m4a,
+                sampleRate: 16_000,
+                location: LLMContentLocation(messageIndex: 3, partIndex: 2)
+            )
+            XCTFail("Expected decoded audio duration rejection.")
+        } catch let error as LLMEngineError {
+            guard case .audioDurationExceeded(let limit, let location) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(limit.maxSeconds, LLMAudioInput.maximumDuration)
+            XCTAssertGreaterThan(limit.actualSeconds, LLMAudioInput.maximumDuration)
+            XCTAssertEqual(location, LLMContentLocation(messageIndex: 3, partIndex: 2))
         }
     }
 
@@ -2362,6 +2417,62 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 }
 
 private extension CarbocationLlamaRuntimeTests {
+    func makeAACEncodedAudioData(fileExtension: String, duration: TimeInterval) throws -> Data {
+        let sampleRate = 44_100.0
+        let frameCount = AVAudioFrameCount((duration * sampleRate).rounded(.up))
+        guard let format = AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate,
+            channels: 1
+        ),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
+              let channel = buffer.floatChannelData?[0]
+        else {
+            throw XCTSkip("AVFoundation could not allocate test audio buffers.")
+        }
+
+        buffer.frameLength = frameCount
+        for index in 0..<Int(frameCount) {
+            channel[index] = Float(0.2 * sin(2 * Double.pi * 440 * Double(index) / sampleRate))
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CarbocationLocalLLMTest-\(UUID().uuidString)")
+            .appendingPathExtension(fileExtension)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64_000
+        ]
+
+        do {
+            do {
+                let file = try AVAudioFile(
+                    forWriting: url,
+                    settings: settings,
+                    commonFormat: .pcmFormatFloat32,
+                    interleaved: false
+                )
+                try file.write(from: buffer)
+            }
+            let data = try Data(contentsOf: url)
+            guard !data.isEmpty else {
+                throw XCTSkip("AVFoundation created an empty \(fileExtension) test file.")
+            }
+            return data
+        } catch let skip as XCTSkip {
+            throw skip
+        } catch {
+            throw XCTSkip(
+                "AVFoundation could not create \(fileExtension) test audio: \(error.localizedDescription)"
+            )
+        }
+    }
+
     func thinkingTagPhasePlan() -> LlamaEngine.StreamPhasePlan {
         let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
         return LlamaEngine.StreamPhasePlan(

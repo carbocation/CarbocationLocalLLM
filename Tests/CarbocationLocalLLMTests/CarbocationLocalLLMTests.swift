@@ -2396,6 +2396,46 @@ final class CarbocationLocalLLMTests: XCTestCase {
         }
     }
 
+    func testAudioFormatMIMETypesIncludeAppleVoiceNoteFormats() {
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/wav"), .wav)
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/mpeg"), .mp3)
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/flac"), .flac)
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/mp4"), .m4a)
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/x-m4a; codecs=mp4a.40.2"), .m4a)
+        XCTAssertEqual(LLMAudioInput.audioFormat(forMIMEType: "audio/aac"), .aac)
+        XCTAssertNil(LLMAudioInput.audioFormat(forMIMEType: "audio/ogg"))
+    }
+
+    func testAudioFormatSniffingIncludesM4AAndAAC() {
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Self.minimalWAVHeader), .wav)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Data([0x66, 0x4C, 0x61, 0x43])), .flac)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Data([0x49, 0x44, 0x33, 0x04])), .mp3)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Data([0xFF, 0xFB, 0x90, 0x64])), .mp3)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Self.minimalM4AFileTypeBox), .m4a)
+        XCTAssertEqual(LLMAudioInput.sniffEncodedFormat(Self.minimalAACADTSHeader), .aac)
+        XCTAssertNil(LLMAudioInput.sniffEncodedFormat(Data([0x00, 0x01, 0x02, 0x03])))
+    }
+
+    func testEncodedAudioMIMEMismatchIncludesAppleFormats() throws {
+        let location = LLMContentLocation(messageIndex: 1, partIndex: 0)
+
+        do {
+            _ = try LLMAudioInput.encodedFormat(
+                data: Self.minimalM4AFileTypeBox,
+                mimeType: "audio/aac",
+                location: location
+            )
+            XCTFail("Expected MIME mismatch.")
+        } catch let error as LLMEngineError {
+            guard case .audioMIMEMismatch(let declared, let detected, let errorLocation) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(declared, "audio/aac")
+            XCTAssertEqual(detected, "audio/mp4")
+            XCTAssertEqual(errorLocation, location)
+        }
+    }
+
     func testTextOnlyEngineRejectsImageMessagesWithRequestLocation() async throws {
         let engine = TextOnlyScriptedEngine()
         let messages = [
@@ -2452,6 +2492,25 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(invocation?.system, "System rule")
         XCTAssertEqual(invocation?.prompt, "Hello")
     }
+
+    private static let minimalWAVHeader = Data([
+        0x52, 0x49, 0x46, 0x46,
+        0x00, 0x00, 0x00, 0x00,
+        0x57, 0x41, 0x56, 0x45
+    ])
+
+    private static let minimalM4AFileTypeBox = Data([
+        0x00, 0x00, 0x00, 0x18,
+        0x66, 0x74, 0x79, 0x70,
+        0x4D, 0x34, 0x41, 0x20,
+        0x00, 0x00, 0x00, 0x00,
+        0x4D, 0x34, 0x41, 0x20,
+        0x69, 0x73, 0x6F, 0x6D
+    ])
+
+    private static let minimalAACADTSHeader = Data([
+        0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC
+    ])
 
     private func makeOnePixelPNGData() throws -> Data {
         let rgba = Data([0x11, 0x22, 0x33, 0xFF])

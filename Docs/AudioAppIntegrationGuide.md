@@ -61,7 +61,7 @@ Preflight validates audio placement and data, counts text plus audio context cos
 
 ## Format Rules
 
-Encoded audio can be WAV, MP3, or FLAC. If `mimeType` is omitted, the library sniffs by magic bytes. If `mimeType` is present and conflicts with sniffed content, the request fails.
+Encoded audio can be WAV, MP3, FLAC, M4A, or AAC. M4A/AAC inputs are decoded with AVFoundation on Apple platforms and normalized internally to mono Float32 at the loaded model's audio sample rate. If `mimeType` is omitted, the library sniffs by magic bytes where the container makes that reliable. If `mimeType` is present and conflicts with sniffed content, the request fails.
 
 Raw PCM audio must be tightly packed Float32 mono:
 
