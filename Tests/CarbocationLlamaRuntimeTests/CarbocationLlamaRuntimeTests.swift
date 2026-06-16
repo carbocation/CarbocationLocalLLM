@@ -17,6 +17,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
     func testRuntimeImportsAndLinksMTMDSymbols() {
         XCTAssertEqual(LlamaRuntimeSmoke.defaultMediaMarker(), "<__media__>")
         XCTAssertEqual(LlamaRuntimeSmoke.audioBitmapBridgeSummary(), "is_audio=true;samples=1")
+        XCTAssertEqual(LlamaRuntimeSmoke.imageBufferBitmapBridgeSummary(), "is_audio=false;width=1")
     }
 
     func testLoadedModelInfoReportsMultimodalCapabilities() {

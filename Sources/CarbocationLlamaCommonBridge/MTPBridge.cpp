@@ -302,6 +302,7 @@ extern "C" void * carbocation_llama_mtp_create(
     draft_context_params.n_threads_batch = thread_count;
     draft_context_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
     draft_context_params.n_rs_seq = 0;
+    draft_context_params.ctx_other = target_context;
 
     llama_context * draft_context = llama_init_from_model(model, draft_context_params);
     if (draft_context == nullptr) {

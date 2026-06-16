@@ -54,7 +54,20 @@ void * carbocation_mtmd_bitmap_init_from_audio_bridge(size_t n_samples, const fl
 }
 
 void * carbocation_mtmd_helper_bitmap_init_from_buf_bridge(void * ctx, const unsigned char * data, size_t n_bytes) {
-    return mtmd_helper_bitmap_init_from_buf((mtmd_context *) ctx, data, n_bytes);
+    struct mtmd_helper_bitmap_wrapper wrapper = mtmd_helper_bitmap_init_from_buf(
+        (mtmd_context *) ctx,
+        data,
+        n_bytes,
+        false
+    );
+    if (wrapper.video_ctx != NULL) {
+        mtmd_helper_video_free(wrapper.video_ctx);
+        if (wrapper.bitmap != NULL) {
+            mtmd_bitmap_free(wrapper.bitmap);
+        }
+        return NULL;
+    }
+    return wrapper.bitmap;
 }
 
 uint32_t carbocation_mtmd_bitmap_get_nx_bridge(const void * bitmap) {
