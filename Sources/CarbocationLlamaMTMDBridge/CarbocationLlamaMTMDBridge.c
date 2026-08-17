@@ -3,6 +3,8 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+#include <string.h>
+
 const char * carbocation_mtmd_default_marker_bridge(void) {
     return mtmd_default_marker();
 }
@@ -107,6 +109,7 @@ int32_t carbocation_mtmd_tokenize_bridge(
 ) {
     struct mtmd_input_text input_text = {
         .text = text,
+        .text_len = strlen(text),
         .add_special = false,
         .parse_special = true
     };
