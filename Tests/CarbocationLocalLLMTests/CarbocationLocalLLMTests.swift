@@ -472,7 +472,8 @@ final class CarbocationLocalLLMTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         let url = root.appendingPathComponent("metadata-only.gguf")
         let template = """
-        {{ enable_thinking }} {{ preserve_thinking }} {{ message.reasoning_content }}
+        {{ enable_thinking }} {{ message.reasoning_content }}
+        {% if preserve_thinking is undefined or preserve_thinking is true %}{% endif %}
         {% set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
         {% if resolved_reasoning_effort == 'high' %}
             {% set resolved_reasoning_effort = 'xhigh' %}
@@ -491,6 +492,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
                 supportsThinking: true,
                 supportsReasoningEffort: true,
                 supportsPreserveThinking: true,
+                defaultPreserveThinking: true,
                 supportedReasoningEfforts: [.low, .medium, .high, .xhigh],
                 defaultReasoningEffort: .xhigh
             )
@@ -522,6 +524,27 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(capabilities.defaultReasoningEffort, .noThink)
     }
 
+    func testThinkingCapabilitiesReadPreserveThinkingFilterDefault() {
+        let template = """
+        {% set preserve_thinking = preserve_thinking | default(false) %}
+        {{ message.reasoning_content if preserve_thinking else '' }}
+        """
+
+        let capabilities = LLMThinkingCapabilities.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(capabilities.supportsPreserveThinking)
+        XCTAssertEqual(capabilities.defaultPreserveThinking, false)
+    }
+
+    func testThinkingCapabilitiesLeaveUnknownPreserveThinkingDefaultNil() {
+        let template = "{{ message.reasoning_content if preserve_thinking else '' }}"
+
+        let capabilities = LLMThinkingCapabilities.derived(fromChatTemplate: template)
+
+        XCTAssertTrue(capabilities.supportsPreserveThinking)
+        XCTAssertNil(capabilities.defaultPreserveThinking)
+    }
+
     func testThinkingCapabilitiesReadInlineConditionalDefault() {
         let template = """
         {% set reasoning_effort = reasoning_effort if reasoning_effort is defined else "high" %}
@@ -544,6 +567,7 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertTrue(capabilities.supportsThinking)
         XCTAssertTrue(capabilities.supportsReasoningEffort)
         XCTAssertFalse(capabilities.supportsPreserveThinking)
+        XCTAssertNil(capabilities.defaultPreserveThinking)
         XCTAssertNil(capabilities.supportedReasoningEfforts)
         XCTAssertNil(capabilities.defaultReasoningEffort)
     }

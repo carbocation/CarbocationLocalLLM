@@ -27,6 +27,10 @@ public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
     public var supportsThinking: Bool
     public var supportsReasoningEffort: Bool
     public var supportsPreserveThinking: Bool
+    /// Whether the template preserves historical assistant thinking when the
+    /// request leaves `preserve_thinking` undefined.
+    /// `nil` means the template's default could not be inferred safely.
+    public var defaultPreserveThinking: Bool?
     /// The effort values explicitly handled or accepted by the template.
     ///
     /// `nil` means the template accepts `reasoning_effort` but does not declare a
@@ -41,12 +45,14 @@ public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
         supportsThinking: Bool = false,
         supportsReasoningEffort: Bool = false,
         supportsPreserveThinking: Bool = false,
+        defaultPreserveThinking: Bool? = nil,
         supportedReasoningEfforts: [LLMReasoningEffort]? = nil,
         defaultReasoningEffort: LLMReasoningEffort? = nil
     ) {
         self.supportsThinking = supportsThinking
         self.supportsReasoningEffort = supportsReasoningEffort
         self.supportsPreserveThinking = supportsPreserveThinking
+        self.defaultPreserveThinking = defaultPreserveThinking
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
     }
@@ -61,6 +67,7 @@ public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
             supportsReasoningEffort: template.contains("reasoning_effort"),
             supportsPreserveThinking: template.contains("preserve_thinking")
                 && template.contains("reasoning_content"),
+            defaultPreserveThinking: inferredDefaultPreserveThinking(in: template),
             supportedReasoningEfforts: reasoningEffortMetadata.supported,
             defaultReasoningEffort: reasoningEffortMetadata.defaultValue
         )
@@ -114,6 +121,38 @@ public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
                 return effort
             }
         }
+        return nil
+    }
+
+    private static func inferredDefaultPreserveThinking(in template: String) -> Bool? {
+        guard template.contains("preserve_thinking") else { return nil }
+
+        let patterns: [(pattern: String, group: Int)] = [
+            (#"\bpreserve_thinking\b\s*\|\s*default\s*\(?\s*((?i:true|false))"#, 1),
+            (#"\bset\s+preserve_thinking\s*=\s*preserve_thinking\s+if\s+preserve_thinking\s+is\s+defined\s+else\s+((?i:true|false))"#, 1),
+            (#"(?s)\bif\s+(?:not\s+preserve_thinking\s+is\s+defined|preserve_thinking\s+is\s+(?:not\s+defined|undefined)).{0,300}?\bset\s+preserve_thinking\s*=\s*((?i:true|false))"#, 1),
+            (#"\b(?:not\s+preserve_thinking\s+is\s+defined|preserve_thinking\s+is\s+(?:not\s+defined|undefined))\s+or\s+preserve_thinking\s+(?:is|==)\s+((?i:true|false))"#, 1)
+        ]
+
+        for entry in patterns {
+            guard let rawValue = captureValues(
+                matching: entry.pattern,
+                group: entry.group,
+                in: template
+            ).first else { continue }
+            if rawValue.lowercased() == "true" { return true }
+            if rawValue.lowercased() == "false" { return false }
+        }
+
+        let undefinedActsAsTruePattern = #"\b(?:not\s+preserve_thinking\s+is\s+defined|preserve_thinking\s+is\s+(?:not\s+defined|undefined))\s+or\s+preserve_thinking\b(?!\s*(?:is\b|==|!=))"#
+        if !captureValues(
+            matching: undefinedActsAsTruePattern,
+            group: 0,
+            in: template
+        ).isEmpty {
+            return true
+        }
+
         return nil
     }
 
