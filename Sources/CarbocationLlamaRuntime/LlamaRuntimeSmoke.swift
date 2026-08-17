@@ -6,7 +6,8 @@ import llama
 public enum LlamaRuntimeSmoke {
     public static func defaultModelParameterSummary() -> String {
         let params = llama_model_default_params()
-        return "use_mmap=\(params.use_mmap);n_gpu_layers=\(params.n_gpu_layers)"
+        let loadMode = String(cString: llama_load_mode_name(params.load_mode))
+        return "load_mode=\(loadMode);n_gpu_layers=\(params.n_gpu_layers)"
     }
 
     public static func defaultContextBatchSize() -> UInt32 {
@@ -77,7 +78,7 @@ public enum LlamaRuntimeModelProbe {
 
         var params = llama_model_default_params()
         params.configureForCPUOnly()
-        params.use_mmap = true
+        params.configureLoadMode(useMemoryMap: true)
 
         guard let model = path.withCString({ cPath in
             llama_model_load_from_file(cPath, params)

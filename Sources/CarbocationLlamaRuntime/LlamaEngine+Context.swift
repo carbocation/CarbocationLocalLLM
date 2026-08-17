@@ -47,6 +47,10 @@ extension LlamaEngine {
 }
 
 extension llama_model_params {
+    mutating func configureLoadMode(useMemoryMap: Bool) {
+        load_mode = useMemoryMap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE
+    }
+
     mutating func configureForCPUOnly() {
         n_gpu_layers = 0
         split_mode = LLAMA_SPLIT_MODE_NONE

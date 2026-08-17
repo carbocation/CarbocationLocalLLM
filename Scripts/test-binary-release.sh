@@ -90,7 +90,7 @@ guard curatedCount > 0 else {
     exit(1)
 }
 
-guard summary.contains("use_mmap="), batchSize > 0 else {
+guard summary.contains("load_mode="), batchSize > 0 else {
     fputs("release import check failed: llama runtime did not return expected defaults\n", stderr)
     exit(1)
 }

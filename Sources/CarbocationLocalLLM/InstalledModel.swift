@@ -110,6 +110,8 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
     /// Training context (`n_ctx_train`) when known, otherwise `0`.
     public var contextLength: Int
     public var quantization: String?
+    /// Model-authored sampling defaults imported from the primary GGUF metadata.
+    public var samplingDefaults: LLMSamplingDefaults?
     public var source: ModelSource
     public var hfRepo: String?
     public var hfFilename: String?
@@ -125,6 +127,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         sizeBytes: Int64,
         contextLength: Int,
         quantization: String?,
+        samplingDefaults: LLMSamplingDefaults? = nil,
         source: ModelSource,
         hfRepo: String? = nil,
         hfFilename: String? = nil,
@@ -139,6 +142,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         self.sizeBytes = sizeBytes
         self.contextLength = contextLength
         self.quantization = quantization
+        self.samplingDefaults = samplingDefaults
         self.source = source
         self.hfRepo = hfRepo
         self.hfFilename = hfFilename
@@ -166,6 +170,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         sizeBytes: Int64,
         contextLength: Int,
         quantization: String?,
+        samplingDefaults: LLMSamplingDefaults? = nil,
         source: ModelSource,
         hfRepo: String? = nil,
         hfFilename: String? = nil,
@@ -180,6 +185,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
             sizeBytes: sizeBytes,
             contextLength: contextLength,
             quantization: quantization,
+            samplingDefaults: samplingDefaults,
             source: source,
             hfRepo: hfRepo,
             hfFilename: hfFilename,
@@ -197,6 +203,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         case sizeBytes
         case contextLength
         case quantization
+        case samplingDefaults
         case source
         case hfRepo
         case hfFilename
@@ -214,6 +221,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         sizeBytes = try container.decode(Int64.self, forKey: .sizeBytes)
         contextLength = try container.decode(Int.self, forKey: .contextLength)
         quantization = try container.decodeIfPresent(String.self, forKey: .quantization)
+        samplingDefaults = try container.decodeIfPresent(LLMSamplingDefaults.self, forKey: .samplingDefaults)
         source = try container.decode(ModelSource.self, forKey: .source)
         hfRepo = try container.decodeIfPresent(String.self, forKey: .hfRepo)
         hfFilename = try container.decodeIfPresent(String.self, forKey: .hfFilename)
@@ -241,6 +249,7 @@ public struct InstalledModel: Codable, Identifiable, Hashable, Sendable {
         try container.encode(sizeBytes, forKey: .sizeBytes)
         try container.encode(contextLength, forKey: .contextLength)
         try container.encodeIfPresent(quantization, forKey: .quantization)
+        try container.encodeIfPresent(samplingDefaults, forKey: .samplingDefaults)
         try container.encode(source, forKey: .source)
         try container.encodeIfPresent(hfRepo, forKey: .hfRepo)
         try container.encodeIfPresent(hfFilename, forKey: .hfFilename)

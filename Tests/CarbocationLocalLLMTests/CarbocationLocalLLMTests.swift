@@ -444,6 +444,30 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertTrue(GGUFMetadata.supportsMTPAcceleration(at: url))
     }
 
+    func testGGUFMetadataReadsSamplingDefaults() throws {
+        let root = try makeTemporaryDirectory()
+        let url = root.appendingPathComponent("metadata-only.gguf")
+        try makeMinimalGGUF(
+            contextLength: 32_768,
+            samplingDefaults: LLMSamplingDefaults(
+                temperature: 1,
+                topP: 0.95,
+                topK: 20,
+                minP: 0.05,
+                repetitionPenalty: 1.1
+            )
+        ).write(to: url)
+
+        let defaults = try XCTUnwrap(GGUFMetadata.modelMetadata(at: url).samplingDefaults)
+        XCTAssertEqual(defaults.temperature, 1)
+        XCTAssertEqual(defaults.topP ?? 0, 0.95, accuracy: 0.000_001)
+        XCTAssertEqual(defaults.topK, 20)
+        XCTAssertEqual(defaults.minP ?? 0, 0.05, accuracy: 0.000_001)
+        XCTAssertEqual(defaults.repetitionPenalty ?? 0, 1.1, accuracy: 0.000_001)
+        XCTAssertNil(defaults.presencePenalty)
+        XCTAssertNil(defaults.seed)
+    }
+
     func testGenerationOptionsResolverUsesSafeDefaultsUnlessCustom() {
         let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -575,6 +599,29 @@ final class CarbocationLocalLLMTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved, .extractionSafe)
+    }
+
+    func testSamplingDefaultsResolverUsesGGUFDefaultsWithoutOverridingRequest() {
+        let installed = InstalledModel(
+            displayName: "Custom",
+            filename: "custom-Q4_K_M.gguf",
+            sizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            samplingDefaults: LLMSamplingDefaults(temperature: 1, topP: 0.95, topK: 20),
+            source: .customHF
+        )
+
+        let resolved = LLMSamplingDefaultsResolver.resolvedOptions(
+            globalDefaults: .extractionSafe,
+            installedModel: installed,
+            requestOptions: GenerationOptions(temperature: 0.2, maxOutputTokens: 128)
+        )
+
+        XCTAssertEqual(resolved.temperature, 0.2)
+        XCTAssertEqual(resolved.topP, 0.95)
+        XCTAssertEqual(resolved.topK, 20)
+        XCTAssertEqual(resolved.maxOutputTokens, 128)
     }
 
     func testGenerationOptionsDecodeLegacyPayloadWithNewDefaults() throws {
@@ -1230,6 +1277,62 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(resolved?.id, modelID)
         XCTAssertEqual(resolved?.displayName, "Resolvable-Q4_K_M")
         XCTAssertEqual(library.model(id: modelID)?.id, modelID)
+    }
+
+    @MainActor
+    func testModelLibraryImportPersistsGGUFSamplingDefaults() async throws {
+        let root = try makeTemporaryDirectory()
+        let source = root.appendingPathComponent("custom-Q4_K_M.gguf")
+        let gguf = makeMinimalGGUF(
+            contextLength: 32_768,
+            samplingDefaults: LLMSamplingDefaults(temperature: 1, topP: 0.95, topK: 20)
+        )
+        try gguf.write(to: source)
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        let library = ModelLibrary(root: modelsRoot, searchConfiguration: .managedOnly)
+
+        let installed = try await library.importFile(at: source, displayName: "Custom")
+
+        XCTAssertEqual(installed.samplingDefaults?.temperature, 1)
+        XCTAssertEqual(installed.samplingDefaults?.topP ?? 0, 0.95, accuracy: 0.000_001)
+        XCTAssertEqual(installed.samplingDefaults?.topK, 20)
+
+        let data = try Data(contentsOf: installed.metadataURL(in: modelsRoot))
+        let persisted = try LocalLLMJSON.makeDecoder().decode(InstalledModel.self, from: data)
+        XCTAssertEqual(persisted.samplingDefaults, installed.samplingDefaults)
+    }
+
+    @MainActor
+    func testModelLibraryRefreshBackfillsLegacyGGUFSamplingDefaults() async throws {
+        let root = try makeTemporaryDirectory()
+        let modelID = UUID()
+        let directory = root.appendingPathComponent(modelID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let filename = "legacy-Q4_K_M.gguf"
+        try makeMinimalGGUF(
+            contextLength: 8_192,
+            samplingDefaults: LLMSamplingDefaults(temperature: 0.7, topK: 20)
+        ).write(to: directory.appendingPathComponent(filename))
+        let legacy = InstalledModel(
+            id: modelID,
+            displayName: "Legacy",
+            filename: filename,
+            sizeBytes: 1,
+            contextLength: 8_192,
+            quantization: "Q4_K_M",
+            source: .customHF
+        )
+        let metadataURL = directory.appendingPathComponent("metadata.json")
+        try LocalLLMJSON.makePrettyEncoder().encode(legacy).write(to: metadataURL)
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly)
+
+        await library.refresh()
+
+        XCTAssertEqual(library.model(id: modelID)?.samplingDefaults?.temperature ?? 0, 0.7, accuracy: 0.000_001)
+        XCTAssertEqual(library.model(id: modelID)?.samplingDefaults?.topK, 20)
+        let persistedData = try Data(contentsOf: metadataURL)
+        let persisted = try LocalLLMJSON.makeDecoder().decode(InstalledModel.self, from: persistedData)
+        XCTAssertNotNil(persisted.samplingDefaults)
     }
 
     @MainActor
@@ -2291,12 +2394,20 @@ final class CarbocationLocalLLMTests: XCTestCase {
     private func makeMinimalGGUF(
         contextLength: UInt32,
         nextNPredictLayers: UInt32? = nil,
-        architecture: String = "llama"
+        architecture: String = "llama",
+        samplingDefaults: LLMSamplingDefaults? = nil
     ) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
         appendUInt32(3, to: &data)
         appendInt64(0, to: &data)
-        appendInt64(nextNPredictLayers == nil ? 2 : 3, to: &data)
+        let samplingValueCount = [
+            samplingDefaults?.temperature,
+            samplingDefaults?.topP,
+            samplingDefaults?.topK.map(Double.init),
+            samplingDefaults?.minP,
+            samplingDefaults?.repetitionPenalty
+        ].compactMap { $0 }.count
+        appendInt64(Int64(2 + (nextNPredictLayers == nil ? 0 : 1) + samplingValueCount), to: &data)
 
         appendGGUFString("general.architecture", to: &data)
         appendInt32(8, to: &data)
@@ -2310,6 +2421,31 @@ final class CarbocationLocalLLMTests: XCTestCase {
             appendGGUFString("gemma4.nextn_predict_layers", to: &data)
             appendInt32(4, to: &data)
             appendUInt32(nextNPredictLayers, to: &data)
+        }
+        if let temperature = samplingDefaults?.temperature {
+            appendGGUFString("general.sampling.temp", to: &data)
+            appendInt32(6, to: &data)
+            appendFloat32(Float(temperature), to: &data)
+        }
+        if let topP = samplingDefaults?.topP {
+            appendGGUFString("general.sampling.top_p", to: &data)
+            appendInt32(6, to: &data)
+            appendFloat32(Float(topP), to: &data)
+        }
+        if let topK = samplingDefaults?.topK {
+            appendGGUFString("general.sampling.top_k", to: &data)
+            appendInt32(5, to: &data)
+            appendInt32(Int32(topK), to: &data)
+        }
+        if let minP = samplingDefaults?.minP {
+            appendGGUFString("general.sampling.min_p", to: &data)
+            appendInt32(6, to: &data)
+            appendFloat32(Float(minP), to: &data)
+        }
+        if let repetitionPenalty = samplingDefaults?.repetitionPenalty {
+            appendGGUFString("general.sampling.penalty_repeat", to: &data)
+            appendInt32(6, to: &data)
+            appendFloat32(Float(repetitionPenalty), to: &data)
         }
         return data
     }
@@ -2329,6 +2465,10 @@ final class CarbocationLocalLLMTests: XCTestCase {
 
     private func appendInt32(_ value: Int32, to data: inout Data) {
         appendUInt32(UInt32(bitPattern: value), to: &data)
+    }
+
+    private func appendFloat32(_ value: Float, to data: inout Data) {
+        appendUInt32(value.bitPattern, to: &data)
     }
 
     private func appendUInt64(_ value: UInt64, to data: inout Data) {

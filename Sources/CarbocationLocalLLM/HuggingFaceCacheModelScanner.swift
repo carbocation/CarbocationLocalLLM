@@ -235,7 +235,8 @@ struct HuggingFaceCacheModelScanner {
         }
 
         let sizeBytes = artifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        let resolvedContextLength = GGUFMetadata.trainingContextLength(at: primary.url)
+        let ggufMetadata = GGUFMetadata.modelMetadata(at: primary.url)
+        let resolvedContextLength = ggufMetadata.trainingContextLength
             ?? contextLengthProbe?(primary.url)
             ?? 0
         let id = Self.stableModelID(
@@ -251,6 +252,7 @@ struct HuggingFaceCacheModelScanner {
             contextLength: resolvedContextLength,
             quantization: splitInfo(for: primary.path).tag.nilIfBlank
                 ?? InstalledModel.inferQuantization(from: primary.path),
+            samplingDefaults: ggufMetadata.samplingDefaults ?? .providerDefault,
             source: source(for: repo, path: primary.path),
             hfRepo: repo,
             hfFilename: primary.path,

@@ -484,7 +484,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
         var params = llama_model_default_params()
         params.configureForCPUOnly()
-        params.use_mmap = true
+        params.configureLoadMode(useMemoryMap: true)
 
         guard let model = path.withCString({ cPath in
             llama_model_load_from_file(cPath, params)
@@ -556,9 +556,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
         performUnload()
 
+        let supportsMTPAcceleration = ggufMetadata.supportsMTPAcceleration
+        let shouldPrepareMTPAcceleration = supportsMTPAcceleration &&
+            configuration.accelerationPolicy == .automatic
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = configuration.gpuLayerCount
-        modelParams.use_mmap = configuration.useMemoryMap
+        modelParams.configureLoadMode(useMemoryMap: configuration.useMemoryMap)
+        modelParams.load_mtp = shouldPrepareMTPAcceleration
         if configuration.gpuLayerCount <= 0 {
             modelParams.configureForCPUOnly()
         }
@@ -582,11 +586,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             contextSize: chosenContext,
             batchSizeLimit: configuration.batchSizeLimit
         )
-        let supportsMTPAcceleration = ggufMetadata.supportsMTPAcceleration
         let requestedMTPDraftTokens = Self.clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
         let maxMTPDraftTokens = Self.effectiveMTPMaxDraftTokens(requested: requestedMTPDraftTokens)
-        let shouldPrepareMTPAcceleration = supportsMTPAcceleration &&
-            configuration.accelerationPolicy == .automatic
         var attemptedBatchSizes: [Int] = []
         var initializedContext: OpaquePointer?
         var initializedBatchSize: Int?
@@ -700,7 +701,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
         var modelParams = llama_model_default_params()
         modelParams.vocab_only = true
-        modelParams.use_mmap = true
+        modelParams.configureLoadMode(useMemoryMap: true)
         modelParams.configureForCPUOnly()
 
         guard let loadedModel = path.withCString({ cPath in

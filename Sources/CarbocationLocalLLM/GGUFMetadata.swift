@@ -5,6 +5,7 @@ public enum GGUFMetadata {
         public var architecture: String?
         public var trainingContextLength: Int?
         public var nextNPredictLayers: Int?
+        public var samplingDefaults: LLMSamplingDefaults?
 
         public var supportsMTPAcceleration: Bool {
             (nextNPredictLayers ?? 0) > 0
@@ -13,11 +14,13 @@ public enum GGUFMetadata {
         public init(
             architecture: String? = nil,
             trainingContextLength: Int? = nil,
-            nextNPredictLayers: Int? = nil
+            nextNPredictLayers: Int? = nil,
+            samplingDefaults: LLMSamplingDefaults? = nil
         ) {
             self.architecture = architecture
             self.trainingContextLength = trainingContextLength
             self.nextNPredictLayers = nextNPredictLayers
+            self.samplingDefaults = samplingDefaults
         }
     }
 
@@ -89,6 +92,10 @@ private enum GGUFValueType: Int32 {
             return false
         }
     }
+
+    var isNumber: Bool {
+        isInteger || self == .float32 || self == .float64
+    }
 }
 
 private final class GGUFMetadataReader {
@@ -124,6 +131,8 @@ private final class GGUFMetadataReader {
         var architecture: String?
         var trainingContextLength: Int?
         var nextNPredictLayers: Int?
+        var samplingDefaults = LLMSamplingDefaults.providerDefault
+        var foundSamplingDefault = false
 
         for _ in 0..<keyValueCount {
             let key = try readString(maxLength: Self.maxKeyLength)
@@ -163,14 +172,72 @@ private final class GGUFMetadataReader {
                 continue
             }
 
+            if key == "general.sampling.top_k" {
+                if valueType.isInteger,
+                   let value = try readIntegerValue(type: valueType),
+                   value >= 0,
+                   value <= Int64(Int32.max) {
+                    samplingDefaults.topK = Int(value)
+                    foundSamplingDefault = true
+                } else if !valueType.isInteger {
+                    try skipScalarValue(type: valueType)
+                }
+                continue
+            }
+
+            if key == "general.sampling.temp"
+                || key == "general.sampling.top_p"
+                || key == "general.sampling.min_p"
+                || key == "general.sampling.penalty_repeat" {
+                if valueType.isNumber {
+                    let value = try readNumericValue(type: valueType)
+                    if let value, Self.isValidSamplingValue(value, forKey: key) {
+                        switch key {
+                        case "general.sampling.temp":
+                            samplingDefaults.temperature = value
+                        case "general.sampling.top_p":
+                            samplingDefaults.topP = value
+                        case "general.sampling.min_p":
+                            samplingDefaults.minP = value
+                        case "general.sampling.penalty_repeat":
+                            samplingDefaults.repetitionPenalty = value
+                        default:
+                            break
+                        }
+                        foundSamplingDefault = true
+                    }
+                } else {
+                    try skipScalarValue(type: valueType)
+                }
+                continue
+            }
+
             try skipScalarValue(type: valueType)
         }
 
         return GGUFMetadata.ModelMetadata(
             architecture: architecture,
             trainingContextLength: trainingContextLength,
-            nextNPredictLayers: nextNPredictLayers
+            nextNPredictLayers: nextNPredictLayers,
+            samplingDefaults: foundSamplingDefault ? samplingDefaults : nil
         )
+    }
+
+    private static func isValidSamplingValue(_ value: Double, forKey key: String) -> Bool {
+        guard value.isFinite,
+              abs(value) <= Double(Float.greatestFiniteMagnitude)
+        else { return false }
+
+        switch key {
+        case "general.sampling.temp":
+            return value >= 0
+        case "general.sampling.top_p", "general.sampling.min_p":
+            return (0...1).contains(value)
+        case "general.sampling.penalty_repeat":
+            return value > 0
+        default:
+            return false
+        }
     }
 
     private func readIntegerValue(type: GGUFValueType) throws -> Int64? {
@@ -195,6 +262,17 @@ private final class GGUFMetadataReader {
             return try readInt64()
         case .float32, .float64, .bool, .string, .array:
             return nil
+        }
+    }
+
+    private func readNumericValue(type: GGUFValueType) throws -> Double? {
+        switch type {
+        case .float32:
+            return Double(Float(bitPattern: try readUInt32()))
+        case .float64:
+            return Double(bitPattern: try readUInt64())
+        default:
+            return try readIntegerValue(type: type).map(Double.init)
         }
     }
 

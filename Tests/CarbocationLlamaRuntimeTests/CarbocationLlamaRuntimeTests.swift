@@ -6,7 +6,7 @@ import XCTest
 final class CarbocationLlamaRuntimeTests: XCTestCase {
     func testRuntimeTargetImportsAndLinksLlamaSymbols() {
         let summary = LlamaRuntimeSmoke.defaultModelParameterSummary()
-        XCTAssertTrue(summary.contains("use_mmap="))
+        XCTAssertTrue(summary.contains("load_mode="))
         XCTAssertTrue(summary.contains("n_gpu_layers="))
     }
 
@@ -323,7 +323,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
         XCTAssertEqual(
             diagnostics.resolvedLine,
-            "chain=penalties,greedy temperature=0 topK=disabled topP=disabled minP=disabled penaltyLastN=16 repetitionPenalty=1.2999999523162842 frequencyPenalty=0 presencePenalty=0 seed=none"
+            "chain=penalties,greedy temperature=0 topK=disabled topP=disabled minP=disabled penaltyLastN=16 repetitionPenalty=1 frequencyPenalty=0 presencePenalty=0 seed=none"
         )
     }
 
@@ -2111,7 +2111,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             _ = try await engine.preflight(
                 system: "Return JSON.",
                 prompt: #"Return {"ok": true}."#,
-                options: GenerationOptions(grammar: "root ::=")
+                options: GenerationOptions(grammar: #"root ::= "unterminated"#)
             )
             XCTFail("Expected invalid grammar to fail during preflight.")
         } catch let error as LLMEngineError {

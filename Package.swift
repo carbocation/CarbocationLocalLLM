@@ -110,13 +110,12 @@ let package = Package(
                 "ngram-mod.cpp",
                 "sampling.cpp",
                 "speculative.cpp",
+                "trie.cpp",
                 "unicode.cpp"
             ],
             publicHeadersPath: ".",
             cxxSettings: [
                 .headerSearchPath("."),
-                .headerSearchPath("../include"),
-                .headerSearchPath("../ggml/include"),
                 .headerSearchPath("../ggml/src"),
                 .headerSearchPath("../src"),
                 .headerSearchPath("../vendor")
@@ -150,22 +149,31 @@ let package = Package(
                 "models/kimivl.cpp",
                 "models/kimik25.cpp",
                 "models/nemotron-v2-vl.cpp",
+                "models/muse-glimmer.cpp",
                 "models/llama4.cpp",
                 "models/llava.cpp",
                 "models/minicpmv.cpp",
                 "models/paddleocr.cpp",
                 "models/pixtral.cpp",
                 "models/qwen2vl.cpp",
+                "models/minimax-m3.cpp",
                 "models/qwen3vl.cpp",
                 "models/mimovl.cpp",
                 "models/qwen3a.cpp",
+                "models/mimo-audio.cpp",
+                "models/qwen3tts-spkenc.cpp",
+                "models/qwen3tts-gen.cpp",
+                "models/pockettts-seanet.cpp",
+                "models/pockettts-spkenc.cpp",
+                "models/pockettts-gen.cpp",
                 "models/step3vl.cpp",
                 "models/siglip.cpp",
                 "models/whisper-enc.cpp",
                 "models/deepseekocr.cpp",
                 "models/mobilenetv5.cpp",
                 "models/youtuvl.cpp",
-                "models/yasa2.cpp"
+                "models/yasa2.cpp",
+                "models/parakeet.cpp"
             ],
             publicHeadersPath: ".",
             cxxSettings: [
@@ -205,13 +213,10 @@ let package = Package(
             ],
             publicHeadersPath: "include",
             cSettings: [
-                .headerSearchPath("../../Vendor/llama.cpp/include"),
                 .headerSearchPath("../../Vendor/llama.cpp/common")
             ],
             cxxSettings: [
                 .headerSearchPath("../../Vendor/llama.cpp/common"),
-                .headerSearchPath("../../Vendor/llama.cpp/include"),
-                .headerSearchPath("../../Vendor/llama.cpp/ggml/include"),
                 .headerSearchPath("../../Vendor/llama.cpp/ggml/src"),
                 .headerSearchPath("../../Vendor/llama.cpp/src"),
                 .headerSearchPath("../../Vendor/llama.cpp/vendor")

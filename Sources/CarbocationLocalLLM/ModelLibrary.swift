@@ -497,12 +497,13 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
             let primaryDestination = stagingDirectory.appendingPathComponent(primaryArtifact.relativePath)
             let sizeBytes = metadataArtifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
             let primaryFilename = primaryArtifact.relativePath
+            let ggufMetadata = GGUFMetadata.modelMetadata(at: primaryDestination)
 
             let resolvedContextLength: Int
             if contextLength > 0 {
                 resolvedContextLength = contextLength
             } else {
-                resolvedContextLength = GGUFMetadata.trainingContextLength(at: primaryDestination)
+                resolvedContextLength = ggufMetadata.trainingContextLength
                     ?? contextLengthProbe?(primaryDestination)
                     ?? 0
             }
@@ -513,6 +514,7 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
                 sizeBytes: sizeBytes,
                 contextLength: resolvedContextLength,
                 quantization: quantization ?? InstalledModel.inferQuantization(from: primaryFilename),
+                samplingDefaults: ggufMetadata.samplingDefaults ?? .providerDefault,
                 source: source,
                 hfRepo: hfRepo,
                 hfFilename: hfFilename,
@@ -559,7 +561,13 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
 
                     let metadataURL = entry.appendingPathComponent("metadata.json")
                     if let data = try? Data(contentsOf: metadataURL),
-                       let metadata = try? decoder.decode(InstalledModel.self, from: data) {
+                       var metadata = try? decoder.decode(InstalledModel.self, from: data) {
+                        if metadata.samplingDefaults == nil {
+                            metadata.samplingDefaults = GGUFMetadata.modelMetadata(
+                                at: metadata.weightsURL(in: root)
+                            ).samplingDefaults ?? .providerDefault
+                            try? writeMetadata(metadata, directory: entry)
+                        }
                         found.append(metadata)
                     } else if let synthesized = synthesizeMetadata(for: entry) {
                         found.append(synthesized)
@@ -606,14 +614,16 @@ private final class ModelLibraryFileWorker: @unchecked Sendable {
               ),
               let gguf = files.first(where: { $0.pathExtension.lowercased() == "gguf" })
         else { return nil }
+        let ggufMetadata = GGUFMetadata.modelMetadata(at: gguf)
 
         return InstalledModel(
             id: uuid,
             displayName: gguf.deletingPathExtension().lastPathComponent,
             filename: gguf.lastPathComponent,
             sizeBytes: fileSize(at: gguf),
-            contextLength: 0,
+            contextLength: ggufMetadata.trainingContextLength ?? 0,
             quantization: InstalledModel.inferQuantization(from: gguf.lastPathComponent),
+            samplingDefaults: ggufMetadata.samplingDefaults ?? .providerDefault,
             source: .imported,
             artifacts: [
                 InstalledModelArtifact(

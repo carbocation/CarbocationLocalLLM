@@ -67,7 +67,7 @@ package struct LlamaResolvedSamplerDiagnostics: Hashable, Sendable {
 
 extension LlamaEngine {
     fileprivate static let penaltyLastN: Int32 = 16
-    fileprivate static let penaltyRepeat: Float = 1.3
+    fileprivate static let penaltyRepeat: Float = 1.0
 
     struct SamplerRuntime {
         var chain: UnsafeMutablePointer<llama_sampler>
@@ -173,7 +173,13 @@ extension LlamaEngine {
         let presencePenalty = Float(options.presencePenalty ?? 0)
         llama_sampler_chain_add(
             chain,
-            llama_sampler_init_penalties(Self.penaltyLastN, repetitionPenalty, 0.0, presencePenalty)
+            llama_sampler_init_penalties(
+                llama_vocab_n_tokens(vocab),
+                Self.penaltyLastN,
+                repetitionPenalty,
+                0.0,
+                presencePenalty
+            )
         )
 
         switch grammarMode {

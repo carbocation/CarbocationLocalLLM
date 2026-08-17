@@ -222,14 +222,18 @@ public enum LLMSamplingDefaultsResolver {
         curatedModels: [CuratedModel] = CuratedModelCatalog.all,
         appOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
     ) -> LLMSamplingDefaults {
-        guard let installedModel,
-              let curatedModel = CuratedModelCatalog.entry(for: installedModel, among: curatedModels)
-        else {
+        guard let installedModel else {
             return globalDefaults
         }
 
+        let modelDefaults = globalDefaults.merged(with: installedModel.samplingDefaults)
+        guard let curatedModel = CuratedModelCatalog.entry(for: installedModel, among: curatedModels)
+        else {
+            return modelDefaults
+        }
+
         return resolvedDefaults(
-            globalDefaults: globalDefaults,
+            globalDefaults: modelDefaults,
             curatedDefaults: curatedModel.samplingDefaults,
             appOverrides: appOverrides[curatedModel.reference]
         )

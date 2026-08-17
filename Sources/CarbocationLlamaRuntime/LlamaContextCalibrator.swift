@@ -272,7 +272,8 @@ private enum LlamaContextCalibrator {
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = configuration.gpuLayerCount
-        modelParams.use_mmap = configuration.useMemoryMap
+        modelParams.configureLoadMode(useMemoryMap: configuration.useMemoryMap)
+        modelParams.load_mtp = shouldPrepareMTPAcceleration
         if configuration.gpuLayerCount <= 0 {
             modelParams.configureForCPUOnly()
         }

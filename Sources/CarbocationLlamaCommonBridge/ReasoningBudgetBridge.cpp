@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../../Vendor/llama.cpp/common/log.h"
@@ -10,6 +11,9 @@
 
 #undef LOG_INF
 #define LOG_INF(...) do {} while (0)
+
+bool carbocation_common_utf8_is_complete(const std::string & input);
+std::string carbocation_common_token_to_piece(const llama_vocab * vocab, llama_token token, bool special);
 
 #define common_token_to_piece carbocation_common_token_to_piece
 #define common_utf8_is_complete carbocation_common_utf8_is_complete
@@ -80,6 +84,14 @@ std::vector<llama_token> token_vector(const llama_token * tokens, size_t count) 
     return std::vector<llama_token>(tokens, tokens + count);
 }
 
+std::vector<llama_tokens> token_sequences(const llama_token * tokens, size_t count) {
+    auto tokens_vector = token_vector(tokens, count);
+    if (tokens_vector.empty()) {
+        return {};
+    }
+    return { std::move(tokens_vector) };
+}
+
 common_reasoning_budget_state to_common_state(carbocation_llama_reasoning_budget_state state) {
     switch (state) {
         case CARBOCATION_LLAMA_REASONING_BUDGET_COUNTING:
@@ -131,8 +143,8 @@ extern "C" llama_sampler * carbocation_llama_reasoning_budget_sampler_init(
 
     return common_reasoning_budget_init(
         vocab,
-        token_vector(start_tokens, start_token_count),
-        token_vector(end_tokens, end_token_count),
+        token_sequences(start_tokens, start_token_count),
+        token_sequences(end_tokens, end_token_count),
         token_vector(forced_tokens, forced_token_count),
         budget,
         to_common_state(initial_state)
