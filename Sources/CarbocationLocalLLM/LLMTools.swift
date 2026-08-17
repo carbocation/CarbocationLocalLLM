@@ -232,6 +232,11 @@ extension LLMToolChoice: Codable {
 }
 
 public struct LLMToolGenerationRequest: Sendable {
+    /// Structured chat history for this request. When non-nil, it takes precedence over `system` and `prompt`.
+    ///
+    /// Use the `messages:` initializer when prior assistant reasoning must remain available to a model-native
+    /// chat template. The legacy `system`/`prompt` initializer leaves this property nil for source compatibility.
+    public var messages: [LLMChatMessage]?
     public var system: String
     public var prompt: String
     /// Options for the single tool-aware generation flow.
@@ -248,8 +253,25 @@ public struct LLMToolGenerationRequest: Sendable {
         toolChoice: LLMToolChoice = .auto,
         maxToolRounds: Int = 4
     ) {
+        self.messages = nil
         self.system = system
         self.prompt = prompt
+        self.options = options
+        self.tools = tools
+        self.toolChoice = toolChoice
+        self.maxToolRounds = maxToolRounds
+    }
+
+    public init(
+        messages: [LLMChatMessage],
+        options: GenerationOptions = GenerationOptions(),
+        tools: [LLMTool] = [],
+        toolChoice: LLMToolChoice = .auto,
+        maxToolRounds: Int = 4
+    ) {
+        self.messages = messages
+        self.system = ""
+        self.prompt = ""
         self.options = options
         self.tools = tools
         self.toolChoice = toolChoice

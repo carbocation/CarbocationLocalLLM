@@ -436,6 +436,67 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(assistant?.reasoningContent, "Reasoning before the tool call")
     }
 
+    func testStructuredToolRequestPreservesPriorAssistantReasoningInTemplate() async throws {
+        let engine = LlamaEngine()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "Structured Tool History Vocab",
+            requestedContext: 2_048
+        )
+        await engine.setChatTemplateForTesting("""
+        {%- for message in messages -%}
+        <{{ message.role }}>{{ message.content }}|{{ message.reasoning_content|default('none') }}|
+        {%- endfor -%}
+        <assistant>
+        """)
+
+        let segmentScript = ToolGenerationSegmentScript()
+        await engine.setToolAwareGenerationSegmentOverrideForTesting { input in
+            await segmentScript.nextSegment(for: input)
+        }
+        let lookupTool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test data.")
+        ) { _ in
+            ["answer": "tool output"]
+        }
+
+        let result = try await engine.generateWithTools(LLMToolGenerationRequest(
+            messages: [
+                LLMChatMessage(role: .system, text: "System policy"),
+                LLMChatMessage(role: .user, text: "First question"),
+                LLMChatMessage(
+                    role: .assistant,
+                    text: "Prior answer",
+                    reasoningContent: "Prior private reasoning"
+                ),
+                LLMChatMessage(role: .user, text: "Follow-up question")
+            ],
+            options: GenerationOptions(
+                enableThinking: true,
+                reasoningEffort: .medium,
+                preserveThinking: true
+            ),
+            tools: [lookupTool],
+            maxToolRounds: 1
+        ))
+
+        XCTAssertEqual(result.finalText, "Final answer after tool.")
+        let snapshot = await segmentScript.snapshot()
+        XCTAssertEqual(snapshot.count, 2)
+        let firstPrompt = try XCTUnwrap(snapshot.prompts.first)
+        XCTAssertTrue(firstPrompt.contains("<user>First question|none|"))
+        XCTAssertTrue(firstPrompt.contains("<assistant>Prior answer|Prior private reasoning|"))
+        XCTAssertTrue(firstPrompt.contains("<user>Follow-up question|none|"))
+        XCTAssertLessThan(
+            try XCTUnwrap(firstPrompt.range(of: "First question")?.lowerBound),
+            try XCTUnwrap(firstPrompt.range(of: "Prior answer")?.lowerBound)
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(firstPrompt.range(of: "Prior answer")?.lowerBound),
+            try XCTUnwrap(firstPrompt.range(of: "Follow-up question")?.lowerBound)
+        )
+    }
+
     func testUnloadDuringSuspendedToolGenerationDefersUntilContinuation() async throws {
         let engine = LlamaEngine()
         try await engine.loadVocabularyOnlyForTesting(

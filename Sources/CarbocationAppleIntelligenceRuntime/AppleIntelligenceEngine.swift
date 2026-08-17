@@ -583,16 +583,29 @@ public actor AppleIntelligenceEngine: LLMEngine {
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
-            let text = try await generate(
-                system: request.system,
-                prompt: request.prompt,
-                options: request.options,
-                control: control,
-                onPhaseAwareEvent: { event in
-                    stats.record(event)
-                    onPhaseAwareEvent(.finalAnswerEvent(event))
-                }
-            )
+            let text: String
+            if let messages = request.messages {
+                text = try await generate(
+                    messages: messages,
+                    options: request.options,
+                    control: control,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    }
+                )
+            } else {
+                text = try await generate(
+                    system: request.system,
+                    prompt: request.prompt,
+                    options: request.options,
+                    control: control,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    }
+                )
+            }
             let snapshot = stats.snapshot(fallbackStopReason: "complete")
             emitAggregateStats(stopReason: snapshot.stopReason)
             return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)
@@ -852,6 +865,11 @@ extension AppleIntelligenceEngine {
         stats: AppleToolGenerationStatsAccumulator,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void
     ) async throws -> LLMToolGenerationResult {
+        let textInput = if let messages = request.messages {
+            try LLMChatTextRenderer.textOnlySystemAndPrompt(from: messages)
+        } else {
+            (system: request.system, prompt: request.prompt)
+        }
         let phase = LLMStreamContentPhase.final
         func emit(_ event: LLMPhaseAwareStreamEvent) {
             stats.record(event)
@@ -873,7 +891,7 @@ extension AppleIntelligenceEngine {
             try AppleNativeToolAdapter(tool: $0, recorder: recorder)
         }
         let instructions = Self.toolInstructions(
-            system: request.system,
+            system: textInput.system,
             options: request.options,
             toolChoice: request.toolChoice
         )
@@ -886,7 +904,7 @@ extension AppleIntelligenceEngine {
         var streamedText = ""
         var sawFirstSnapshot = false
         let stream = session.streamResponse(
-            to: request.prompt,
+            to: textInput.prompt,
             options: Self.foundationModelsOptions(from: resolvedOptions)
         )
 
@@ -943,7 +961,7 @@ extension AppleIntelligenceEngine {
         let duration = Date().timeIntervalSince(startedAt)
         let promptTokens = AppleIntelligencePromptBudget.estimatedPromptTokens(
             system: instructions,
-            prompt: request.prompt,
+            prompt: textInput.prompt,
             options: request.options
         )
         let generatedTokens = TokenEstimator.estimate(text: streamedText)

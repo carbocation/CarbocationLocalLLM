@@ -1152,16 +1152,28 @@ extension LLMEngine {
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
-            let text = try await generate(
-                system: request.system,
-                prompt: request.prompt,
-                options: request.options,
-                onPhaseAwareEvent: { event in
-                    stats.record(event)
-                    onPhaseAwareEvent(.finalAnswerEvent(event))
-                },
-                ()
-            )
+            let text: String
+            if let messages = request.messages {
+                text = try await generate(
+                    messages: messages,
+                    options: request.options,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    }
+                )
+            } else {
+                text = try await generate(
+                    system: request.system,
+                    prompt: request.prompt,
+                    options: request.options,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    },
+                    ()
+                )
+            }
             let snapshot = stats.snapshot(fallbackStopReason: "complete")
             emitAggregateStats(stopReason: snapshot.stopReason)
             return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)

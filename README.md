@@ -270,8 +270,10 @@ let loaded = try await LocalLLMEngine.shared.load(
 )
 
 let request = LLMToolGenerationRequest(
-    system: "You are a helpful assistant.",
-    prompt: userPrompt,
+    messages: [
+        LLMChatMessage(role: .system, text: "You are a helpful assistant."),
+        LLMChatMessage(role: .user, text: userPrompt)
+    ],
     options: GenerationOptions(maxOutputTokens: 512),
     tools: LLMStandardTools.initialTools(),
     toolChoice: .auto,
@@ -301,6 +303,8 @@ let response = result.finalText
 ```
 
 `generateWithTools(...)` uses provider-native tool handling rather than a hidden planner pass. llama.cpp-backed models stream one normal tool-aware response, intercept tool-call protocol text before it reaches the UI, execute requested tools, then continue generation with the tool results in context. Apple Intelligence uses Foundation Models native tools. `options` controls the tool-aware generation flow, matching `generate(...)`. Chat UIs should render only `.finalAnswerEvent(.finalAnswerDelta)` and `.finalAnswerEvent(.finalAnswerSnapshot)` as assistant text; tool-call syntax and thinking text are not user-visible final-answer deltas.
+
+For chat, prefer `LLMToolGenerationRequest(messages:...)`. It passes the ordered system, user, and assistant messages directly to a compatible GGUF chat template, including each assistant message's separate `reasoningContent`. The `system`/`prompt` initializer remains available for one-shot and compatibility use, but it cannot represent structured reasoning history. Non-text message parts are supported when tools are disabled; multimodal tool generation remains unsupported.
 
 `LLMToolCall.id` is the stable execution identity for UI and persistence. If the model supplied its own call ID, it is available as `LLMToolCall.rawID`; `LLMToolCall.executionID` is always the value used by `LLMToolOutput.callID`.
 For llama.cpp-backed models, `LLMToolCall.triggerPhase` records whether the tool protocol began during `.thinking` or `.final`; Apple Intelligence leaves this value `nil` because Foundation Models does not expose an internal stream phase for native tools.
@@ -462,7 +466,7 @@ let history = [
 ]
 ```
 
-The llama runtime forwards `reasoningContent` as the template's `reasoning_content` field and preserves it across package-managed native tool rounds. `LLMGenerationResult.assistantMessage` converts a phased result into this history-ready representation. The package does not durably save reasoning history; the app decides whether to retain it between requests. `generatePhased(...)` and phase-aware events expose generated thinking separately so an app can make that choice without mixing it into user-visible text.
+The llama runtime forwards `reasoningContent` as the template's `reasoning_content` field and preserves it across package-managed native tool rounds. Pass the same history through `LLMToolGenerationRequest(messages: history, ...)` when tools are enabled so prior reasoning remains structured rather than flattened into a prompt. `LLMGenerationResult.assistantMessage` converts a phased result into this history-ready representation. The package does not durably save reasoning history; the app decides whether to retain it between requests. `generatePhased(...)` and phase-aware events expose generated thinking separately so an app can make that choice without mixing it into user-visible text.
 
 For local GGUF models that expose thinking start/end delimiters, callers can also cap generated thinking tokens:
 

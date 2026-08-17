@@ -174,7 +174,26 @@ final class ToolCallingTests: XCTestCase {
         let options = GenerationOptions(maxOutputTokens: 128, enableThinking: true)
         let request = LLMToolGenerationRequest(prompt: "test", options: options)
 
+        XCTAssertNil(request.messages)
         XCTAssertEqual(request.options, options)
+        XCTAssertEqual(request.maxToolRounds, 4)
+    }
+
+    func testToolGenerationRequestAcceptsStructuredMessageHistory() {
+        let messages = [
+            LLMChatMessage(role: .user, text: "First question"),
+            LLMChatMessage(
+                role: .assistant,
+                text: "Prior answer",
+                reasoningContent: "Prior reasoning"
+            ),
+            LLMChatMessage(role: .user, text: "Follow-up question")
+        ]
+        let request = LLMToolGenerationRequest(messages: messages)
+
+        XCTAssertEqual(request.messages, messages)
+        XCTAssertEqual(request.system, "")
+        XCTAssertEqual(request.prompt, "")
         XCTAssertEqual(request.maxToolRounds, 4)
     }
 

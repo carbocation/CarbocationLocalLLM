@@ -766,6 +766,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         toolAwareGenerationSegmentOverride = override
     }
 
+    func setChatTemplateForTesting(_ template: String?) {
+        chatTemplate = template
+        preparedChatTemplate = Self.prepareChatTemplate(template)
+        outputSanitizationProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
+        clearPromptCaches()
+    }
+
     public func unload() {
         guard activeGenerationCount == 0 else {
             unloadAfterActiveGeneration = true

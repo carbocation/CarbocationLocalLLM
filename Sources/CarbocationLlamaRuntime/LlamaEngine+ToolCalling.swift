@@ -44,19 +44,37 @@ extension LlamaEngine {
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
-            let text = try await generate(
-                system: request.system,
-                prompt: request.prompt,
-                options: request.options,
-                control: control,
-                onPhaseAwareEvent: { event in
-                    stats.record(event)
-                    onPhaseAwareEvent(.finalAnswerEvent(event))
-                }
-            )
+            let text: String
+            if let messages = request.messages {
+                text = try await generate(
+                    messages: messages,
+                    options: request.options,
+                    control: control,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    }
+                )
+            } else {
+                text = try await generate(
+                    system: request.system,
+                    prompt: request.prompt,
+                    options: request.options,
+                    control: control,
+                    onPhaseAwareEvent: { event in
+                        stats.record(event)
+                        onPhaseAwareEvent(.finalAnswerEvent(event))
+                    }
+                )
+            }
             let snapshot = stats.snapshot(fallbackStopReason: "complete")
             emitAggregateStats(stopReason: snapshot.stopReason)
             return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)
+        }
+
+        if let messages = request.messages,
+           LLMChatMessage.containsMultimodalInput(in: messages) {
+            throw LLMEngineError.unsupportedMultimodalToolGeneration
         }
 
         let controlGenerationID = control?.beginGeneration()
@@ -80,6 +98,7 @@ extension LlamaEngine {
                 Self.toolContinuationOptions(base: request.options, continuation: $0)
             } ?? request.options
             let promptFormatting = try toolPromptFormatting(
+                messages: request.messages,
                 system: request.system,
                 originalPrompt: request.prompt,
                 tools: request.tools.map(\.definition),
@@ -117,6 +136,7 @@ extension LlamaEngine {
             guard roundsCompleted < request.maxToolRounds else {
                 allCalls.append(contentsOf: calls)
                 let finalFormatting = try noToolContinuationPromptFormatting(
+                    messages: request.messages,
                     system: request.system,
                     originalPrompt: request.prompt,
                     history: history,
@@ -213,15 +233,27 @@ extension LlamaEngine {
         }
 
         guard !request.tools.isEmpty, request.toolChoice != .none else {
-            let generation = try await generatePhased(
-                system: request.system,
-                prompt: request.prompt,
-                options: request.options,
-                control: control,
-                onEvent: { event in
-                    onEvent(.generationEvent(event))
-                }
-            )
+            let generation: LLMGenerationResult
+            if let messages = request.messages {
+                generation = try await generatePhased(
+                    messages: messages,
+                    options: request.options,
+                    control: control,
+                    onEvent: { event in
+                        onEvent(.generationEvent(event))
+                    }
+                )
+            } else {
+                generation = try await generatePhased(
+                    system: request.system,
+                    prompt: request.prompt,
+                    options: request.options,
+                    control: control,
+                    onEvent: { event in
+                        onEvent(.generationEvent(event))
+                    }
+                )
+            }
             onEvent(.aggregateGenerationStats(
                 promptTokens: generation.promptTokens,
                 generatedTokens: generation.generatedTokens,
@@ -234,6 +266,11 @@ extension LlamaEngine {
                 generation: generation,
                 stopReason: generation.stopReason
             )
+        }
+
+        if let messages = request.messages,
+           LLMChatMessage.containsMultimodalInput(in: messages) {
+            throw LLMEngineError.unsupportedMultimodalToolGeneration
         }
 
         let controlGenerationID = control?.beginGeneration()
@@ -305,6 +342,7 @@ extension LlamaEngine {
                 Self.toolContinuationOptions(base: request.options, continuation: $0)
             } ?? request.options
             let promptFormatting = try toolPromptFormatting(
+                messages: request.messages,
                 system: request.system,
                 originalPrompt: request.prompt,
                 tools: request.tools.map(\.definition),
@@ -337,6 +375,7 @@ extension LlamaEngine {
             guard roundsCompleted < request.maxToolRounds else {
                 allCalls.append(contentsOf: calls)
                 let finalFormatting = try noToolContinuationPromptFormatting(
+                    messages: request.messages,
                     system: request.system,
                     originalPrompt: request.prompt,
                     history: history,
@@ -411,6 +450,7 @@ extension LlamaEngine {
     }
 
     private func toolPromptFormatting(
+        messages: [LLMChatMessage]?,
         system: String,
         originalPrompt: String,
         tools: [LLMToolDefinition],
@@ -419,13 +459,62 @@ extension LlamaEngine {
         assistantTextSoFar: String,
         options: GenerationOptions
     ) throws -> PromptFormattingResult {
-        if supportsGemmaNativeToolTemplate,
-           let promptFormatting = try nativeToolPromptFormatting(
-                system: Self.nativeToolSystemPrompt(
-                    system: system,
+        if let messages {
+            let baseMessages = try publicChatTemplateMessages(
+                from: messages,
+                mediaMarker: nil
+            ).messages
+            if supportsGemmaNativeToolTemplate,
+               let promptFormatting = try nativeToolPromptFormatting(
+                    baseMessages: Self.addingSystemInstruction(
+                        Self.nativeToolSystemPrompt(system: "", toolChoice: toolChoice),
+                        to: baseMessages
+                    ),
+                    history: history,
+                    tools: tools,
+                    finalUserInstruction: Self.nativeToolContinuationInstruction(
+                        assistantTextSoFar: assistantTextSoFar,
+                        hasToolHistory: !history.isEmpty
+                    ),
+                    options: options
+               ) {
+                return promptFormatting
+            }
+
+            var promptMessages = Self.addingSystemInstruction(
+                LLMToolPromptRenderer.toolAwareSystemPrompt(
+                    system: "",
+                    tools: tools,
                     toolChoice: toolChoice
                 ),
-                originalPrompt: originalPrompt,
+                to: baseMessages
+            )
+            let continuationPrompt = LLMToolPromptRenderer.toolAwareUserPrompt(
+                originalPrompt: "",
+                history: history,
+                assistantTextSoFar: assistantTextSoFar
+            )
+            if !continuationPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                promptMessages.append(ChatTemplateMessage(role: "user", content: continuationPrompt))
+            }
+            return try applyChatTemplate(
+                messages: promptMessages,
+                tools: [],
+                options: options
+            )
+        }
+
+        if supportsGemmaNativeToolTemplate,
+           let promptFormatting = try nativeToolPromptFormatting(
+                baseMessages: Self.nativeToolMessages(
+                    system: Self.nativeToolSystemPrompt(
+                        system: system,
+                        toolChoice: toolChoice
+                    ),
+                    originalPrompt: originalPrompt,
+                    history: [],
+                    finalUserInstruction: nil
+                ),
                 history: history,
                 tools: tools,
                 finalUserInstruction: Self.nativeToolContinuationInstruction(
@@ -453,6 +542,7 @@ extension LlamaEngine {
     }
 
     private func noToolContinuationPromptFormatting(
+        messages: [LLMChatMessage]?,
         system: String,
         originalPrompt: String,
         history: [LLMToolInteractionRound],
@@ -461,10 +551,58 @@ extension LlamaEngine {
         maxToolRoundsReached: Bool,
         options: GenerationOptions
     ) throws -> PromptFormattingResult {
+        if let messages {
+            let baseMessages = try publicChatTemplateMessages(
+                from: messages,
+                mediaMarker: nil
+            ).messages
+            if supportsGemmaNativeToolTemplate,
+               let promptFormatting = try nativeToolPromptFormatting(
+                    baseMessages: Self.addingSystemInstruction(
+                        Self.nativeToolFinalSystemPrompt(system: ""),
+                        to: baseMessages
+                    ),
+                    history: history,
+                    tools: [],
+                    finalUserInstruction: Self.nativeToolFinalUserInstruction(
+                        assistantTextSoFar: assistantTextSoFar,
+                        unexecutedCalls: unexecutedCalls,
+                        maxToolRoundsReached: maxToolRoundsReached
+                    ),
+                    options: options
+               ) {
+                return promptFormatting
+            }
+
+            var promptMessages = Self.addingSystemInstruction(
+                Self.nativeToolFinalSystemPrompt(system: ""),
+                to: baseMessages
+            )
+            let continuationPrompt = LLMToolPromptRenderer.toolFinalUserPrompt(
+                originalPrompt: "",
+                history: history,
+                unexecutedCalls: unexecutedCalls,
+                maxToolRoundsReached: maxToolRoundsReached,
+                assistantTextSoFar: assistantTextSoFar
+            )
+            if !continuationPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                promptMessages.append(ChatTemplateMessage(role: "user", content: continuationPrompt))
+            }
+            return try applyChatTemplate(
+                messages: promptMessages,
+                tools: [],
+                options: options
+            )
+        }
+
         if supportsGemmaNativeToolTemplate,
            let promptFormatting = try nativeToolPromptFormatting(
-                system: Self.nativeToolFinalSystemPrompt(system: system),
-                originalPrompt: originalPrompt,
+                baseMessages: Self.nativeToolMessages(
+                    system: Self.nativeToolFinalSystemPrompt(system: system),
+                    originalPrompt: originalPrompt,
+                    history: [],
+                    finalUserInstruction: nil
+                ),
                 history: history,
                 tools: [],
                 finalUserInstruction: Self.nativeToolFinalUserInstruction(
@@ -491,8 +629,7 @@ extension LlamaEngine {
     }
 
     private func nativeToolPromptFormatting(
-        system: String,
-        originalPrompt: String,
+        baseMessages: [ChatTemplateMessage],
         history: [LLMToolInteractionRound],
         tools: [LLMToolDefinition],
         finalUserInstruction: String? = nil,
@@ -501,8 +638,7 @@ extension LlamaEngine {
         do {
             return try applyChatTemplate(
                 messages: Self.nativeToolMessages(
-                    system: system,
-                    originalPrompt: originalPrompt,
+                    baseMessages: baseMessages,
                     history: history,
                     finalUserInstruction: finalUserInstruction
                 ),
@@ -525,12 +661,25 @@ extension LlamaEngine {
         history: [LLMToolInteractionRound],
         finalUserInstruction: String?
     ) -> [ChatTemplateMessage] {
-        var messages: [ChatTemplateMessage] = []
+        var baseMessages: [ChatTemplateMessage] = []
         let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSystem.isEmpty {
-            messages.append(ChatTemplateMessage(role: "system", content: trimmedSystem))
+            baseMessages.append(ChatTemplateMessage(role: "system", content: trimmedSystem))
         }
-        messages.append(ChatTemplateMessage(role: "user", content: originalPrompt))
+        baseMessages.append(ChatTemplateMessage(role: "user", content: originalPrompt))
+        return nativeToolMessages(
+            baseMessages: baseMessages,
+            history: history,
+            finalUserInstruction: finalUserInstruction
+        )
+    }
+
+    static func nativeToolMessages(
+        baseMessages: [ChatTemplateMessage],
+        history: [LLMToolInteractionRound],
+        finalUserInstruction: String?
+    ) -> [ChatTemplateMessage] {
+        var messages = baseMessages
 
         for round in history {
             messages.append(ChatTemplateMessage(
@@ -554,6 +703,27 @@ extension LlamaEngine {
             messages.append(ChatTemplateMessage(role: "user", content: finalUserInstruction))
         }
         return messages
+    }
+
+    static func addingSystemInstruction(
+        _ instruction: String,
+        to messages: [ChatTemplateMessage]
+    ) -> [ChatTemplateMessage] {
+        let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedInstruction.isEmpty else { return messages }
+
+        var result = messages
+        if let systemIndex = result.firstIndex(where: { $0.role == "system" }),
+           let existingSystem = result[systemIndex].content.stringValue {
+            result[systemIndex].content = .string(
+                [existingSystem.trimmingCharacters(in: .whitespacesAndNewlines), trimmedInstruction]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n\n")
+            )
+        } else {
+            result.insert(ChatTemplateMessage(role: "system", content: trimmedInstruction), at: 0)
+        }
+        return result
     }
 
     private static func nativeToolSystemPrompt(
