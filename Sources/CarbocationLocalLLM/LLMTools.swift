@@ -152,10 +152,17 @@ public struct LLMToolOutput: Codable, Hashable, Sendable, Identifiable {
 public struct LLMToolInteractionRound: Codable, Hashable, Sendable {
     public var calls: [LLMToolCall]
     public var outputs: [LLMToolOutput]
+    /// Assistant reasoning produced before the tool calls, kept separate from visible content.
+    public var reasoningContent: String?
 
-    public init(calls: [LLMToolCall], outputs: [LLMToolOutput]) {
+    public init(
+        calls: [LLMToolCall],
+        outputs: [LLMToolOutput],
+        reasoningContent: String? = nil
+    ) {
         self.calls = calls
         self.outputs = outputs
+        self.reasoningContent = reasoningContent
     }
 }
 

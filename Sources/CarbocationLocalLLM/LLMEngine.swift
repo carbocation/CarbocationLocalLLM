@@ -376,6 +376,15 @@ public struct LLMGenerationResult: Codable, Hashable, Sendable {
         self.accelerationStats = accelerationStats
         self.rawGeneratedText = rawGeneratedText
     }
+
+    /// A history-ready assistant message with reasoning kept out of visible content.
+    public var assistantMessage: LLMChatMessage {
+        LLMChatMessage(
+            role: .assistant,
+            text: finalText,
+            reasoningContent: thinkingText.isEmpty ? nil : thinkingText
+        )
+    }
 }
 
 public enum LLMGenerationStreamEvent: Sendable {

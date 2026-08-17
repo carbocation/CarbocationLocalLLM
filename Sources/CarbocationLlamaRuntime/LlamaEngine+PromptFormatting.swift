@@ -264,7 +264,9 @@ extension LlamaEngine {
             user: user,
             bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
             eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
-            enableThinking: options.enableThinking
+            enableThinking: options.enableThinking,
+            reasoningEffort: options.reasoningEffort,
+            preserveThinking: options.preserveThinking
         )
     }
 
@@ -282,7 +284,9 @@ extension LlamaEngine {
             tools: tools,
             bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
             eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
-            enableThinking: options.enableThinking
+            enableThinking: options.enableThinking,
+            reasoningEffort: options.reasoningEffort,
+            preserveThinking: options.preserveThinking
         )
     }
 

@@ -107,6 +107,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var contextSize: Int
     public var trainingContextSize: Int
     public var hasEmbeddedChatTemplate: Bool
+    public var thinkingCapabilities: LLMThinkingCapabilities
     public var supportsMTPAcceleration: Bool
     public var supportedInputModalities: Set<LLMInputModality>
     public var architecture: String?
@@ -120,6 +121,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         contextSize: Int,
         trainingContextSize: Int,
         hasEmbeddedChatTemplate: Bool,
+        thinkingCapabilities: LLMThinkingCapabilities = .none,
         supportsMTPAcceleration: Bool = false,
         supportedInputModalities: Set<LLMInputModality> = [.text],
         architecture: String? = nil,
@@ -132,6 +134,7 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         self.contextSize = contextSize
         self.trainingContextSize = trainingContextSize
         self.hasEmbeddedChatTemplate = hasEmbeddedChatTemplate
+        self.thinkingCapabilities = thinkingCapabilities
         self.supportsMTPAcceleration = supportsMTPAcceleration
         self.supportedInputModalities = supportedInputModalities
         self.architecture = architecture
@@ -236,6 +239,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     struct ToolAwareGenerationSegmentOverrideOutput: Sendable {
         var finalText: String?
+        var reasoningContent: String?
         var toolCalls: [LLMToolCall]
         var stopReason: String
         var triggerPhase: LLMStreamContentPhase?
@@ -244,6 +248,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
         init(
             finalText: String? = nil,
+            reasoningContent: String? = nil,
             toolCalls: [LLMToolCall] = [],
             stopReason: String,
             triggerPhase: LLMStreamContentPhase? = nil,
@@ -251,6 +256,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             generatedTokens: Int = 0
         ) {
             self.finalText = finalText
+            self.reasoningContent = reasoningContent
             self.toolCalls = toolCalls
             self.stopReason = stopReason
             self.triggerPhase = triggerPhase
@@ -636,6 +642,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             contextSize: chosenContext,
             trainingContextSize: max(0, trainingContext),
             hasEmbeddedChatTemplate: template != nil,
+            thinkingCapabilities: .derived(fromChatTemplate: template),
             supportsMTPAcceleration: supportsMTPAcceleration,
             supportedInputModalities: loadedMultimodalProjector.supportedInputModalities,
             architecture: ggufMetadata.architecture,
@@ -731,6 +738,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             contextSize: chosenContext,
             trainingContextSize: max(0, trainingContext),
             hasEmbeddedChatTemplate: template != nil,
+            thinkingCapabilities: .derived(fromChatTemplate: template),
             supportsMTPAcceleration: false
         )
 

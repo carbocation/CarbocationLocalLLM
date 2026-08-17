@@ -60,6 +60,7 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
     public var usesExactTokenCounts: Bool
     public var supportsMTPAcceleration: Bool
     public var supportedInputModalities: Set<LLMInputModality>
+    public var thinkingCapabilities: LLMThinkingCapabilities
 
     public init(
         selection: LLMModelSelection,
@@ -69,7 +70,8 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         supportsGrammar: Bool,
         usesExactTokenCounts: Bool,
         supportsMTPAcceleration: Bool = false,
-        supportedInputModalities: Set<LLMInputModality> = [.text]
+        supportedInputModalities: Set<LLMInputModality> = [.text],
+        thinkingCapabilities: LLMThinkingCapabilities = .none
     ) {
         self.selection = selection
         self.displayName = displayName
@@ -79,6 +81,7 @@ public struct LocalLLMLoadedModelInfo: Hashable, Sendable {
         self.usesExactTokenCounts = usesExactTokenCounts
         self.supportsMTPAcceleration = supportsMTPAcceleration
         self.supportedInputModalities = supportedInputModalities
+        self.thinkingCapabilities = thinkingCapabilities
     }
 
     public var supportsVision: Bool {
@@ -96,19 +99,22 @@ public struct LocalLLMModelCapabilities: Hashable, Sendable {
     public var contextSize: Int
     public var supportsMTPAcceleration: Bool
     public var supportedInputModalities: Set<LLMInputModality>
+    public var thinkingCapabilities: LLMThinkingCapabilities
 
     public init(
         supportsGrammar: Bool,
         usesExactTokenCounts: Bool,
         contextSize: Int,
         supportsMTPAcceleration: Bool = false,
-        supportedInputModalities: Set<LLMInputModality> = [.text]
+        supportedInputModalities: Set<LLMInputModality> = [.text],
+        thinkingCapabilities: LLMThinkingCapabilities = .none
     ) {
         self.supportsGrammar = supportsGrammar
         self.usesExactTokenCounts = usesExactTokenCounts
         self.contextSize = contextSize
         self.supportsMTPAcceleration = supportsMTPAcceleration
         self.supportedInputModalities = supportedInputModalities
+        self.thinkingCapabilities = thinkingCapabilities
     }
 
     public var supportsVision: Bool {
@@ -210,10 +216,10 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         case .installed(let id):
             let installedModel = library?.model(id: id)
             let contextSize = installedModel?.contextLength ?? 0
-            let supportsMTPAcceleration = if let library, let installedModel {
-                GGUFMetadata.supportsMTPAcceleration(at: installedModel.weightsURL(in: library.root))
+            let modelMetadata = if let library, let installedModel {
+                GGUFMetadata.modelMetadata(at: installedModel.weightsURL(in: library.root))
             } else {
-                false
+                GGUFMetadata.ModelMetadata()
             }
             let supportedInputModalities: Set<LLMInputModality> = if let library,
                                                                      let installedModel,
@@ -227,8 +233,9 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
                 contextSize: contextSize,
-                supportsMTPAcceleration: supportsMTPAcceleration,
-                supportedInputModalities: supportedInputModalities
+                supportsMTPAcceleration: modelMetadata.supportsMTPAcceleration,
+                supportedInputModalities: supportedInputModalities,
+                thinkingCapabilities: modelMetadata.thinkingCapabilities
             )
         case .system(.appleIntelligence):
             return LocalLLMModelCapabilities(
@@ -324,7 +331,8 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
                 supportsMTPAcceleration: loaded.supportsMTPAcceleration,
-                supportedInputModalities: loaded.supportedInputModalities
+                supportedInputModalities: loaded.supportedInputModalities,
+                thinkingCapabilities: loaded.thinkingCapabilities
             )
             loadedInfo = info
             return info
@@ -818,7 +826,8 @@ public actor LocalLLMSession {
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
                 supportsMTPAcceleration: loaded.supportsMTPAcceleration,
-                supportedInputModalities: loaded.supportedInputModalities
+                supportedInputModalities: loaded.supportedInputModalities,
+                thinkingCapabilities: loaded.thinkingCapabilities
             )
 
         case .system(.appleIntelligence):

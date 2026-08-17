@@ -436,7 +436,33 @@ let response = try await LocalLLMEngine.shared.generate(
 ) { _ in }
 ```
 
-The option is passed through to embedded Jinja chat templates as `enable_thinking`. Templates that do not use that variable ignore it.
+The option is passed through to embedded Jinja chat templates as `enable_thinking`. Templates that do not use that variable ignore it. Models with native effort controls can also receive `reasoning_effort`, while `preserve_thinking` controls whether compatible templates include reasoning from earlier assistant messages:
+
+```swift
+let options = GenerationOptions(
+    maxOutputTokens: 1024,
+    enableThinking: true,
+    reasoningEffort: .medium,
+    preserveThinking: true
+)
+```
+
+Both new controls are optional. `nil` leaves the variable undefined so the model template keeps its own default; for example, Qwen3.8 defaults an omitted effort to `xhigh`. Before exposing controls in UI, inspect `thinkingCapabilities` on `LocalLLMModelCapabilities` or `LocalLLMLoadedModelInfo`.
+
+For multi-turn message generation, keep reasoning separate from visible assistant content:
+
+```swift
+let history = [
+    LLMChatMessage(
+        role: .assistant,
+        text: previousAnswer,
+        reasoningContent: previousReasoning
+    ),
+    LLMChatMessage(role: .user, text: followUp)
+]
+```
+
+The llama runtime forwards `reasoningContent` as the template's `reasoning_content` field and preserves it across package-managed native tool rounds. `LLMGenerationResult.assistantMessage` converts a phased result into this history-ready representation. The package does not durably save reasoning history; the app decides whether to retain it between requests. `generatePhased(...)` and phase-aware events expose generated thinking separately so an app can make that choice without mixing it into user-visible text.
 
 For local GGUF models that expose thinking start/end delimiters, callers can also cap generated thinking tokens:
 

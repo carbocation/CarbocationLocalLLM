@@ -172,7 +172,11 @@ extension LlamaEngine {
             roundsCompleted = round
             allCalls.append(contentsOf: calls)
             allOutputs.append(contentsOf: outputs)
-            history.append(LLMToolInteractionRound(calls: calls, outputs: outputs))
+            history.append(LLMToolInteractionRound(
+                calls: calls,
+                outputs: outputs,
+                reasoningContent: segment.reasoningContent
+            ))
             continuation = LlamaToolContinuation(
                 triggerPhase: segment.triggerPhase,
                 remainingThinkingBudgetTokens: segment.remainingThinkingBudgetTokens
@@ -383,7 +387,11 @@ extension LlamaEngine {
             roundsCompleted = round
             allCalls.append(contentsOf: calls)
             allOutputs.append(contentsOf: outputs)
-            history.append(LLMToolInteractionRound(calls: calls, outputs: outputs))
+            history.append(LLMToolInteractionRound(
+                calls: calls,
+                outputs: outputs,
+                reasoningContent: segment.reasoningContent
+            ))
             continuation = LlamaToolContinuation(
                 triggerPhase: segment.triggerPhase,
                 remainingThinkingBudgetTokens: segment.remainingThinkingBudgetTokens
@@ -511,7 +519,7 @@ extension LlamaEngine {
         }
     }
 
-    private static func nativeToolMessages(
+    static func nativeToolMessages(
         system: String,
         originalPrompt: String,
         history: [LLMToolInteractionRound],
@@ -528,6 +536,7 @@ extension LlamaEngine {
             messages.append(ChatTemplateMessage(
                 role: "assistant",
                 content: "",
+                reasoningContent: round.reasoningContent,
                 toolCalls: round.calls
             ))
             for output in round.outputs {
@@ -667,6 +676,7 @@ private extension LlamaEngine {
 
     struct ToolAwareGenerationSegment {
         var toolCalls: [LLMToolCall]
+        var reasoningContent: String?
         var stopReason: String
         var triggerPhase: LLMStreamContentPhase?
         var remainingThinkingBudgetTokens: Int?
@@ -1498,6 +1508,7 @@ private extension LlamaEngine {
         }
         return ToolAwareGenerationSegment(
             toolCalls: interceptedToolCalls,
+            reasoningContent: phasedText.thinkingText.isEmpty ? nil : phasedText.thinkingText,
             stopReason: stopReason,
             triggerPhase: interceptedToolCalls.first?.triggerPhase,
             remainingThinkingBudgetTokens: activeToolCaptureRemainingBudget.flatMap { $0 >= 0 ? $0 : nil }
@@ -1578,6 +1589,7 @@ private extension LlamaEngine {
 
         return ToolAwareGenerationSegment(
             toolCalls: output.toolCalls,
+            reasoningContent: output.reasoningContent,
             stopReason: output.stopReason,
             triggerPhase: output.triggerPhase,
             remainingThinkingBudgetTokens: output.remainingThinkingBudgetTokens

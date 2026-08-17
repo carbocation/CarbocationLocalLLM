@@ -6,6 +6,11 @@ public enum GGUFMetadata {
         public var trainingContextLength: Int?
         public var nextNPredictLayers: Int?
         public var samplingDefaults: LLMSamplingDefaults?
+        public var chatTemplate: String?
+
+        public var thinkingCapabilities: LLMThinkingCapabilities {
+            .derived(fromChatTemplate: chatTemplate)
+        }
 
         public var supportsMTPAcceleration: Bool {
             (nextNPredictLayers ?? 0) > 0
@@ -15,12 +20,14 @@ public enum GGUFMetadata {
             architecture: String? = nil,
             trainingContextLength: Int? = nil,
             nextNPredictLayers: Int? = nil,
-            samplingDefaults: LLMSamplingDefaults? = nil
+            samplingDefaults: LLMSamplingDefaults? = nil,
+            chatTemplate: String? = nil
         ) {
             self.architecture = architecture
             self.trainingContextLength = trainingContextLength
             self.nextNPredictLayers = nextNPredictLayers
             self.samplingDefaults = samplingDefaults
+            self.chatTemplate = chatTemplate
         }
     }
 
@@ -101,6 +108,7 @@ private enum GGUFValueType: Int32 {
 private final class GGUFMetadataReader {
     private static let magic = Data([0x47, 0x47, 0x55, 0x46])
     private static let maxKeyLength: UInt64 = 16 * 1_024
+    private static let maxStringValueLength: UInt64 = 4 * 1_024 * 1_024
     private static let maxVersion: UInt32 = 3
 
     private let handle: FileHandle
@@ -133,6 +141,7 @@ private final class GGUFMetadataReader {
         var nextNPredictLayers: Int?
         var samplingDefaults = LLMSamplingDefaults.providerDefault
         var foundSamplingDefault = false
+        var chatTemplate: String?
 
         for _ in 0..<keyValueCount {
             let key = try readString(maxLength: Self.maxKeyLength)
@@ -149,7 +158,16 @@ private final class GGUFMetadataReader {
 
             if key == "general.architecture" {
                 if valueType == .string {
-                    architecture = try readString(maxLength: Self.maxKeyLength)
+                    architecture = try readString(maxLength: Self.maxStringValueLength)
+                } else {
+                    try skipScalarValue(type: valueType)
+                }
+                continue
+            }
+
+            if key == "tokenizer.chat_template" {
+                if valueType == .string {
+                    chatTemplate = try readString(maxLength: Self.maxStringValueLength)
                 } else {
                     try skipScalarValue(type: valueType)
                 }
@@ -219,7 +237,8 @@ private final class GGUFMetadataReader {
             architecture: architecture,
             trainingContextLength: trainingContextLength,
             nextNPredictLayers: nextNPredictLayers,
-            samplingDefaults: foundSamplingDefault ? samplingDefaults : nil
+            samplingDefaults: foundSamplingDefault ? samplingDefaults : nil,
+            chatTemplate: chatTemplate
         )
     }
 

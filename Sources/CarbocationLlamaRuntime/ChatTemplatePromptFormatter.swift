@@ -5,6 +5,7 @@ import Jinja
 struct ChatTemplateMessage: Equatable {
     var role: String
     var content: LLMJSONValue
+    var reasoningContent: String?
     var toolCalls: [LLMToolCall]
     var toolCallID: String?
     var name: String?
@@ -12,12 +13,14 @@ struct ChatTemplateMessage: Equatable {
     init(
         role: String,
         content: String = "",
+        reasoningContent: String? = nil,
         toolCalls: [LLMToolCall] = [],
         toolCallID: String? = nil,
         name: String? = nil
     ) {
         self.role = role
         self.content = .string(content)
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.name = name
@@ -26,12 +29,14 @@ struct ChatTemplateMessage: Equatable {
     init(
         role: String,
         content: LLMJSONValue,
+        reasoningContent: String? = nil,
         toolCalls: [LLMToolCall] = [],
         toolCallID: String? = nil,
         name: String? = nil
     ) {
         self.role = role
         self.content = content
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.name = name
@@ -72,14 +77,18 @@ struct ChatTemplatePromptFormatter {
         user: String,
         bosToken: String,
         eosToken: String,
-        enableThinking: Bool = false
+        enableThinking: Bool = false,
+        reasoningEffort: LLMReasoningEffort? = nil,
+        preserveThinking: Bool? = nil
     ) throws -> String {
         try Self(template: source).format(
             messages: Self.defaultMessages(system: system, user: user),
             tools: [],
             bosToken: bosToken,
             eosToken: eosToken,
-            enableThinking: enableThinking
+            enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
+            preserveThinking: preserveThinking
         )
     }
 
@@ -88,14 +97,18 @@ struct ChatTemplatePromptFormatter {
         user: String,
         bosToken: String,
         eosToken: String,
-        enableThinking: Bool = false
+        enableThinking: Bool = false,
+        reasoningEffort: LLMReasoningEffort? = nil,
+        preserveThinking: Bool? = nil
     ) throws -> String {
         try format(
             messages: Self.defaultMessages(system: system, user: user),
             tools: [],
             bosToken: bosToken,
             eosToken: eosToken,
-            enableThinking: enableThinking
+            enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
+            preserveThinking: preserveThinking
         )
     }
 
@@ -104,9 +117,11 @@ struct ChatTemplatePromptFormatter {
         tools: [LLMToolDefinition] = [],
         bosToken: String,
         eosToken: String,
-        enableThinking: Bool = false
+        enableThinking: Bool = false,
+        reasoningEffort: LLMReasoningEffort? = nil,
+        preserveThinking: Bool? = nil
     ) throws -> String {
-        let context: [String: Value] = [
+        var context: [String: Value] = [
             "messages": .array(messages.map(Self.value(for:))),
             "bos_token": .string(bosToken),
             "eos_token": .string(eosToken),
@@ -114,6 +129,12 @@ struct ChatTemplatePromptFormatter {
             "enable_thinking": .boolean(enableThinking),
             "tools": .array(tools.map(Self.value(for:)))
         ]
+        if let reasoningEffort {
+            context["reasoning_effort"] = .string(reasoningEffort.rawValue)
+        }
+        if let preserveThinking {
+            context["preserve_thinking"] = .boolean(preserveThinking)
+        }
 
         let formatted = try template.render(context)
         let requiredUserContent = messages
@@ -138,6 +159,9 @@ struct ChatTemplatePromptFormatter {
             "role": .string(message.role),
             "content": value(for: message.content)
         ]
+        if let reasoningContent = message.reasoningContent {
+            object["reasoning_content"] = .string(reasoningContent)
+        }
         if !message.toolCalls.isEmpty {
             object["tool_calls"] = .array(message.toolCalls.map(value(for:)))
         }

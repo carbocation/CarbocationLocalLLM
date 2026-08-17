@@ -89,6 +89,23 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(rendered.audio[0].location, LLMContentLocation(messageIndex: 0, partIndex: 3))
     }
 
+    func testPromptRenderingForwardsAssistantReasoningSeparately() async throws {
+        let engine = LlamaEngine()
+        let rendered = try await engine.publicChatTemplateMessages(
+            from: [
+                LLMChatMessage(
+                    role: .assistant,
+                    text: "Visible answer",
+                    reasoningContent: "Historical reasoning"
+                )
+            ],
+            mediaMarker: nil
+        )
+
+        XCTAssertEqual(rendered.messages.first?.content, .string("Visible answer"))
+        XCTAssertEqual(rendered.messages.first?.reasoningContent, "Historical reasoning")
+    }
+
     func testVisionPromptRenderingRejectsAssistantImagesWithLocation() async throws {
         let engine = LlamaEngine()
 
@@ -386,6 +403,37 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 return XCTFail("Expected noModelLoaded, got \(error)")
             }
         }
+    }
+
+    func testNativeToolHistoryKeepsAssistantReasoningSeparate() {
+        let messages = LlamaEngine.nativeToolMessages(
+            system: "System",
+            originalPrompt: "Question",
+            history: [
+                LLMToolInteractionRound(
+                    calls: [
+                        LLMToolCall(
+                            executionID: "call_1",
+                            name: "lookup",
+                            arguments: ["query": "value"]
+                        )
+                    ],
+                    outputs: [
+                        LLMToolOutput(
+                            callID: "call_1",
+                            name: "lookup",
+                            content: ["answer": "result"]
+                        )
+                    ],
+                    reasoningContent: "Reasoning before the tool call"
+                )
+            ],
+            finalUserInstruction: nil
+        )
+
+        let assistant = messages.first(where: { $0.role == "assistant" })
+        XCTAssertEqual(assistant?.content, .string(""))
+        XCTAssertEqual(assistant?.reasoningContent, "Reasoning before the tool call")
     }
 
     func testUnloadDuringSuspendedToolGenerationDefersUntilContinuation() async throws {
@@ -903,6 +951,49 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
         XCTAssertTrue(prompt.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
         XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
+    }
+
+    func testSwiftJinjaForwardsReasoningControlsAndAssistantReasoningHistory() throws {
+        let template = """
+        {{ reasoning_effort|default('template-default') }}|{{ preserve_thinking|default(true) }}|
+        {%- for message in messages -%}
+        {{ message.role }}={{ message.content }}:{{ message.reasoning_content|default('none') }};
+        {%- endfor -%}
+        {{- add_generation_prompt -}}
+        """
+        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let prompt = try formatter.format(
+            messages: [
+                ChatTemplateMessage(role: "user", content: "Question"),
+                ChatTemplateMessage(
+                    role: "assistant",
+                    content: "Visible answer",
+                    reasoningContent: "Historical reasoning"
+                )
+            ],
+            bosToken: "<bos>",
+            eosToken: "<eos>",
+            enableThinking: true,
+            reasoningEffort: .medium,
+            preserveThinking: false
+        )
+
+        XCTAssertTrue(prompt.contains("medium|false|"))
+        XCTAssertTrue(prompt.contains("assistant=Visible answer:Historical reasoning;"))
+    }
+
+    func testSwiftJinjaLeavesReasoningControlsUndefinedWhenNotRequested() throws {
+        let template = "{{ reasoning_effort|default('xhigh') }}|{{ preserve_thinking|default(true) }}|{{ messages[1].content }}"
+        let prompt = try ChatTemplatePromptFormatter.format(
+            template: template,
+            system: "",
+            user: "Question",
+            bosToken: "<bos>",
+            eosToken: "<eos>",
+            enableThinking: true
+        )
+
+        XCTAssertEqual(prompt, "xhigh|true|Question")
     }
 
     func testReasoningBudgetPlanRequiresEnabledThinkingAndDelimiters() {

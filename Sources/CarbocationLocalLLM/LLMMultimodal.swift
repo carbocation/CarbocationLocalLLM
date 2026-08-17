@@ -86,14 +86,33 @@ public enum LLMContentPart: Hashable, Sendable {
 public struct LLMChatMessage: Hashable, Sendable {
     public var role: LLMChatRole
     public var content: [LLMContentPart]
+    /// Model reasoning associated with an assistant message, kept separate from user-visible content.
+    public var reasoningContent: String?
 
     public init(role: LLMChatRole, content: [LLMContentPart]) {
+        self.init(role: role, content: content, reasoningContent: nil)
+    }
+
+    public init(
+        role: LLMChatRole,
+        content: [LLMContentPart],
+        reasoningContent: String?
+    ) {
         self.role = role
         self.content = content
+        self.reasoningContent = reasoningContent
     }
 
     public init(role: LLMChatRole, text: String) {
-        self.init(role: role, content: [.text(text)])
+        self.init(role: role, text: text, reasoningContent: nil)
+    }
+
+    public init(
+        role: LLMChatRole,
+        text: String,
+        reasoningContent: String?
+    ) {
+        self.init(role: role, content: [.text(text)], reasoningContent: reasoningContent)
     }
 
     public var inputModalities: Set<LLMInputModality> {

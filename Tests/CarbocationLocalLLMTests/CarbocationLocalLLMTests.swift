@@ -468,6 +468,24 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertNil(defaults.seed)
     }
 
+    func testGGUFMetadataReadsThinkingCapabilitiesFromChatTemplate() throws {
+        let root = try makeTemporaryDirectory()
+        let url = root.appendingPathComponent("metadata-only.gguf")
+        let template = "{{ enable_thinking }} {{ reasoning_effort }} {{ preserve_thinking }} {{ message.reasoning_content }}"
+        try makeMinimalGGUF(contextLength: 32_768, chatTemplate: template).write(to: url)
+
+        let metadata = GGUFMetadata.modelMetadata(at: url)
+        XCTAssertEqual(metadata.chatTemplate, template)
+        XCTAssertEqual(
+            metadata.thinkingCapabilities,
+            LLMThinkingCapabilities(
+                supportsThinking: true,
+                supportsReasoningEffort: true,
+                supportsPreserveThinking: true
+            )
+        )
+    }
+
     func testGenerationOptionsResolverUsesSafeDefaultsUnlessCustom() {
         let suiteName = "CarbocationLocalLLMTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -638,9 +656,50 @@ final class CarbocationLocalLLMTests: XCTestCase {
         XCTAssertEqual(options.stopSequences, [])
         XCTAssertFalse(options.stopAtBalancedJSON)
         XCTAssertFalse(options.enableThinking)
+        XCTAssertNil(options.reasoningEffort)
+        XCTAssertNil(options.preserveThinking)
         XCTAssertNil(options.thinkingBudgetTokens)
         XCTAssertEqual(options.thinkingBudgetMessage, "")
         XCTAssertEqual(options.streamPhaseConfiguration, .automatic)
+    }
+
+    func testGenerationOptionsReasoningControlsRoundTrip() throws {
+        let options = GenerationOptions(
+            enableThinking: true,
+            reasoningEffort: .medium,
+            preserveThinking: true
+        )
+
+        let data = try JSONEncoder().encode(options)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(object?["reasoningEffort"] as? String, "medium")
+        XCTAssertEqual(object?["preserveThinking"] as? Bool, true)
+
+        let decoded = try JSONDecoder().decode(GenerationOptions.self, from: data)
+        XCTAssertEqual(decoded.reasoningEffort, .medium)
+        XCTAssertEqual(decoded.preserveThinking, true)
+    }
+
+    func testAssistantMessageKeepsReasoningSeparateFromVisibleContent() {
+        let message = LLMChatMessage(
+            role: .assistant,
+            text: "Visible answer",
+            reasoningContent: "Private reasoning"
+        )
+
+        XCTAssertEqual(message.content, [.text("Visible answer")])
+        XCTAssertEqual(message.reasoningContent, "Private reasoning")
+    }
+
+    func testGenerationResultProducesHistoryReadyAssistantMessage() {
+        let message = LLMGenerationResult(
+            thinkingText: "Private reasoning",
+            finalText: "Visible answer"
+        ).assistantMessage
+
+        XCTAssertEqual(message.role, .assistant)
+        XCTAssertEqual(message.content, [.text("Visible answer")])
+        XCTAssertEqual(message.reasoningContent, "Private reasoning")
     }
 
     func testGenerationOptionsOnlyEncodesEnableThinkingWhenTrue() throws {
@@ -2395,7 +2454,8 @@ final class CarbocationLocalLLMTests: XCTestCase {
         contextLength: UInt32,
         nextNPredictLayers: UInt32? = nil,
         architecture: String = "llama",
-        samplingDefaults: LLMSamplingDefaults? = nil
+        samplingDefaults: LLMSamplingDefaults? = nil,
+        chatTemplate: String? = nil
     ) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
         appendUInt32(3, to: &data)
@@ -2407,7 +2467,12 @@ final class CarbocationLocalLLMTests: XCTestCase {
             samplingDefaults?.minP,
             samplingDefaults?.repetitionPenalty
         ].compactMap { $0 }.count
-        appendInt64(Int64(2 + (nextNPredictLayers == nil ? 0 : 1) + samplingValueCount), to: &data)
+        appendInt64(Int64(
+            2
+                + (nextNPredictLayers == nil ? 0 : 1)
+                + (chatTemplate == nil ? 0 : 1)
+                + samplingValueCount
+        ), to: &data)
 
         appendGGUFString("general.architecture", to: &data)
         appendInt32(8, to: &data)
@@ -2416,6 +2481,12 @@ final class CarbocationLocalLLMTests: XCTestCase {
         appendGGUFString("llama.context_length", to: &data)
         appendInt32(4, to: &data)
         appendUInt32(contextLength, to: &data)
+
+        if let chatTemplate {
+            appendGGUFString("tokenizer.chat_template", to: &data)
+            appendInt32(8, to: &data)
+            appendGGUFString(chatTemplate, to: &data)
+        }
 
         if let nextNPredictLayers {
             appendGGUFString("gemma4.nextn_predict_layers", to: &data)

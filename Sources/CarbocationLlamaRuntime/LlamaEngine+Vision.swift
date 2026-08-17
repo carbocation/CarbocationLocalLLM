@@ -412,7 +412,11 @@ extension LlamaEngine {
                     renderedContent += mediaMarker
                 }
             }
-            chatMessages.append(ChatTemplateMessage(role: message.role.rawValue, content: renderedContent))
+            chatMessages.append(ChatTemplateMessage(
+                role: message.role.rawValue,
+                content: renderedContent,
+                reasoningContent: message.reasoningContent
+            ))
         }
 
         return PublicMessageFormatting(messages: chatMessages, media: media)

@@ -6,6 +6,49 @@ public enum LLMStreamContentPhase: String, Codable, Hashable, Sendable {
     case final
 }
 
+/// A model-native reasoning-effort value forwarded to a compatible chat template.
+///
+/// Templates define which values they accept. Qwen3.8 accepts `low`, `medium`, and
+/// `xhigh` (and treats `high` as `xhigh`). Other model families may use the other
+/// common values represented here.
+public enum LLMReasoningEffort: String, CaseIterable, Codable, Hashable, Sendable {
+    case minimal
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+}
+
+/// Thinking controls detected in a model's embedded chat template.
+public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
+    public var supportsThinking: Bool
+    public var supportsReasoningEffort: Bool
+    public var supportsPreserveThinking: Bool
+
+    public init(
+        supportsThinking: Bool = false,
+        supportsReasoningEffort: Bool = false,
+        supportsPreserveThinking: Bool = false
+    ) {
+        self.supportsThinking = supportsThinking
+        self.supportsReasoningEffort = supportsReasoningEffort
+        self.supportsPreserveThinking = supportsPreserveThinking
+    }
+
+    public static let none = LLMThinkingCapabilities()
+
+    public static func derived(fromChatTemplate template: String?) -> LLMThinkingCapabilities {
+        guard let template else { return .none }
+        return LLMThinkingCapabilities(
+            supportsThinking: template.contains("enable_thinking"),
+            supportsReasoningEffort: template.contains("reasoning_effort"),
+            supportsPreserveThinking: template.contains("preserve_thinking")
+                && template.contains("reasoning_content")
+        )
+    }
+}
+
 public struct LLMStreamPhaseConfiguration: Codable, Hashable, Sendable {
     public var thinkingPairs: [OutputDelimiterPair]
     public var finalMarkers: [String]
@@ -116,6 +159,10 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
     public var grammar: String?
     /// Enables model-native thinking/reasoning channels when the chat template supports them.
     public var enableThinking: Bool
+    /// Optional model-native effort level. nil preserves the chat template's default.
+    public var reasoningEffort: LLMReasoningEffort?
+    /// Controls whether compatible templates include historical assistant reasoning. nil preserves the template default.
+    public var preserveThinking: Bool?
     /// Optional token budget for generated thinking/reasoning content.
     public var thinkingBudgetTokens: Int? {
         didSet {
@@ -143,6 +190,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopAtBalancedJSON: Bool = false,
         grammar: String? = nil,
         enableThinking: Bool = false,
+        reasoningEffort: LLMReasoningEffort?,
+        preserveThinking: Bool? = nil,
         thinkingBudgetTokens: Int? = nil,
         thinkingBudgetMessage: String = "",
         streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
@@ -163,9 +212,49 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         self.stopAtBalancedJSON = stopAtBalancedJSON
         self.grammar = grammar
         self.enableThinking = enableThinking
+        self.reasoningEffort = reasoningEffort
+        self.preserveThinking = preserveThinking
         self.thinkingBudgetTokens = thinkingBudgetTokens
         self.thinkingBudgetMessage = thinkingBudgetMessage
         self.streamPhaseConfiguration = streamPhaseConfiguration
+    }
+
+    public init(
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        minP: Double? = nil,
+        presencePenalty: Double? = nil,
+        repetitionPenalty: Double? = nil,
+        maxOutputTokens: Int? = nil,
+        seed: UInt32? = nil,
+        stopSequences: [String] = [],
+        stopAtBalancedJSON: Bool = false,
+        grammar: String? = nil,
+        enableThinking: Bool = false,
+        thinkingBudgetTokens: Int? = nil,
+        thinkingBudgetMessage: String = "",
+        streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
+    ) {
+        self.init(
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            minP: minP,
+            presencePenalty: presencePenalty,
+            repetitionPenalty: repetitionPenalty,
+            maxOutputTokens: maxOutputTokens,
+            seed: seed,
+            stopSequences: stopSequences,
+            stopAtBalancedJSON: stopAtBalancedJSON,
+            grammar: grammar,
+            enableThinking: enableThinking,
+            reasoningEffort: nil,
+            preserveThinking: nil,
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            thinkingBudgetMessage: thinkingBudgetMessage,
+            streamPhaseConfiguration: streamPhaseConfiguration
+        )
     }
 
     public init(
@@ -195,6 +284,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
             stopAtBalancedJSON: stopAtBalancedJSON,
             grammar: grammar,
             enableThinking: enableThinking,
+            reasoningEffort: nil,
+            preserveThinking: nil,
             thinkingBudgetTokens: thinkingBudgetTokens,
             thinkingBudgetMessage: thinkingBudgetMessage,
             streamPhaseConfiguration: streamPhaseConfiguration
@@ -229,6 +320,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
             stopAtBalancedJSON: stopAtBalancedJSON,
             grammar: grammar,
             enableThinking: enableThinking,
+            reasoningEffort: nil,
+            preserveThinking: nil,
             thinkingBudgetTokens: nil,
             thinkingBudgetMessage: "",
             streamPhaseConfiguration: streamPhaseConfiguration
@@ -287,6 +380,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         case stopAtBalancedJSON
         case grammar
         case enableThinking
+        case reasoningEffort
+        case preserveThinking
         case thinkingBudgetTokens
         case thinkingBudgetMessage
         case streamPhaseConfiguration
@@ -306,6 +401,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         stopAtBalancedJSON = try container.decodeIfPresent(Bool.self, forKey: .stopAtBalancedJSON) ?? false
         grammar = try container.decodeIfPresent(String.self, forKey: .grammar)
         enableThinking = try container.decodeIfPresent(Bool.self, forKey: .enableThinking) ?? false
+        reasoningEffort = try container.decodeIfPresent(LLMReasoningEffort.self, forKey: .reasoningEffort)
+        preserveThinking = try container.decodeIfPresent(Bool.self, forKey: .preserveThinking)
         let decodedThinkingBudgetTokens = try container.decodeIfPresent(Int.self, forKey: .thinkingBudgetTokens)
         if let decodedThinkingBudgetTokens, decodedThinkingBudgetTokens < 0 {
             throw DecodingError.dataCorruptedError(
@@ -342,6 +439,8 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         if enableThinking {
             try container.encode(enableThinking, forKey: .enableThinking)
         }
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(preserveThinking, forKey: .preserveThinking)
         try container.encodeIfPresent(thinkingBudgetTokens, forKey: .thinkingBudgetTokens)
         if !thinkingBudgetMessage.isEmpty {
             try container.encode(thinkingBudgetMessage, forKey: .thinkingBudgetMessage)
