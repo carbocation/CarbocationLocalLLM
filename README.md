@@ -451,7 +451,7 @@ let options = GenerationOptions(
 )
 ```
 
-Both new controls are optional. `nil` leaves the variable undefined so the model template keeps its own default; for example, Qwen3.8 defaults an omitted effort to `xhigh`. Before exposing controls in UI, inspect `thinkingCapabilities` on `LocalLLMModelCapabilities` or `LocalLLMLoadedModelInfo`.
+Both new controls are optional. `nil` leaves the variable undefined so the model template keeps its own default; for `preserveThinking`, that gives downstream UIs the natural **Model default / Preserve / Discard** tri-state. Before exposing controls in UI, inspect `thinkingCapabilities` on `LocalLLMModelCapabilities` or `LocalLLMLoadedModelInfo`. Its `supportedReasoningEfforts` reports the effort vocabulary inferred from the embedded template, and `defaultReasoningEffort` reports the template's named default. Either is `nil` when the template does not declare enough information safely; `nil` supported efforts must not be interpreted as supporting every package-defined value. For example, Qwen3.8 reports `low`, `medium`, `high` (an alias for `xhigh`), and `xhigh`, with `xhigh` as its default.
 
 For multi-turn message generation, keep reasoning separate from visible assistant content:
 

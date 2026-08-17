@@ -10,7 +10,7 @@ public enum LLMStreamContentPhase: String, Codable, Hashable, Sendable {
 ///
 /// Templates define which values they accept. Qwen3.8 accepts `low`, `medium`, and
 /// `xhigh` (and treats `high` as `xhigh`). Other model families may use the other
-/// common values represented here.
+/// common values represented here, including explicit non-thinking effort values.
 public enum LLMReasoningEffort: String, CaseIterable, Codable, Hashable, Sendable {
     case minimal
     case low
@@ -18,6 +18,8 @@ public enum LLMReasoningEffort: String, CaseIterable, Codable, Hashable, Sendabl
     case high
     case xhigh
     case max
+    case disabled = "none"
+    case noThink = "no_think"
 }
 
 /// Thinking controls detected in a model's embedded chat template.
@@ -25,27 +27,117 @@ public struct LLMThinkingCapabilities: Codable, Hashable, Sendable {
     public var supportsThinking: Bool
     public var supportsReasoningEffort: Bool
     public var supportsPreserveThinking: Bool
+    /// The effort values explicitly handled or accepted by the template.
+    ///
+    /// `nil` means the template accepts `reasoning_effort` but does not declare a
+    /// finite vocabulary that can be inferred safely. It does not mean every value
+    /// in `LLMReasoningEffort` is supported.
+    public var supportedReasoningEfforts: [LLMReasoningEffort]?
+    /// The named effort selected by the template when the request omits one.
+    /// `nil` means no named default could be inferred safely.
+    public var defaultReasoningEffort: LLMReasoningEffort?
 
     public init(
         supportsThinking: Bool = false,
         supportsReasoningEffort: Bool = false,
-        supportsPreserveThinking: Bool = false
+        supportsPreserveThinking: Bool = false,
+        supportedReasoningEfforts: [LLMReasoningEffort]? = nil,
+        defaultReasoningEffort: LLMReasoningEffort? = nil
     ) {
         self.supportsThinking = supportsThinking
         self.supportsReasoningEffort = supportsReasoningEffort
         self.supportsPreserveThinking = supportsPreserveThinking
+        self.supportedReasoningEfforts = supportedReasoningEfforts
+        self.defaultReasoningEffort = defaultReasoningEffort
     }
 
     public static let none = LLMThinkingCapabilities()
 
     public static func derived(fromChatTemplate template: String?) -> LLMThinkingCapabilities {
         guard let template else { return .none }
+        let reasoningEffortMetadata = reasoningEffortMetadata(in: template)
         return LLMThinkingCapabilities(
             supportsThinking: template.contains("enable_thinking"),
             supportsReasoningEffort: template.contains("reasoning_effort"),
             supportsPreserveThinking: template.contains("preserve_thinking")
-                && template.contains("reasoning_content")
+                && template.contains("reasoning_content"),
+            supportedReasoningEfforts: reasoningEffortMetadata.supported,
+            defaultReasoningEffort: reasoningEffortMetadata.defaultValue
         )
+    }
+
+    private static func reasoningEffortMetadata(
+        in template: String
+    ) -> (supported: [LLMReasoningEffort]?, defaultValue: LLMReasoningEffort?) {
+        guard template.contains("reasoning_effort") else { return (nil, nil) }
+
+        var rawSupported = Set<String>()
+        let membershipPattern = #"\b(?:[A-Za-z_][A-Za-z0-9_]*_)?reasoning_effort\b\s+(?:not\s+)?in\s*[\(\[]([^\)\]]+)[\)\]]"#
+        for list in captureValues(matching: membershipPattern, group: 1, in: template) {
+            rawSupported.formUnion(quotedValues(in: list))
+        }
+
+        let equalityPattern = #"\b(?:[A-Za-z_][A-Za-z0-9_]*_)?reasoning_effort\b(?:\s*\|\s*(?:lower|upper))*\s*==\s*([\"'])([^\"']+)\1"#
+        rawSupported.formUnion(captureValues(matching: equalityPattern, group: 2, in: template))
+
+        let defaultValue = inferredDefaultReasoningEffort(in: template)
+        if !rawSupported.isEmpty, let defaultValue {
+            rawSupported.insert(defaultValue.rawValue)
+        }
+
+        let recognizedSupported = LLMReasoningEffort.allCases.filter {
+            rawSupported.contains($0.rawValue)
+        }
+        let supported: [LLMReasoningEffort]? = recognizedSupported.isEmpty
+            ? nil
+            : recognizedSupported
+
+        return (supported, defaultValue)
+    }
+
+    private static func inferredDefaultReasoningEffort(
+        in template: String
+    ) -> LLMReasoningEffort? {
+        let patterns: [(pattern: String, group: Int)] = [
+            (#"\breasoning_effort\b\s*\|\s*default\s*\(\s*([\"'])([^\"']+)\1"#, 2),
+            (#"\bset\s+reasoning_effort\s*=\s*reasoning_effort\s+if\s+reasoning_effort\s+is\s+defined\s+else\s+([\"'])([^\"']+)\1"#, 2),
+            (#"(?s)\bif\s+(?:not\s+reasoning_effort\s+is\s+defined|reasoning_effort\s+is\s+(?:not\s+defined|undefined)).{0,300}?\bset\s+reasoning_effort\s*=\s*([\"'])([^\"']+)\1"#, 2)
+        ]
+
+        for entry in patterns {
+            guard let rawValue = captureValues(
+                matching: entry.pattern,
+                group: entry.group,
+                in: template
+            ).first else { continue }
+            if let effort = LLMReasoningEffort(rawValue: rawValue) {
+                return effort
+            }
+        }
+        return nil
+    }
+
+    private static func quotedValues(in text: String) -> [String] {
+        captureValues(
+            matching: #"([\"'])([^\"']+)\1"#,
+            group: 2,
+            in: text
+        )
+    }
+
+    private static func captureValues(
+        matching pattern: String,
+        group: Int,
+        in text: String
+    ) -> [String] {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return expression.matches(in: text, range: range).compactMap { match in
+            guard group < match.numberOfRanges,
+                  let captureRange = Range(match.range(at: group), in: text)
+            else { return nil }
+            return String(text[captureRange])
+        }
     }
 }
 

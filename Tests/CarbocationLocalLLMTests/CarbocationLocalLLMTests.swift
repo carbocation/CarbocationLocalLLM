@@ -471,7 +471,16 @@ final class CarbocationLocalLLMTests: XCTestCase {
     func testGGUFMetadataReadsThinkingCapabilitiesFromChatTemplate() throws {
         let root = try makeTemporaryDirectory()
         let url = root.appendingPathComponent("metadata-only.gguf")
-        let template = "{{ enable_thinking }} {{ reasoning_effort }} {{ preserve_thinking }} {{ message.reasoning_content }}"
+        let template = """
+        {{ enable_thinking }} {{ preserve_thinking }} {{ message.reasoning_content }}
+        {% set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+        {% if resolved_reasoning_effort == 'high' %}
+            {% set resolved_reasoning_effort = 'xhigh' %}
+        {% endif %}
+        {% if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+            {{ raise_exception('Unexpected reasoning effort') }}
+        {% endif %}
+        """
         try makeMinimalGGUF(contextLength: 32_768, chatTemplate: template).write(to: url)
 
         let metadata = GGUFMetadata.modelMetadata(at: url)
@@ -481,9 +490,62 @@ final class CarbocationLocalLLMTests: XCTestCase {
             LLMThinkingCapabilities(
                 supportsThinking: true,
                 supportsReasoningEffort: true,
-                supportsPreserveThinking: true
+                supportsPreserveThinking: true,
+                supportedReasoningEfforts: [.low, .medium, .high, .xhigh],
+                defaultReasoningEffort: .xhigh
             )
         )
+    }
+
+    func testThinkingCapabilitiesDistinguishUnknownEffortVocabulary() {
+        let capabilities = LLMThinkingCapabilities.derived(
+            fromChatTemplate: "{{ reasoning_effort }}"
+        )
+
+        XCTAssertTrue(capabilities.supportsReasoningEffort)
+        XCTAssertNil(capabilities.supportedReasoningEfforts)
+        XCTAssertNil(capabilities.defaultReasoningEffort)
+    }
+
+    func testThinkingCapabilitiesReadConditionalDefaultAndNonThinkingEffort() {
+        let template = """
+        {% if not reasoning_effort is defined %}
+            {% set reasoning_effort = 'no_think' %}
+        {% elif reasoning_effort not in ['high', 'low', 'no_think'] %}
+            {{ raise_exception('unsupported') }}
+        {% endif %}
+        """
+
+        let capabilities = LLMThinkingCapabilities.derived(fromChatTemplate: template)
+
+        XCTAssertEqual(capabilities.supportedReasoningEfforts, [.low, .high, .noThink])
+        XCTAssertEqual(capabilities.defaultReasoningEffort, .noThink)
+    }
+
+    func testThinkingCapabilitiesReadInlineConditionalDefault() {
+        let template = """
+        {% set reasoning_effort = reasoning_effort if reasoning_effort is defined else "high" %}
+        {% if reasoning_effort in ["low", "minimal"] %}{% endif %}
+        """
+
+        let capabilities = LLMThinkingCapabilities.derived(fromChatTemplate: template)
+
+        XCTAssertEqual(capabilities.supportedReasoningEfforts, [.minimal, .low, .high])
+        XCTAssertEqual(capabilities.defaultReasoningEffort, .high)
+    }
+
+    func testThinkingCapabilitiesDecodeLegacyPayloadWithoutEffortMetadata() throws {
+        let data = Data(
+            #"{"supportsThinking":true,"supportsReasoningEffort":true,"supportsPreserveThinking":false}"#.utf8
+        )
+
+        let capabilities = try JSONDecoder().decode(LLMThinkingCapabilities.self, from: data)
+
+        XCTAssertTrue(capabilities.supportsThinking)
+        XCTAssertTrue(capabilities.supportsReasoningEffort)
+        XCTAssertFalse(capabilities.supportsPreserveThinking)
+        XCTAssertNil(capabilities.supportedReasoningEfforts)
+        XCTAssertNil(capabilities.defaultReasoningEffort)
     }
 
     func testGenerationOptionsResolverUsesSafeDefaultsUnlessCustom() {
