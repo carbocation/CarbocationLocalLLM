@@ -130,6 +130,45 @@ extension LlamaEngine {
         return merged
     }
 
+    static func streamingControlLiterals(
+        plan: StreamPhasePlan,
+        stopSequences: [String]
+    ) -> [String] {
+        var literals = stopSequences
+        literals.append(contentsOf: plan.continuingOpenThinkingPairs.flatMap { [$0.open, $0.close] })
+        literals.append(contentsOf: plan.profile.thinkingPairs.flatMap { [$0.open, $0.close] })
+        literals.append(contentsOf: plan.profile.allFinalMarkers)
+        literals.append(contentsOf: plan.profile.scrubTokens)
+
+        var deduplicated: [String] = []
+        for literal in literals where !literal.isEmpty && !deduplicated.contains(literal) {
+            deduplicated.append(literal)
+        }
+        return deduplicated
+    }
+
+    static func hasVisibleStreamingContent(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Omits an incomplete control literal at the streaming tail. The complete
+    /// request result still uses the full text, so unmatched ordinary text is
+    /// released when another token disambiguates it or generation ends.
+    static func stableStreamingPrefix(
+        _ text: String,
+        protecting literals: [String]
+    ) -> String {
+        var heldCharacterCount = 0
+        for literal in literals where literal.count > 1 {
+            for prefixLength in 1..<literal.count
+            where prefixLength > heldCharacterCount && text.hasSuffix(literal.prefix(prefixLength)) {
+                heldCharacterCount = prefixLength
+            }
+        }
+        guard heldCharacterCount > 0 else { return text }
+        return String(text.dropLast(heldCharacterCount))
+    }
+
     static func continuingOpenThinkingPairs(
         in renderedPrompt: String,
         profile: OutputSanitizationProfile

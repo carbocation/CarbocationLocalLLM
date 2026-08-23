@@ -947,11 +947,7 @@ private extension LlamaEngine {
         let renderedPrompt = promptFormatting.text
         templateMode = promptFormatting.mode
 
-        let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
-            renderedPrompt,
-            vocab: vocabulary
-        )
-        let promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
+        let promptTokens = try tokenizePrompt(renderedPrompt, vocab: vocabulary)
         promptTokenCount = promptTokens.count
         guard !promptTokens.isEmpty else {
             throw LLMEngineError.tokenizationFailed
@@ -1071,9 +1067,19 @@ private extension LlamaEngine {
             )
         }
 
+        let effectiveStopSequences = Self.mergingStopSequences(
+            options.stopSequences,
+            activeOutputProfile.extraStopStrings
+        )
+        let streamingControlLiterals = Self.streamingControlLiterals(
+            plan: streamPhasePlan,
+            stopSequences: effectiveStopSequences
+        )
         var structuredPhase = structuredOutputPlan.map {
             Self.structuredOutputPhase(in: accumulatedText, plan: $0)
         }
+        var hasEmittedThinkingContent = false
+        var hasEmittedFinalAnswerContent = false
 
         func emitVisibleProgress(raw: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
             let canEmitFinal = Self.shouldEmitFinalAnswerProgress(
@@ -1083,6 +1089,9 @@ private extension LlamaEngine {
             let visible = canEmitFinal ? sanitizedVisibleText(raw: raw) : nil
             if let visible {
                 streamState.emit(visible, snapshotReason: snapshotReason)
+                if Self.hasVisibleStreamingContent(visible) {
+                    hasEmittedFinalAnswerContent = true
+                }
             }
             phasedStreamState?.emit(
                 raw: raw,
@@ -1091,6 +1100,13 @@ private extension LlamaEngine {
                 allowsParserDerivedFinalText: visible != nil,
                 snapshotReason: LLMGenerationContentSnapshotReason(snapshotReason)
             )
+            if phasedStreamState != nil,
+               !hasEmittedThinkingContent,
+               Self.hasVisibleStreamingContent(
+                   Self.phasedGeneratedText(raw, plan: streamPhasePlan).thinkingText
+               ) {
+                hasEmittedThinkingContent = true
+            }
         }
 
         let contextMaxNew = Self.maxGenerationTokens(
@@ -1113,10 +1129,6 @@ private extension LlamaEngine {
             )
         }
 
-        let effectiveStopSequences = Self.mergingStopSequences(
-            options.stopSequences,
-            activeOutputProfile.extraStopStrings
-        )
         var incrementalParser = IncrementalGenerationParser(
             streamPhasePlan: streamPhasePlan,
             structuredOutputPlan: structuredOutputPlan,
@@ -1132,6 +1144,17 @@ private extension LlamaEngine {
         var activeToolCaptureRemainingBudget: Int?
         var toolCaptureBudgetStartUTF8Offset: Int?
         var pendingNativeToolInterception: IncrementalToolStreamParser.Interception?
+
+        func safeStreamingRaw() -> String {
+            let raw = activeToolVisibleRaw ?? accumulatedText
+            let stableRaw = Self.stableStreamingPrefix(
+                raw,
+                protecting: streamingControlLiterals
+            )
+            return interceptTools
+                ? LlamaToolStreamInterpreter.visibleRawPrefix(in: stableRaw)
+                : stableRaw
+        }
 
         func rawPrefix(utf8Count: Int) -> String {
             guard utf8Count < accumulatedText.utf8.count else { return accumulatedText }
@@ -1257,7 +1280,13 @@ private extension LlamaEngine {
                     }
                     updatePhase(triggerPhase)
                     emitFirstByteIfNeeded()
-                    emitVisibleProgress(raw: visibleRaw, snapshotReason: .streamCorrection)
+                    emitVisibleProgress(
+                        raw: Self.stableStreamingPrefix(
+                            visibleRaw,
+                            protecting: streamingControlLiterals
+                        ),
+                        snapshotReason: .streamCorrection
+                    )
                 }
 
                 if interceptTools, let interception = toolSnapshot?.completed {
@@ -1283,7 +1312,7 @@ private extension LlamaEngine {
                     appliedBoundary = true
                 }
 
-                let safeRaw = activeToolVisibleRaw ?? accumulatedText
+                let safeRaw = safeStreamingRaw()
                 updatePhase(appliedBoundary
                     ? Self.streamContentPhase(in: safeRaw, plan: streamPhasePlan)
                     : (activeToolCapturePhase ?? parserSnapshot.phase))
@@ -1301,10 +1330,27 @@ private extension LlamaEngine {
 
             emitFirstByteIfNeeded()
 
+            if currentPhase == .thinking,
+               phasedStreamState != nil,
+               !hasEmittedThinkingContent {
+                let safeRaw = safeStreamingRaw()
+                emitVisibleProgress(raw: safeRaw, snapshotReason: .streamCorrection)
+                if hasEmittedThinkingContent {
+                    streamState.lastHeartbeat = Date()
+                }
+            } else if currentPhase != .thinking,
+                      !hasEmittedFinalAnswerContent {
+                let safeRaw = safeStreamingRaw()
+                emitVisibleProgress(raw: safeRaw, snapshotReason: .streamCorrection)
+                if hasEmittedFinalAnswerContent {
+                    streamState.lastHeartbeat = Date()
+                }
+            }
+
             let now = Date()
             if now.timeIntervalSince(streamState.lastHeartbeat) >= configuration.heartbeatInterval {
                 streamState.lastHeartbeat = now
-                let safeRaw = activeToolVisibleRaw ?? accumulatedText
+                let safeRaw = safeStreamingRaw()
                 emitVisibleProgress(raw: safeRaw, snapshotReason: .streamCorrection)
                 emit(.tokenChunk(
                     preview: String(safeRaw.suffix(60)),

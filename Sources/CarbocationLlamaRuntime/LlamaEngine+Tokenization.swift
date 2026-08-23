@@ -36,6 +36,11 @@ extension LlamaEngine {
         carbocation_llama_prompt_checkpoint_clear_bridge(promptCheckpoint)
     }
 
+    func clearPromptPreparationCaches() {
+        promptFormattingCache = nil
+        promptTokenizationCache = nil
+    }
+
     func clearPromptTokenCaches() {
         cachedPromptTokens = nil
         mtpCachedPromptTokens = nil
@@ -351,14 +356,47 @@ extension LlamaEngine {
         return Array(tokens.prefix(Int(tokenCount)))
     }
 
+    func tokenizePrompt(
+        _ renderedPrompt: String,
+        vocab: OpaquePointer
+    ) throws -> [llama_token] {
+        let normalizedPrompt = promptWithAutoAddedSpecialTokensStripped(
+            renderedPrompt,
+            vocab: vocab
+        )
+        if let cache = promptTokenizationCache,
+           cache.normalizedPrompt == normalizedPrompt {
+            return cache.tokens
+        }
+
+        let tokens = try tokenize(vocab: vocab, text: normalizedPrompt, addSpecial: true)
+        promptTokenizationCache = PromptTokenizationCache(
+            normalizedPrompt: normalizedPrompt,
+            tokens: tokens
+        )
+        return tokens
+    }
+
     func promptCheckpointTokenCount(
         promptFormatting: PromptFormattingResult,
         promptTokens: [llama_token],
         vocab: OpaquePointer
     ) -> Int? {
-        guard promptCheckpoint != nil,
-              let anchorText = promptFormatting.checkpointAnchorText
-        else {
+        guard promptCheckpoint != nil else {
+            return nil
+        }
+        if let checkpointTokens = promptCheckpointTokens,
+           let reusableCount = Self.reusablePromptCheckpointTokenCount(
+               checkpointTokens: checkpointTokens,
+               newPromptTokens: promptTokens
+           ) {
+            return reusableCount
+        }
+        guard let userContent = promptFormatting.checkpointUserContent,
+              let anchorText = Self.promptCheckpointAnchorText(
+                  renderedPrompt: promptFormatting.text,
+                  userContent: userContent
+              ) else {
             return nil
         }
         let anchorForTokenization = promptWithAutoAddedSpecialTokensStripped(
@@ -545,6 +583,21 @@ extension LlamaEngine {
             sharedAnchorCount - max(0, boundaryBackoff)
         )
         return checkpointCount > 0 ? checkpointCount : nil
+    }
+
+    static func reusablePromptCheckpointTokenCount(
+        checkpointTokens: [llama_token],
+        newPromptTokens: [llama_token],
+        maximumAdvance: Int = 64
+    ) -> Int? {
+        guard !checkpointTokens.isEmpty,
+              checkpointTokens.count < newPromptTokens.count,
+              newPromptTokens.count - checkpointTokens.count <= max(0, maximumAdvance),
+              commonTokenPrefixCount(checkpointTokens, newPromptTokens) == checkpointTokens.count
+        else {
+            return nil
+        }
+        return checkpointTokens.count
     }
 
     static func promptCheckpointRestoreTokenCount(

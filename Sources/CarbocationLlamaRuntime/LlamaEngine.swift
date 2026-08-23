@@ -24,11 +24,16 @@ let platformMaximumContextSize = Int.max
 public struct LlamaEngineConfiguration: Hashable, Sendable {
     public static var defaultGPULayerCount: Int32 { platformDefaultGPULayerCount }
     public static var defaultBatchSizeLimit: Int { platformDefaultBatchSizeLimit }
+    public static var defaultMicroBatchSizeLimit: Int { LlamaEngine.defaultMicroBatchSizeLimit }
     public static let defaultMTPMaxDraftTokens = 1
 
     public var gpuLayerCount: Int32
     public var useMemoryMap: Bool
     public var batchSizeLimit: Int
+    /// Optional physical llama.cpp micro-batch (`n_ubatch`) ceiling. `nil` preserves
+    /// the deployment-safe default while allowing benchmarks and advanced callers
+    /// to trade additional memory for prompt-prefill throughput.
+    public var microBatchSizeLimit: Int?
     public var threadCount: Int32?
     public var promptReserveTokens: Int
     public var heartbeatInterval: TimeInterval
@@ -40,6 +45,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         gpuLayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
         useMemoryMap: Bool = true,
         batchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
+        microBatchSizeLimit: Int? = nil,
         threadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
@@ -50,6 +56,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         self.gpuLayerCount = gpuLayerCount
         self.useMemoryMap = useMemoryMap
         self.batchSizeLimit = batchSizeLimit
+        self.microBatchSizeLimit = microBatchSizeLimit
         self.threadCount = threadCount
         self.promptReserveTokens = promptReserveTokens
         self.heartbeatInterval = heartbeatInterval
@@ -109,6 +116,9 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var hasEmbeddedChatTemplate: Bool
     public var thinkingCapabilities: LLMThinkingCapabilities
     public var supportsMTPAcceleration: Bool
+    /// Metadata-declared at load time when a projector is deferred, then narrowed
+    /// to its validated capabilities after the first multimedia request. Query
+    /// `LlamaEngine.currentLoadedModelInfo()` again after first use for current state.
     public var supportedInputModalities: Set<LLMInputModality>
     public var architecture: String?
     public var nextNPredictLayers: Int?
@@ -235,7 +245,37 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         var text: String
         var mode: LLMChatTemplateMode
         var outputProfile: OutputSanitizationProfile
-        var checkpointAnchorText: String? = nil
+        var checkpointUserContent: String? = nil
+    }
+
+    struct PromptTemplateOptions: Equatable {
+        var enableThinking: Bool
+        var reasoningEffort: LLMReasoningEffort?
+        var preserveThinking: Bool?
+
+        init(_ options: GenerationOptions) {
+            enableThinking = options.enableThinking
+            reasoningEffort = options.reasoningEffort
+            preserveThinking = options.preserveThinking
+        }
+    }
+
+    enum PromptFormattingCacheKey: Equatable {
+        case systemUser(
+            system: String,
+            user: String,
+            options: PromptTemplateOptions
+        )
+        case messages(
+            messages: [ChatTemplateMessage],
+            tools: [LLMToolDefinition],
+            options: PromptTemplateOptions
+        )
+    }
+
+    struct PromptTokenizationCache {
+        var normalizedPrompt: String
+        var tokens: [llama_token]
     }
 
     struct ToolAwareGenerationSegmentOverrideInput: Sendable {
@@ -283,14 +323,25 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         case unavailable(String)
     }
 
+    enum MultimodalProjectorState {
+        case missing
+        case deferred(url: URL, declaredModalities: Set<LLMInputModality>)
+        case ready(context: UnsafeMutableRawPointer, supportedModalities: Set<LLMInputModality>)
+        case failed(detail: String)
+
+        var context: UnsafeMutableRawPointer? {
+            guard case .ready(let context, _) = self else { return nil }
+            return context
+        }
+    }
+
     let configuration: LlamaEngineConfiguration
 
     var model: OpaquePointer?
     var context: OpaquePointer?
     var vocabulary: OpaquePointer?
     private var mtpContext: UnsafeMutableRawPointer?
-    var mtmdContext: UnsafeMutableRawPointer?
-    var visionProjectorUnsupportedDetail: String?
+    var multimodalProjectorState: MultimodalProjectorState = .missing
     var mtpCachedPromptTokens: [llama_token]?
     var promptCheckpoint: UnsafeMutableRawPointer?
     var promptCheckpointTokens: [llama_token]?
@@ -300,6 +351,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     var preparedChatTemplate: PreparedChatTemplate?
     var outputSanitizationProfile: OutputSanitizationProfile = .empty
     var cachedPromptTokens: [llama_token]?
+    var promptFormattingCache: (key: PromptFormattingCacheKey, result: PromptFormattingResult)?
+    var promptTokenizationCache: PromptTokenizationCache?
     var toolAwareGenerationSegmentOverride: ToolAwareGenerationSegmentOverride?
     private var activeGenerationCount = 0
     private var unloadAfterActiveGeneration = false
@@ -310,7 +363,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     }
 
     deinit {
-        if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
+        if case .ready(let context, _) = multimodalProjectorState {
+            carbocation_mtmd_free_bridge(context)
+        }
         if let promptCheckpoint { carbocation_llama_prompt_checkpoint_free_bridge(promptCheckpoint) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
@@ -446,11 +501,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         }
 
         let renderedPrompt = promptFormatting.text
-        let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
-            renderedPrompt,
-            vocab: vocabulary
-        )
-        let promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
+        let promptTokens = try tokenizePrompt(renderedPrompt, vocab: vocabulary)
         guard !promptTokens.isEmpty else {
             throw LLMEngineError.tokenizationFailed
         }
@@ -564,6 +615,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
         if let loadedInfo,
            loadedInfo.modelPath == path,
+           loadedDescriptor?.mmprojURL?.standardizedFileURL == descriptor.mmprojURL?.standardizedFileURL,
            context != nil {
             let desiredContext = Self.clampedContextSize(
                 requestedContext: requestedContext,
@@ -612,7 +664,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         )
         let microBatchCandidates = Self.contextBatchCandidates(
             contextSize: chosenContext,
-            batchSizeLimit: configuration.batchSizeLimit
+            batchSizeLimit: configuration.batchSizeLimit,
+            microBatchSizeLimit: configuration.microBatchSizeLimit
         )
         let requestedMTPDraftTokens = Self.clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
         let maxMTPDraftTokens = Self.effectiveMTPMaxDraftTokens(requested: requestedMTPDraftTokens)
@@ -649,11 +702,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
         let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
-        let loadedMultimodalProjector = Self.loadMultimodalProjectorIfAvailable(
-            mmprojURL: descriptor.mmprojURL,
-            model: loadedModel,
-            threads: threads,
-            useGPU: Self.usesGPUOffload(gpuLayerCount: configuration.gpuLayerCount)
+        let projectorPreparation = Self.deferredMultimodalProjectorState(
+            mmprojURL: descriptor.mmprojURL
         )
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
@@ -665,7 +715,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             hasEmbeddedChatTemplate: template != nil,
             thinkingCapabilities: .derived(fromChatTemplate: template),
             supportsMTPAcceleration: supportsMTPAcceleration,
-            supportedInputModalities: loadedMultimodalProjector.supportedInputModalities,
+            supportedInputModalities: projectorPreparation.supportedInputModalities,
             architecture: ggufMetadata.architecture,
             nextNPredictLayers: ggufMetadata.nextNPredictLayers,
             logicalBatchSize: Int(llama_n_batch(loadedContext)),
@@ -698,8 +748,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.context = loadedContext
         self.mtpContext = loadedMTPContext
         self.promptCheckpoint = loadedPromptCheckpoint
-        self.mtmdContext = loadedMultimodalProjector.context
-        self.visionProjectorUnsupportedDetail = loadedMultimodalProjector.unsupportedDetail
+        self.multimodalProjectorState = projectorPreparation.state
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
@@ -773,8 +822,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.context = nil
         self.mtpContext = nil
         self.promptCheckpoint = nil
-        self.mtmdContext = nil
-        self.visionProjectorUnsupportedDetail = nil
+        self.multimodalProjectorState = .missing
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
@@ -799,6 +847,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         preparedChatTemplate = Self.prepareChatTemplate(template)
         outputSanitizationProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         clearPromptCaches()
+        clearPromptPreparationCaches()
     }
 
     public func unload() {
@@ -822,7 +871,10 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     private func performUnload() {
         clearPromptCaches()
-        if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
+        clearPromptPreparationCaches()
+        if case .ready(let context, _) = multimodalProjectorState {
+            carbocation_mtmd_free_bridge(context)
+        }
         if let promptCheckpoint { carbocation_llama_prompt_checkpoint_free_bridge(promptCheckpoint) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
@@ -833,8 +885,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.context = nil
         self.mtpContext = nil
         self.promptCheckpoint = nil
-        self.mtmdContext = nil
-        self.visionProjectorUnsupportedDetail = nil
+        self.multimodalProjectorState = .missing
         self.vocabulary = nil
         self.loadedDescriptor = nil
         self.loadedInfo = nil
@@ -1078,11 +1129,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             promptTokenCount = multimodalPrefill.promptTokenCount
             promptPositionCount = multimodalPrefill.promptPositionCount
         } else {
-            let promptForTokenization = promptWithAutoAddedSpecialTokensStripped(
-                renderedPrompt,
-                vocab: vocabulary
-            )
-            promptTokens = try tokenize(vocab: vocabulary, text: promptForTokenization, addSpecial: true)
+            promptTokens = try tokenizePrompt(renderedPrompt, vocab: vocabulary)
             promptTokenCount = promptTokens.count
             promptPositionCount = promptTokens.count
         }
@@ -1171,11 +1218,10 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             accelerator: Self.mtpAcceleratorName,
             maxDraftTokens: activeMTPContext == nil ? 0 : maxMTPDraftTokens
         )
-
         if let multimodalPrefill {
             clearPromptRuntimeState(context: context, mtpContext: mtpContext)
             try multimodalPrefill.evaluate(
-                mtmdContext: mtmdContext,
+                mtmdContext: multimodalProjectorState.context,
                 llamaContext: context,
                 batchSize: Int32(max(1, llama_n_batch(context)))
             )
@@ -1225,9 +1271,19 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             ))
         }
 
+        let effectiveStopSequences = Self.mergingStopSequences(
+            options.stopSequences,
+            activeOutputProfile.extraStopStrings
+        )
+        let streamingControlLiterals = Self.streamingControlLiterals(
+            plan: streamPhasePlan,
+            stopSequences: effectiveStopSequences
+        )
         var lastHeartbeat = Date()
         var streamedThinkingText = ""
         var streamedFinalAnswer = ""
+        var hasEmittedThinkingContent = false
+        var hasEmittedFinalAnswerContent = false
         var structuredPhase = structuredOutputPlan.map {
             Self.structuredOutputPhase(in: accumulatedText, plan: $0)
         }
@@ -1253,6 +1309,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
 
             streamedThinkingText = nextThinkingText
+            if Self.hasVisibleStreamingContent(nextThinkingText) {
+                hasEmittedThinkingContent = true
+            }
         }
 
         func emitFinalAnswer(_ nextFinalAnswer: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
@@ -1275,15 +1334,18 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
 
             streamedFinalAnswer = nextFinalAnswer
+            if Self.hasVisibleStreamingContent(nextFinalAnswer) {
+                hasEmittedFinalAnswerContent = true
+            }
         }
 
-        func emitFinalAnswerProgressIfNeeded() {
+        func emitFinalAnswerProgressIfNeeded(raw: String? = nil) {
             guard Self.shouldEmitFinalAnswerProgress(
                 currentPhase: currentPhase,
                 structuredPhase: structuredPhase
             ),
                   let nextFinalAnswer = try? Self.sanitizedGeneratedText(
-                    accumulatedText,
+                    raw ?? accumulatedText,
                     profile: activeOutputProfile,
                     continuingOpenThinkingPairs: continuingOpenThinkingPairs,
                     requiresNonEmptyStructuredOutput: false
@@ -1293,8 +1355,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             emitFinalAnswer(nextFinalAnswer, snapshotReason: .streamCorrection)
         }
 
-        func emitThinkingProgressIfNeeded() {
-            let snapshot = Self.phasedGeneratedText(accumulatedText, plan: streamPhasePlan)
+        func emitThinkingProgressIfNeeded(raw: String? = nil) {
+            let snapshot = Self.phasedGeneratedText(raw ?? accumulatedText, plan: streamPhasePlan)
             emitThinking(snapshot.thinkingText, snapshotReason: .streamCorrection)
         }
 
@@ -1325,10 +1387,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             )
         }
 
-        let effectiveStopSequences = Self.mergingStopSequences(
-            options.stopSequences,
-            activeOutputProfile.extraStopStrings
-        )
         var incrementalParser = IncrementalGenerationParser(
             streamPhasePlan: streamPhasePlan,
             structuredOutputPlan: structuredOutputPlan,
@@ -1430,11 +1488,27 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
             emitFirstByteIfNeeded()
 
+            let stableRaw = Self.stableStreamingPrefix(
+                accumulatedText,
+                protecting: streamingControlLiterals
+            )
+            if currentPhase == .thinking, !hasEmittedThinkingContent {
+                emitThinkingProgressIfNeeded(raw: stableRaw)
+                if hasEmittedThinkingContent {
+                    lastHeartbeat = Date()
+                }
+            } else if currentPhase != .thinking, !hasEmittedFinalAnswerContent {
+                emitFinalAnswerProgressIfNeeded(raw: stableRaw)
+                if hasEmittedFinalAnswerContent {
+                    lastHeartbeat = Date()
+                }
+            }
+
             let now = Date()
             if now.timeIntervalSince(lastHeartbeat) >= configuration.heartbeatInterval {
                 lastHeartbeat = now
-                emitThinkingProgressIfNeeded()
-                emitFinalAnswerProgressIfNeeded()
+                emitThinkingProgressIfNeeded(raw: stableRaw)
+                emitFinalAnswerProgressIfNeeded(raw: stableRaw)
                 onPhaseAwareEvent(.tokenChunk(
                     preview: String(accumulatedText.suffix(60)),
                     bytesSoFar: accumulatedData.count,

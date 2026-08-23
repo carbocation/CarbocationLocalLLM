@@ -20,9 +20,14 @@ extension LlamaEngine {
         return max(LlamaContextPolicy.minimumContext, min(requested, upperBound))
     }
 
-    static func contextBatchCandidates(contextSize: Int, batchSizeLimit: Int) -> [Int] {
+    static func contextBatchCandidates(
+        contextSize: Int,
+        batchSizeLimit: Int,
+        microBatchSizeLimit: Int? = nil
+    ) -> [Int] {
         let logicalBatchSize = min(max(1, contextSize), max(1, batchSizeLimit))
-        let first = min(logicalBatchSize, defaultMicroBatchSizeLimit)
+        let requestedMicroBatchSize = microBatchSizeLimit ?? defaultMicroBatchSizeLimit
+        let first = min(logicalBatchSize, max(1, requestedMicroBatchSize))
         var candidates = [first]
         var next = first
         while next > 1 {

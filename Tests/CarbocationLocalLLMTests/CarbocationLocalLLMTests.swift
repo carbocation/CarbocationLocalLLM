@@ -254,6 +254,40 @@ final class CarbocationLocalLLMTests: XCTestCase {
         )
     }
 
+    func testContextCalibrationKeyDistinguishesExplicitMicroBatchLimit() {
+        let model = InstalledModel(
+            displayName: "Calibration Model",
+            filename: "model-Q4_K_M.gguf",
+            sizeBytes: 2_000_000,
+            contextLength: 65_536,
+            quantization: "Q4_K_M",
+            source: .imported,
+            sha256: "abc123"
+        )
+        func storageKey(microBatchSizeLimit: Int?) -> String {
+            LlamaContextCalibrationKey(
+                deviceID: "device-a",
+                model: LlamaContextCalibrationModelFingerprint(model: model),
+                runtime: LlamaContextCalibrationRuntimeFingerprint(
+                    platform: "macOS",
+                    gpuLayerCount: 999,
+                    useMemoryMap: true,
+                    batchSizeLimit: 2_048,
+                    microBatchSizeLimit: microBatchSizeLimit,
+                    threadCount: 4
+                )
+            ).storageKey
+        }
+
+        let defaultKey = storageKey(microBatchSizeLimit: nil)
+        XCTAssertFalse(defaultKey.contains("microBatchLimit="))
+        XCTAssertNotEqual(defaultKey, storageKey(microBatchSizeLimit: 512))
+        XCTAssertNotEqual(
+            storageKey(microBatchSizeLimit: 512),
+            storageKey(microBatchSizeLimit: 1_024)
+        )
+    }
+
     func testContextCalibrationSearchUsesCoarsePowerOfTwoBisect() async throws {
         let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: 65_536)
         var probed: [Int] = []

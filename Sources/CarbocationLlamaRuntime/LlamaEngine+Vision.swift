@@ -51,6 +51,11 @@ extension LlamaEngine {
         var supportedInputModalities: Set<LLMInputModality>
     }
 
+    struct DeferredMultimodalProjectorPreparation {
+        var state: MultimodalProjectorState
+        var supportedInputModalities: Set<LLMInputModality>
+    }
+
     enum LlamaMediaPayload {
         case image(LLMRGBImage)
         case audio(LLMAudioInput)
@@ -107,6 +112,38 @@ extension LlamaEngine {
         if caps.inp_vision { modalities.insert(.image) }
         if caps.inp_audio { modalities.insert(.audio) }
         return modalities
+    }
+
+    static func deferredMultimodalProjectorState(
+        mmprojURL: URL?
+    ) -> DeferredMultimodalProjectorPreparation {
+        guard let mmprojURL else {
+            return DeferredMultimodalProjectorPreparation(
+                state: .missing,
+                supportedInputModalities: [.text]
+            )
+        }
+        guard FileManager.default.fileExists(atPath: mmprojURL.path) else {
+            return DeferredMultimodalProjectorPreparation(
+                state: .failed(detail: "The mmproj artifact file was not found."),
+                supportedInputModalities: [.text]
+            )
+        }
+
+        let declaredModalities = projectorSupportedInputModalities(at: mmprojURL)
+        guard !declaredModalities.isEmpty else {
+            return DeferredMultimodalProjectorPreparation(
+                state: .failed(
+                    detail: "mtmd_get_cap_from_file did not report image or audio input support."
+                ),
+                supportedInputModalities: [.text]
+            )
+        }
+
+        return DeferredMultimodalProjectorPreparation(
+            state: .deferred(url: mmprojURL, declaredModalities: declaredModalities),
+            supportedInputModalities: Set([LLMInputModality.text]).union(declaredModalities)
+        )
     }
 
     static func loadMultimodalProjectorIfAvailable(
@@ -359,18 +396,53 @@ extension LlamaEngine {
     }
 
     func requireMultimodalProjector() throws -> UnsafeMutableRawPointer {
-        if let mtmdContext,
-           loadedInfo?.supportedInputModalities.contains(where: { $0 != .text }) == true {
-            return mtmdContext
-        }
-        guard let mmprojURL = loadedDescriptor?.mmprojURL,
-              FileManager.default.fileExists(atPath: mmprojURL.path)
-        else {
+        switch multimodalProjectorState {
+        case .ready(let context, _):
+            return context
+        case .missing:
             throw LLMEngineError.multimodalProjectorMissing
+        case .failed(let detail):
+            guard let mmprojURL = loadedDescriptor?.mmprojURL,
+                  FileManager.default.fileExists(atPath: mmprojURL.path) else {
+                throw LLMEngineError.multimodalProjectorMissing
+            }
+            throw LLMEngineError.multimodalProjectorUnsupported(detail)
+        case .deferred(let mmprojURL, _):
+            guard let model else {
+                throw LLMEngineError.noModelLoaded
+            }
+            let threads = configuration.threadCount
+                ?? Int32(max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
+            let loaded = Self.loadMultimodalProjectorIfAvailable(
+                mmprojURL: mmprojURL,
+                model: model,
+                threads: threads,
+                useGPU: Self.usesGPUOffload(gpuLayerCount: configuration.gpuLayerCount)
+            )
+            guard let context = loaded.context else {
+                let detail = loaded.unsupportedDetail
+                    ?? "The loaded mmproj artifact does not support image or audio input."
+                multimodalProjectorState = .failed(detail: detail)
+                if var loadedInfo {
+                    loadedInfo.supportedInputModalities = [.text]
+                    self.loadedInfo = loadedInfo
+                }
+                guard FileManager.default.fileExists(atPath: mmprojURL.path) else {
+                    throw LLMEngineError.multimodalProjectorMissing
+                }
+                throw LLMEngineError.multimodalProjectorUnsupported(detail)
+            }
+
+            multimodalProjectorState = .ready(
+                context: context,
+                supportedModalities: loaded.supportedInputModalities
+            )
+            if var loadedInfo {
+                loadedInfo.supportedInputModalities = loaded.supportedInputModalities
+                self.loadedInfo = loadedInfo
+            }
+            return context
         }
-        throw LLMEngineError.multimodalProjectorUnsupported(
-            visionProjectorUnsupportedDetail ?? "The loaded mmproj artifact does not support image or audio input."
-        )
     }
 
     func publicChatTemplateMessages(

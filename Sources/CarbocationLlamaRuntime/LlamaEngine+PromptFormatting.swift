@@ -18,6 +18,20 @@ extension LlamaEngine {
         }
     }
 
+    func cachedPromptFormatting(for key: PromptFormattingCacheKey) -> PromptFormattingResult? {
+        guard let cache = promptFormattingCache, cache.key == key else { return nil }
+        return cache.result
+    }
+
+    @discardableResult
+    func cachePromptFormatting(
+        _ result: PromptFormattingResult,
+        for key: PromptFormattingCacheKey
+    ) -> PromptFormattingResult {
+        promptFormattingCache = (key, result)
+        return result
+    }
+
     func applyChatTemplate(
         system: String,
         user: String,
@@ -25,6 +39,14 @@ extension LlamaEngine {
     ) throws -> PromptFormattingResult {
         guard vocabulary != nil else {
             throw LLMEngineError.noModelLoaded
+        }
+        let cacheKey = PromptFormattingCacheKey.systemUser(
+            system: system,
+            user: user,
+            options: PromptTemplateOptions(options)
+        )
+        if let cached = cachedPromptFormatting(for: cacheKey) {
+            return cached
         }
 
         if let chatTemplate {
@@ -43,15 +65,12 @@ extension LlamaEngine {
                         hasEmbeddedTemplate: true,
                         formatter: "swift-jinja"
                     )
-                    return PromptFormattingResult(
+                    return cachePromptFormatting(PromptFormattingResult(
                         text: formatted,
                         mode: .embedded,
                         outputProfile: outputSanitizationProfile,
-                        checkpointAnchorText: Self.promptCheckpointAnchorText(
-                            renderedPrompt: formatted,
-                            userContent: user
-                        )
-                    )
+                        checkpointUserContent: user
+                    ), for: cacheKey)
                 } catch {
                     llamaRuntimeLog.info(
                         "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
@@ -76,15 +95,12 @@ extension LlamaEngine {
                     hasEmbeddedTemplate: true,
                     formatter: "legacy-c-api"
                 )
-                return PromptFormattingResult(
+                return cachePromptFormatting(PromptFormattingResult(
                     text: formatted,
                     mode: .embedded,
                     outputProfile: outputSanitizationProfile,
-                    checkpointAnchorText: Self.promptCheckpointAnchorText(
-                        renderedPrompt: formatted,
-                        userContent: user
-                    )
-                )
+                    checkpointUserContent: user
+                ), for: cacheKey)
             }
 
             if let fallback = try? Self.fallbackPrompt(
@@ -99,17 +115,14 @@ extension LlamaEngine {
                     hasEmbeddedTemplate: true,
                     formatter: "family-fallback"
                 )
-                return PromptFormattingResult(
+                return cachePromptFormatting(PromptFormattingResult(
                     text: fallback.text,
                     mode: fallback.mode,
                     outputProfile: outputSanitizationProfile.isEmpty
                         ? fallback.outputProfile
                         : outputSanitizationProfile,
-                    checkpointAnchorText: Self.promptCheckpointAnchorText(
-                        renderedPrompt: fallback.text,
-                        userContent: user
-                    )
-                )
+                    checkpointUserContent: user
+                ), for: cacheKey)
             }
 
             throw LLMEngineError.chatTemplateUnavailable(Self.embeddedTemplateFailureDescription(
@@ -129,15 +142,12 @@ extension LlamaEngine {
             hasEmbeddedTemplate: false,
             formatter: "fallback"
         )
-        return PromptFormattingResult(
+        return cachePromptFormatting(PromptFormattingResult(
             text: fallback.text,
             mode: fallback.mode,
             outputProfile: fallback.outputProfile,
-            checkpointAnchorText: Self.promptCheckpointAnchorText(
-                renderedPrompt: fallback.text,
-                userContent: user
-            )
-        )
+            checkpointUserContent: user
+        ), for: cacheKey)
     }
 
     func applyChatTemplate(
@@ -147,6 +157,14 @@ extension LlamaEngine {
     ) throws -> PromptFormattingResult {
         guard vocabulary != nil else {
             throw LLMEngineError.noModelLoaded
+        }
+        let cacheKey = PromptFormattingCacheKey.messages(
+            messages: messages,
+            tools: tools,
+            options: PromptTemplateOptions(options)
+        )
+        if let cached = cachedPromptFormatting(for: cacheKey) {
+            return cached
         }
 
         guard chatTemplate != nil else {
@@ -171,15 +189,12 @@ extension LlamaEngine {
                     hasEmbeddedTemplate: true,
                     formatter: "swift-jinja"
                 )
-                return PromptFormattingResult(
+                return cachePromptFormatting(PromptFormattingResult(
                     text: formatted,
                     mode: .embedded,
                     outputProfile: outputSanitizationProfile,
-                    checkpointAnchorText: Self.promptCheckpointAnchorText(
-                        renderedPrompt: formatted,
-                        messages: messages
-                    )
-                )
+                    checkpointUserContent: Self.promptCheckpointUserContent(messages: messages)
+                ), for: cacheKey)
             } catch {
                 llamaRuntimeLog.info(
                     "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
@@ -213,10 +228,16 @@ extension LlamaEngine {
         renderedPrompt: String,
         messages: [ChatTemplateMessage]
     ) -> String? {
-        guard let content = messages.last(where: { $0.role.lowercased() == "user" })?.content.stringValue else {
+        guard let content = promptCheckpointUserContent(messages: messages) else {
             return nil
         }
         return promptCheckpointAnchorText(renderedPrompt: renderedPrompt, userContent: content)
+    }
+
+    static func promptCheckpointUserContent(
+        messages: [ChatTemplateMessage]
+    ) -> String? {
+        messages.last(where: { $0.role.lowercased() == "user" })?.content.stringValue
     }
 
     static func fallbackPrompt(

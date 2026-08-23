@@ -191,6 +191,7 @@ public extension LlamaEngine {
             gpuLayerCount: Int(configuration.gpuLayerCount),
             useMemoryMap: configuration.useMemoryMap,
             batchSizeLimit: configuration.batchSizeLimit,
+            microBatchSizeLimit: configuration.microBatchSizeLimit,
             threadCount: Int(effectiveThreadCount(for: configuration)),
             mtpAccelerationEnabled: mtpAccelerationEnabled,
             mtpMaxDraftTokens: mtpMaxDraftTokens,
@@ -353,6 +354,7 @@ private enum LlamaContextCalibrator {
                 vocabulary: vocabulary,
                 contextSize: context,
                 batchSizeLimit: configuration.batchSizeLimit,
+                microBatchSizeLimit: configuration.microBatchSizeLimit,
                 threads: threads,
                 memoryBudgetBytes: LlamaContextMemoryGuardrail.defaultBudgetBytes(
                     gpuLayerCount: configuration.gpuLayerCount
@@ -443,6 +445,7 @@ private enum LlamaContextCalibrator {
         vocabulary: OpaquePointer,
         contextSize: Int,
         batchSizeLimit: Int,
+        microBatchSizeLimit: Int?,
         threads: Int32,
         memoryBudgetBytes: UInt64,
         shouldPrepareMTPAcceleration: Bool,
@@ -458,7 +461,8 @@ private enum LlamaContextCalibrator {
         let logicalBatchSize = min(max(1, contextSize), max(1, batchSizeLimit))
         let microBatchCandidates = LlamaEngine.contextBatchCandidates(
             contextSize: contextSize,
-            batchSizeLimit: batchSizeLimit
+            batchSizeLimit: batchSizeLimit,
+            microBatchSizeLimit: microBatchSizeLimit
         )
         for microBatchSize in microBatchCandidates {
             let params = LlamaEngine.contextParams(

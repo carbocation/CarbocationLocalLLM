@@ -1,5 +1,5 @@
 import CarbocationLocalLLM
-import CarbocationLocalLLMRuntime
+@testable import CarbocationLocalLLMRuntime
 import XCTest
 
 final class CarbocationLocalLLMRuntimeTests: XCTestCase {
@@ -8,6 +8,44 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
 
         XCTAssertEqual(configuration.accelerationPolicy, .disabled)
         XCTAssertEqual(configuration.mtpMaxDraftTokens, 1)
+        XCTAssertNil(configuration.llamaMicroBatchSizeLimit)
+    }
+
+    func testInstalledModelInfoReconcilesLazyProjectorCapabilitiesForMatchingModel() {
+        let modelID = UUID()
+        let otherModelID = UUID()
+        let declaredInfo = LocalLLMLoadedModelInfo(
+            selection: .installed(modelID),
+            displayName: "Fixture",
+            contextSize: 4_096,
+            trainingContextSize: 32_768,
+            supportsGrammar: true,
+            usesExactTokenCounts: true,
+            supportedInputModalities: [.text, .image, .audio]
+        )
+
+        let downgraded = LocalLLMEngine.reconciledInstalledModelInfo(
+            currentInfo: declaredInfo,
+            expectedSelection: .installed(modelID),
+            runtimeModelID: modelID,
+            runtimeInputModalities: [.text]
+        )
+        XCTAssertEqual(downgraded?.supportedInputModalities, [.text])
+
+        let narrowed = LocalLLMEngine.reconciledInstalledModelInfo(
+            currentInfo: declaredInfo,
+            expectedSelection: .installed(modelID),
+            runtimeModelID: modelID,
+            runtimeInputModalities: [.text, .image]
+        )
+        XCTAssertEqual(narrowed?.supportedInputModalities, [.text, .image])
+
+        XCTAssertNil(LocalLLMEngine.reconciledInstalledModelInfo(
+            currentInfo: declaredInfo,
+            expectedSelection: .installed(modelID),
+            runtimeModelID: otherModelID,
+            runtimeInputModalities: [.text]
+        ))
     }
 
     func testSelectionStorageRoundTripsInstalledAndSystemModels() throws {

@@ -9,6 +9,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
     public var llamaGPULayerCount: Int32
     public var llamaUseMemoryMap: Bool
     public var llamaBatchSizeLimit: Int
+    public var llamaMicroBatchSizeLimit: Int?
     public var llamaThreadCount: Int32?
     public var promptReserveTokens: Int
     public var heartbeatInterval: TimeInterval
@@ -28,6 +29,29 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         self.llamaGPULayerCount = llamaGPULayerCount
         self.llamaUseMemoryMap = llamaUseMemoryMap
         self.llamaBatchSizeLimit = llamaBatchSizeLimit
+        self.llamaMicroBatchSizeLimit = nil
+        self.llamaThreadCount = llamaThreadCount
+        self.promptReserveTokens = promptReserveTokens
+        self.heartbeatInterval = heartbeatInterval
+        self.accelerationPolicy = accelerationPolicy
+        self.mtpMaxDraftTokens = mtpMaxDraftTokens
+    }
+
+    public init(
+        llamaGPULayerCount: Int32 = LlamaEngineConfiguration.defaultGPULayerCount,
+        llamaUseMemoryMap: Bool = true,
+        llamaBatchSizeLimit: Int = LlamaEngineConfiguration.defaultBatchSizeLimit,
+        llamaMicroBatchSizeLimit: Int?,
+        llamaThreadCount: Int32? = nil,
+        promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
+        heartbeatInterval: TimeInterval = 2,
+        accelerationPolicy: LLMAccelerationPolicy = .disabled,
+        mtpMaxDraftTokens: Int = LocalLLMEngineConfiguration.defaultMTPMaxDraftTokens
+    ) {
+        self.llamaGPULayerCount = llamaGPULayerCount
+        self.llamaUseMemoryMap = llamaUseMemoryMap
+        self.llamaBatchSizeLimit = llamaBatchSizeLimit
+        self.llamaMicroBatchSizeLimit = llamaMicroBatchSizeLimit
         self.llamaThreadCount = llamaThreadCount
         self.promptReserveTokens = promptReserveTokens
         self.heartbeatInterval = heartbeatInterval
@@ -40,6 +64,7 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
             gpuLayerCount: llamaGPULayerCount,
             useMemoryMap: llamaUseMemoryMap,
             batchSizeLimit: llamaBatchSizeLimit,
+            microBatchSizeLimit: llamaMicroBatchSizeLimit,
             threadCount: llamaThreadCount,
             promptReserveTokens: promptReserveTokens,
             heartbeatInterval: heartbeatInterval,
@@ -398,6 +423,38 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         loadedInfo
     }
 
+    static func reconciledInstalledModelInfo(
+        currentInfo: LocalLLMLoadedModelInfo,
+        expectedSelection: LLMModelSelection,
+        runtimeModelID: UUID?,
+        runtimeInputModalities: Set<LLMInputModality>
+    ) -> LocalLLMLoadedModelInfo? {
+        guard case .installed(let expectedModelID) = expectedSelection,
+              currentInfo.selection == expectedSelection,
+              runtimeModelID == expectedModelID else {
+            return nil
+        }
+        var result = currentInfo
+        result.supportedInputModalities = runtimeInputModalities
+        return result
+    }
+
+    private func refreshInstalledInputModalities() async {
+        guard let expectedSelection = loadedInfo?.selection,
+              case .installed = expectedSelection,
+              let llamaInfo = await llamaEngine.currentLoadedModelInfo(),
+              let currentInfo = loadedInfo,
+              let reconciledInfo = Self.reconciledInstalledModelInfo(
+                  currentInfo: currentInfo,
+                  expectedSelection: expectedSelection,
+                  runtimeModelID: llamaInfo.modelID,
+                  runtimeInputModalities: llamaInfo.supportedInputModalities
+              ) else {
+            return
+        }
+        loadedInfo = reconciledInfo
+    }
+
     public func preflight(
         system: String,
         prompt: String,
@@ -437,7 +494,19 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.preflight(messages: messages, options: options)
+            let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
+            do {
+                let result = try await llamaEngine.preflight(messages: messages, options: options)
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                return result
+            } catch {
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                throw error
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.preflight(messages: messages, options: options)
@@ -572,12 +641,24 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.generate(
-                messages: messages,
-                options: options,
-                control: control,
-                onPhaseAwareEvent: onPhaseAwareEvent
-            )
+            let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
+            do {
+                let result = try await llamaEngine.generate(
+                    messages: messages,
+                    options: options,
+                    control: control,
+                    onPhaseAwareEvent: onPhaseAwareEvent
+                )
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                return result
+            } catch {
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                throw error
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generate(
@@ -694,12 +775,24 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.generatePhased(
-                messages: messages,
-                options: options,
-                control: control,
-                onEvent: onEvent
-            )
+            let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
+            do {
+                let result = try await llamaEngine.generatePhased(
+                    messages: messages,
+                    options: options,
+                    control: control,
+                    onEvent: onEvent
+                )
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                return result
+            } catch {
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                throw error
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generatePhased(
@@ -738,11 +831,25 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.generateWithTools(
-                request,
-                control: control,
-                onPhaseAwareEvent: onPhaseAwareEvent
-            )
+            let shouldRefreshInputModalities = request.messages.map {
+                LLMChatMessage.containsMultimodalInput(in: $0)
+            } ?? false
+            do {
+                let result = try await llamaEngine.generateWithTools(
+                    request,
+                    control: control,
+                    onPhaseAwareEvent: onPhaseAwareEvent
+                )
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                return result
+            } catch {
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                throw error
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generateWithTools(
@@ -767,11 +874,25 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
         switch loadedInfo.selection {
         case .installed:
-            return try await llamaEngine.generateWithToolsPhased(
-                request,
-                control: control,
-                onEvent: onEvent
-            )
+            let shouldRefreshInputModalities = request.messages.map {
+                LLMChatMessage.containsMultimodalInput(in: $0)
+            } ?? false
+            do {
+                let result = try await llamaEngine.generateWithToolsPhased(
+                    request,
+                    control: control,
+                    onEvent: onEvent
+                )
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                return result
+            } catch {
+                if shouldRefreshInputModalities {
+                    await refreshInstalledInputModalities()
+                }
+                throw error
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generateWithToolsPhased(

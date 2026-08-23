@@ -19,6 +19,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
         XCTAssertEqual(configuration.accelerationPolicy, .disabled)
         XCTAssertEqual(configuration.mtpMaxDraftTokens, 1)
+        XCTAssertNil(configuration.microBatchSizeLimit)
     }
 
     func testRuntimeImportsAndLinksMTMDSymbols() {
@@ -694,6 +695,74 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         ))
     }
 
+    func testPromptCheckpointReusesNearbySavedPrefixWithoutReanchoring() {
+        let checkpoint = Array(Int32(0)..<399)
+        let exact = checkpoint + Array(repeating: Int32(900), count: 13)
+        let extended = checkpoint + Array(repeating: Int32(901), count: 27)
+
+        XCTAssertEqual(
+            LlamaEngine.reusablePromptCheckpointTokenCount(
+                checkpointTokens: checkpoint,
+                newPromptTokens: exact
+            ),
+            399
+        )
+        XCTAssertEqual(
+            LlamaEngine.reusablePromptCheckpointTokenCount(
+                checkpointTokens: checkpoint,
+                newPromptTokens: extended
+            ),
+            399
+        )
+
+        var divergent = exact
+        divergent[200] = -1
+        XCTAssertNil(LlamaEngine.reusablePromptCheckpointTokenCount(
+            checkpointTokens: checkpoint,
+            newPromptTokens: divergent
+        ))
+        XCTAssertNil(LlamaEngine.reusablePromptCheckpointTokenCount(
+            checkpointTokens: checkpoint,
+            newPromptTokens: checkpoint + Array(repeating: 1, count: 65)
+        ))
+        XCTAssertNil(LlamaEngine.reusablePromptCheckpointTokenCount(
+            checkpointTokens: checkpoint,
+            newPromptTokens: checkpoint
+        ))
+    }
+
+    func testStableStreamingPrefixHoldsIncompleteControlLiterals() {
+        let literals = ["STOP", "</think>", "<|return|>"]
+
+        for literal in literals {
+            for split in 1..<literal.count {
+                let partial = String(literal.prefix(split))
+                XCTAssertEqual(
+                    LlamaEngine.stableStreamingPrefix(
+                        "visible\(partial)",
+                        protecting: literals
+                    ),
+                    "visible",
+                    "Expected split \(split) of \(literal) to remain buffered"
+                )
+            }
+            XCTAssertEqual(
+                LlamaEngine.stableStreamingPrefix(
+                    "visible\(literal)",
+                    protecting: literals
+                ),
+                "visible\(literal)"
+            )
+        }
+
+        XCTAssertEqual(
+            LlamaEngine.stableStreamingPrefix("visible ordinary", protecting: literals),
+            "visible ordinary"
+        )
+        XCTAssertFalse(LlamaEngine.hasVisibleStreamingContent(" \n\t"))
+        XCTAssertTrue(LlamaEngine.hasVisibleStreamingContent(" \nanswer"))
+    }
+
     func testPromptCheckpointRestoreTrimFailureRequiresFullReset() {
         XCTAssertEqual(
             LlamaEngine.promptCheckpointRestoreDisposition(
@@ -851,6 +920,22 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(
             LlamaEngine.contextBatchCandidates(contextSize: 4_096, batchSizeLimit: 2_048),
             [512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+        )
+        XCTAssertEqual(
+            LlamaEngine.contextBatchCandidates(
+                contextSize: 4_096,
+                batchSizeLimit: 2_048,
+                microBatchSizeLimit: 2_048
+            ),
+            [2_048, 1_024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+        )
+        XCTAssertEqual(
+            LlamaEngine.contextBatchCandidates(
+                contextSize: 768,
+                batchSizeLimit: 2_048,
+                microBatchSizeLimit: 1_024
+            ),
+            [768, 384, 192, 96, 48, 24, 12, 6, 3, 1]
         )
     }
 

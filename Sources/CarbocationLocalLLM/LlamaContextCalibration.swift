@@ -41,6 +41,7 @@ public struct LlamaContextCalibrationRuntimeFingerprint: Codable, Hashable, Send
     public var gpuLayerCount: Int
     public var useMemoryMap: Bool
     public var batchSizeLimit: Int
+    public var microBatchSizeLimit: Int?
     public var threadCount: Int
     /// Whether MTP acceleration is permitted for this runtime (i.e. the
     /// acceleration policy is automatic). When enabled, MTP-capable models load
@@ -61,10 +62,35 @@ public struct LlamaContextCalibrationRuntimeFingerprint: Codable, Hashable, Send
         mtpMaxDraftTokens: Int = 1,
         algorithmVersion: Int = LlamaContextCalibrationAlgorithm.version
     ) {
+        self.init(
+            platform: platform,
+            gpuLayerCount: gpuLayerCount,
+            useMemoryMap: useMemoryMap,
+            batchSizeLimit: batchSizeLimit,
+            microBatchSizeLimit: nil,
+            threadCount: threadCount,
+            mtpAccelerationEnabled: mtpAccelerationEnabled,
+            mtpMaxDraftTokens: mtpMaxDraftTokens,
+            algorithmVersion: algorithmVersion
+        )
+    }
+
+    public init(
+        platform: String,
+        gpuLayerCount: Int,
+        useMemoryMap: Bool,
+        batchSizeLimit: Int,
+        microBatchSizeLimit: Int?,
+        threadCount: Int,
+        mtpAccelerationEnabled: Bool = true,
+        mtpMaxDraftTokens: Int = 1,
+        algorithmVersion: Int = LlamaContextCalibrationAlgorithm.version
+    ) {
         self.platform = platform
         self.gpuLayerCount = gpuLayerCount
         self.useMemoryMap = useMemoryMap
         self.batchSizeLimit = batchSizeLimit
+        self.microBatchSizeLimit = microBatchSizeLimit
         self.threadCount = threadCount
         self.mtpAccelerationEnabled = mtpAccelerationEnabled
         self.mtpMaxDraftTokens = mtpMaxDraftTokens
@@ -88,7 +114,7 @@ public struct LlamaContextCalibrationKey: Codable, Hashable, Sendable {
     }
 
     public var storageKey: String {
-        [
+        var fields = [
             "v1",
             "device=\(deviceID)",
             "modelID=\(model.modelID.uuidString)",
@@ -100,11 +126,17 @@ public struct LlamaContextCalibrationKey: Codable, Hashable, Sendable {
             "gpuLayers=\(runtime.gpuLayerCount)",
             "mmap=\(runtime.useMemoryMap)",
             "batchLimit=\(runtime.batchSizeLimit)",
+        ]
+        if let microBatchSizeLimit = runtime.microBatchSizeLimit {
+            fields.append("microBatchLimit=\(microBatchSizeLimit)")
+        }
+        fields.append(contentsOf: [
             "threads=\(runtime.threadCount)",
             "mtpAccel=\(runtime.mtpAccelerationEnabled)",
             "mtpDraft=\(runtime.mtpMaxDraftTokens)",
             "algorithm=\(runtime.algorithmVersion)"
-        ].joined(separator: "|")
+        ])
+        return fields.joined(separator: "|")
     }
 }
 
