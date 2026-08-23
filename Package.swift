@@ -3,12 +3,248 @@
 import PackageDescription
 import Foundation
 
+private let llamaBuildScriptRevision = "7"
+private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v1"
+
+private func fileContents(atPath path: String) -> String? {
+    try? String(contentsOfFile: path, encoding: .utf8)
+}
+
+private func trimmedFileContents(atPath path: String) -> String? {
+    fileContents(atPath: path)?.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func normalizedGitObjectID(_ value: String) -> String? {
+    let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard candidate.count == 40 || candidate.count == 64,
+          candidate.unicodeScalars.allSatisfy({ scalar in
+              (48...57).contains(scalar.value) || (97...102).contains(scalar.value)
+          }) else {
+        return nil
+    }
+    return candidate
+}
+
+private func resolvedPath(_ path: String, relativeTo directory: String) -> String {
+    if path.hasPrefix("/") {
+        return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+    return URL(fileURLWithPath: directory, isDirectory: true)
+        .appendingPathComponent(path)
+        .standardizedFileURL.path
+}
+
+private func gitDirectory(forWorkingTree workingTree: String) -> String? {
+    let dotGitPath = "\(workingTree)/.git"
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: dotGitPath, isDirectory: &isDirectory) else {
+        return nil
+    }
+    if isDirectory.boolValue {
+        return dotGitPath
+    }
+
+    guard let pointer = trimmedFileContents(atPath: dotGitPath),
+          pointer.hasPrefix("gitdir:") else {
+        return nil
+    }
+    let gitDirectoryPath = String(pointer.dropFirst("gitdir:".count))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return resolvedPath(gitDirectoryPath, relativeTo: workingTree)
+}
+
+private func gitCommonDirectory(forGitDirectory gitDirectory: String) -> String {
+    guard let commonDirectoryPath = trimmedFileContents(atPath: "\(gitDirectory)/commondir"),
+          !commonDirectoryPath.isEmpty else {
+        return gitDirectory
+    }
+    return resolvedPath(commonDirectoryPath, relativeTo: gitDirectory)
+}
+
+private func resolvedGitReference(
+    _ reference: String,
+    gitDirectory: String,
+    commonDirectory: String
+) -> String? {
+    for directory in [gitDirectory, commonDirectory] {
+        if let value = trimmedFileContents(atPath: "\(directory)/\(reference)"),
+           let objectID = normalizedGitObjectID(value) {
+            return objectID
+        }
+    }
+
+    guard let packedReferences = trimmedFileContents(atPath: "\(commonDirectory)/packed-refs") else {
+        return nil
+    }
+    for line in packedReferences.split(whereSeparator: \.isNewline) {
+        if line.hasPrefix("#") || line.hasPrefix("^") {
+            continue
+        }
+        let fields = line.split(separator: " ", maxSplits: 1)
+        if fields.count == 2,
+           fields[1] == Substring(reference),
+           let objectID = normalizedGitObjectID(String(fields[0])) {
+            return objectID
+        }
+    }
+    return nil
+}
+
+private func checkedOutGitCommit(atWorkingTree workingTree: String) -> String? {
+    guard let gitDirectory = gitDirectory(forWorkingTree: workingTree),
+          let head = trimmedFileContents(atPath: "\(gitDirectory)/HEAD") else {
+        return nil
+    }
+    if let detachedCommit = normalizedGitObjectID(head) {
+        return detachedCommit
+    }
+    guard head.hasPrefix("ref:") else {
+        return nil
+    }
+    let reference = String(head.dropFirst("ref:".count))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return resolvedGitReference(
+        reference,
+        gitDirectory: gitDirectory,
+        commonDirectory: gitCommonDirectory(forGitDirectory: gitDirectory)
+    )
+}
+
+private struct LlamaStageStamp {
+    let scriptRevision: String
+    let cmakeVersion: String
+    let commit: String
+    let platform: String
+    let sdkPath: String
+    let architectures: String
+    let configuration: String
+    let deploymentTarget: String
+
+    init?(_ value: String) {
+        let fields = value.split(separator: "|", omittingEmptySubsequences: false)
+        guard fields.count == 8,
+              !fields[1].isEmpty,
+              let commit = normalizedGitObjectID(String(fields[2])),
+              !fields[4].isEmpty else {
+            return nil
+        }
+        scriptRevision = String(fields[0])
+        cmakeVersion = String(fields[1])
+        self.commit = commit
+        platform = String(fields[3])
+        sdkPath = String(fields[4])
+        architectures = String(fields[5])
+        configuration = String(fields[6])
+        deploymentTarget = String(fields[7])
+    }
+
+    func certifies(
+        commit expectedCommit: String,
+        platform expectedPlatform: String,
+        architectures expectedArchitectures: String,
+        deploymentTarget expectedDeploymentTarget: String
+    ) -> Bool {
+        scriptRevision == llamaBuildScriptRevision
+            && commit == expectedCommit
+            && platform == expectedPlatform
+            && architectures == expectedArchitectures
+            && configuration == "Release"
+            && deploymentTarget == expectedDeploymentTarget
+    }
+}
+
+private func compositeXCFrameworkStampIsCurrent(
+    atPath path: String,
+    checkedOutCommit: String
+) -> Bool {
+    guard var contents = fileContents(atPath: path),
+          !contents.contains("\r") else {
+        return false
+    }
+    if contents.hasSuffix("\n") {
+        contents.removeLast()
+    }
+    guard !contents.hasSuffix("\n") else {
+        return false
+    }
+    let lines = contents.components(separatedBy: "\n")
+    guard lines.count == 4,
+          lines[0] == "schema=\(llamaXCFrameworkStampSchema)" else {
+        return false
+    }
+
+    func stage(onLine index: Int, key: String) -> LlamaStageStamp? {
+        let prefix = "\(key)="
+        guard lines[index].hasPrefix(prefix) else {
+            return nil
+        }
+        return LlamaStageStamp(String(lines[index].dropFirst(prefix.count)))
+    }
+
+    guard let macOS = stage(onLine: 1, key: "macos"),
+          let iOS = stage(onLine: 2, key: "ios"),
+          let iOSSimulator = stage(onLine: 3, key: "ios-simulator") else {
+        return false
+    }
+    return macOS.certifies(
+        commit: checkedOutCommit,
+        platform: "macos",
+        architectures: "arm64;x86_64",
+        deploymentTarget: "14.0"
+    ) && iOS.certifies(
+        commit: checkedOutCommit,
+        platform: "ios",
+        architectures: "arm64",
+        deploymentTarget: "17.0"
+    ) && iOSSimulator.certifies(
+        commit: checkedOutCommit,
+        platform: "ios-simulator",
+        architectures: "arm64;x86_64",
+        deploymentTarget: "17.0"
+    )
+}
+
+private func sourceArchiveIsCurrent(
+    archivePath: String,
+    stampPath: String,
+    checkedOutCommit: String
+) -> Bool {
+    guard FileManager.default.fileExists(atPath: archivePath),
+          let stampContents = fileContents(atPath: stampPath),
+          !stampContents.contains("\n"),
+          !stampContents.contains("\r"),
+          let stamp = LlamaStageStamp(stampContents) else {
+        return false
+    }
+    return stamp.certifies(
+        commit: checkedOutCommit,
+        platform: "macos",
+        architectures: "arm64;x86_64",
+        deploymentTarget: "14.0"
+    )
+}
+
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let llamaCombinedLibrary = "\(packageRoot)/Vendor/llama-artifacts/current/lib/libllama-combined.a"
+let llamaSourceArtifactStamp = "\(packageRoot)/Vendor/llama-artifacts/current/.stamp"
+let llamaWorkingTree = "\(packageRoot)/Vendor/llama.cpp"
+let llamaCheckedOutCommit = checkedOutGitCommit(atWorkingTree: llamaWorkingTree)
 let localLlamaBinaryArtifactPath = "Vendor/llama-artifacts/release/llama.xcframework"
-let localLlamaBinaryArtifactExists = FileManager.default.fileExists(
-    atPath: "\(packageRoot)/\(localLlamaBinaryArtifactPath)"
-)
+let localLlamaBinaryArtifactAbsolutePath = "\(packageRoot)/\(localLlamaBinaryArtifactPath)"
+let localLlamaBinaryArtifactIsCurrent = llamaCheckedOutCommit.map { commit in
+    FileManager.default.fileExists(atPath: localLlamaBinaryArtifactAbsolutePath)
+        && compositeXCFrameworkStampIsCurrent(
+            atPath: "\(localLlamaBinaryArtifactAbsolutePath)/.stamp",
+            checkedOutCommit: commit
+        )
+} ?? false
+let localLlamaSourceArtifactIsCurrent = llamaCheckedOutCommit.map { commit in
+    sourceArchiveIsCurrent(
+        archivePath: llamaCombinedLibrary,
+        stampPath: llamaSourceArtifactStamp,
+        checkedOutCommit: commit
+    )
+} ?? false
 let llamaBinaryArtifactURL = ""
 let llamaBinaryArtifactChecksum = ""
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
@@ -18,6 +254,12 @@ let llamaTarget: Target
 let llamaUnsafeLinkerSettings: [LinkerSetting]
 
 if forceSourceLlama {
+    guard localLlamaSourceArtifactIsCurrent else {
+        fatalError(
+            "CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA requires a current universal Release archive. "
+                + "Run Scripts/build-llama-macos.sh and retry."
+        )
+    }
     llamaTarget = .systemLibrary(
         name: "llama",
         path: "Sources/llama"
@@ -36,18 +278,25 @@ if forceSourceLlama {
         checksum: llamaBinaryArtifactChecksum
     )
     llamaUnsafeLinkerSettings = []
-} else if localLlamaBinaryArtifactExists {
+} else if localLlamaBinaryArtifactIsCurrent {
     llamaTarget = .binaryTarget(
         name: "llama",
         path: localLlamaBinaryArtifactPath
     )
     llamaUnsafeLinkerSettings = []
-} else {
+} else if localLlamaSourceArtifactIsCurrent {
     llamaTarget = .systemLibrary(
         name: "llama",
         path: "Sources/llama"
     )
     llamaUnsafeLinkerSettings = [.unsafeFlags([llamaCombinedLibrary])]
+} else {
+    fatalError(
+        "No current llama artifact is available: the automatic local XCFramework and source archive "
+            + "are missing, stale, or do not match Vendor/llama.cpp. Run Scripts/build-llama-xcframework.sh "
+            + "or Scripts/build-llama-macos.sh, then retry. An explicit "
+            + "CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH remains an intentional override."
+    )
 }
 
 let package = Package(
@@ -84,6 +333,10 @@ let package = Package(
         .executable(
             name: "CLLMMTPReproCommand",
             targets: ["CLLMMTPReproCommand"]
+        ),
+        .executable(
+            name: "CLLMBenchmarkCommand",
+            targets: ["CLLMBenchmarkCommand"]
         )
     ],
     dependencies: [
@@ -283,6 +536,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "CLLMMTPReproCommand",
+            dependencies: [
+                "CarbocationLocalLLM",
+                "CarbocationLlamaRuntime"
+            ]
+        ),
+        .executableTarget(
+            name: "CLLMBenchmarkCommand",
             dependencies: [
                 "CarbocationLocalLLM",
                 "CarbocationLlamaRuntime"

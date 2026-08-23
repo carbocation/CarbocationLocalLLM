@@ -3,6 +3,13 @@ import CarbocationLocalLLMRuntime
 import XCTest
 
 final class CarbocationLocalLLMRuntimeTests: XCTestCase {
+    func testLocalLLMConfigurationDisablesMTPByDefault() {
+        let configuration = LocalLLMEngineConfiguration()
+
+        XCTAssertEqual(configuration.accelerationPolicy, .disabled)
+        XCTAssertEqual(configuration.mtpMaxDraftTokens, 1)
+    }
+
     func testSelectionStorageRoundTripsInstalledAndSystemModels() throws {
         let id = UUID()
         XCTAssertEqual(LLMModelSelection(storageValue: id.uuidString), .installed(id))

@@ -956,6 +956,11 @@ private extension LlamaEngine {
         guard !promptTokens.isEmpty else {
             throw LLMEngineError.tokenizationFailed
         }
+        let promptCheckpointTokenCount = self.promptCheckpointTokenCount(
+            promptFormatting: promptFormatting,
+            promptTokens: promptTokens,
+            vocab: vocabulary
+        )
         guard promptTokens.count < currentContextSize() else {
             throw LLMEngineError.insufficientGenerationBudget(
                 contextSize: currentContextSize(),
@@ -1013,11 +1018,17 @@ private extension LlamaEngine {
         let activeMTPContext = mtpRuntime.context
         accelerationStats = mtpRuntime.stats
 
-        try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
+        try preparePromptContext(
+            promptTokens,
+            context: context,
+            mtpContext: activeMTPContext,
+            checkpointTokenCount: promptCheckpointTokenCount
+        )
         promptContextPrepared = true
 
         var accumulatedData = Data()
         var accumulatedText = ""
+        var incrementalUTF8 = IncrementalUTF8Accumulator()
         var reasoningBudgetExhaustionLogged = false
         func logReasoningBudgetExhaustionIfNeeded(
             state: carbocation_llama_reasoning_budget_state,
@@ -1106,22 +1117,48 @@ private extension LlamaEngine {
             options.stopSequences,
             activeOutputProfile.extraStopStrings
         )
+        var incrementalParser = IncrementalGenerationParser(
+            streamPhasePlan: streamPhasePlan,
+            structuredOutputPlan: structuredOutputPlan,
+            stopSequences: effectiveStopSequences,
+            stopAtBalancedJSON: options.stopAtBalancedJSON
+        )
 
         var interceptedToolCalls: [LLMToolCall] = []
-        var activeToolCapture: LlamaToolStreamInterpreter.Capture?
+        var incrementalToolParser = IncrementalToolStreamParser()
+        var activeToolCaptureStartUTF8Offset: Int?
+        var activeToolCapturePhase: LLMStreamContentPhase?
+        var activeToolVisibleRaw: String?
         var activeToolCaptureRemainingBudget: Int?
-        var pendingNativeToolInterception: LlamaToolStreamInterpreter.Interception?
+        var toolCaptureBudgetStartUTF8Offset: Int?
+        var pendingNativeToolInterception: IncrementalToolStreamParser.Interception?
 
-        func completeToolInterception(_ interception: LlamaToolStreamInterpreter.Interception) {
-            let capture = activeToolCapture ?? LlamaToolStreamInterpreter.Capture(
-                range: interception.range,
-                phase: Self.streamContentPhase(
-                    in: String(accumulatedText[..<interception.range.lowerBound]),
-                    plan: streamPhasePlan
-                )
+        func rawPrefix(utf8Count: Int) -> String {
+            guard utf8Count < accumulatedText.utf8.count else { return accumulatedText }
+            return String(accumulatedText[..<accumulatedText.index(atUTF8Offset: utf8Count)])
+        }
+
+        func reconcileToolCaptureBudget() {
+            guard let captureStart = toolCaptureBudgetStartUTF8Offset,
+                  IncrementalToolStreamParser.shouldPreserveCaptureBudget(
+                    in: accumulatedText,
+                    captureStartUTF8Offset: captureStart
+                  ) else {
+                toolCaptureBudgetStartUTF8Offset = nil
+                activeToolCaptureRemainingBudget = nil
+                return
+            }
+        }
+
+        func completeToolInterception(_ interception: IncrementalToolStreamParser.Interception) {
+            let captureStart = activeToolCaptureStartUTF8Offset
+                ?? interception.utf8Range.lowerBound
+            let visibleRaw = activeToolVisibleRaw ?? rawPrefix(utf8Count: captureStart)
+            let capturePhase = activeToolCapturePhase ?? Self.streamContentPhase(
+                in: visibleRaw,
+                plan: streamPhasePlan
             )
-            let visibleRaw = String(accumulatedText[..<capture.range.lowerBound])
-            updatePhase(capture.phase)
+            updatePhase(capturePhase)
             emitFirstByteIfNeeded()
             emitVisibleProgress(raw: visibleRaw, snapshotReason: .streamCorrection)
             interceptedToolCalls = interception.calls.map { call in
@@ -1130,7 +1167,7 @@ private extension LlamaEngine {
                     rawID: call.rawID,
                     name: call.name,
                     arguments: call.arguments,
-                    triggerPhase: capture.phase
+                    triggerPhase: capturePhase
                 )
             }
             stopReason = "tool-call-complete"
@@ -1160,10 +1197,12 @@ private extension LlamaEngine {
             let piece = rawPiece.isEmpty
                 ? tokenToPiece(vocab: vocabulary, token: token, special: true)
                 : rawPiece
+            var appendedText = ""
             if !piece.isEmpty {
                 accumulatedData.append(piece)
-                if let decoded = String(data: accumulatedData, encoding: .utf8) {
-                    accumulatedText = decoded
+                appendedText = incrementalUTF8.append(piece)
+                if !appendedText.isEmpty {
+                    accumulatedText.append(contentsOf: appendedText)
                 }
             }
 
@@ -1175,85 +1214,85 @@ private extension LlamaEngine {
             }
 
             if !piece.isEmpty {
-                if let plan = structuredOutputPlan {
-                    let nextPhase = Self.structuredOutputPhase(in: accumulatedText, plan: plan)
-                    if nextPhase != structuredPhase {
-                        structuredPhase = nextPhase
+                let parserSnapshot = incrementalParser.append(
+                    appendedText,
+                    fullText: accumulatedText
+                )
+                if parserSnapshot.structuredPhase != structuredPhase {
+                    structuredPhase = parserSnapshot.structuredPhase
+                    if let nextPhase = parserSnapshot.structuredPhase {
                         llamaRuntimeLog.info(
                             "Structured output phase changed: phase=\(nextPhase.rawValue, privacy: .public) rawBytes=\(accumulatedData.count, privacy: .public)"
                         )
                     }
                 }
 
-                if interceptTools, let capture = activeToolCapture {
-                    let capturedText = String(accumulatedText[capture.range.lowerBound...])
-                    if !LlamaToolStreamInterpreter.isPotentialStartedToolCall(in: capturedText) {
-                        activeToolCapture = nil
-                        activeToolCaptureRemainingBudget = nil
-                    }
+                let toolSnapshot = interceptTools
+                    ? incrementalToolParser.append(
+                        appendedText,
+                        fullText: accumulatedText
+                    )
+                    : nil
+
+                if interceptTools,
+                   activeToolCaptureStartUTF8Offset != toolSnapshot?.captureStartUTF8Offset {
+                    reconcileToolCaptureBudget()
+                    activeToolCaptureStartUTF8Offset = nil
+                    activeToolCapturePhase = nil
+                    activeToolVisibleRaw = nil
                 }
 
-                if interceptTools, activeToolCapture == nil,
-                   let capture = LlamaToolStreamInterpreter.startedToolCall(in: accumulatedText) {
-                    let visibleRaw = String(accumulatedText[..<capture.range.lowerBound])
+                if interceptTools,
+                   activeToolCaptureStartUTF8Offset == nil,
+                   let captureStart = toolSnapshot?.captureStartUTF8Offset {
+                    let visibleRaw = rawPrefix(utf8Count: captureStart)
                     let triggerPhase = Self.streamContentPhase(in: visibleRaw, plan: streamPhasePlan)
-                    activeToolCapture = LlamaToolStreamInterpreter.Capture(
-                        range: capture.range,
-                        phase: triggerPhase
-                    )
-                    activeToolCaptureRemainingBudget = samplerRuntime.reasoningBudgetSampler
-                        .map { Int(carbocation_llama_reasoning_budget_sampler_remaining($0)) }
+                    activeToolCaptureStartUTF8Offset = captureStart
+                    activeToolCapturePhase = triggerPhase
+                    activeToolVisibleRaw = visibleRaw
+                    if toolCaptureBudgetStartUTF8Offset == nil {
+                        toolCaptureBudgetStartUTF8Offset = captureStart
+                        activeToolCaptureRemainingBudget = samplerRuntime.reasoningBudgetSampler
+                            .map { Int(carbocation_llama_reasoning_budget_sampler_remaining($0)) }
+                    }
                     updatePhase(triggerPhase)
                     emitFirstByteIfNeeded()
                     emitVisibleProgress(raw: visibleRaw, snapshotReason: .streamCorrection)
                 }
 
-                if interceptTools,
-                   let interception = LlamaToolStreamInterpreter.completedToolCallForStreaming(in: accumulatedText) {
+                if interceptTools, let interception = toolSnapshot?.completed {
                     pendingNativeToolInterception = nil
                     completeToolInterception(interception)
                     return false
                 }
 
-                if interceptTools,
-                   let pending = LlamaToolStreamInterpreter.pendingNativeToolCallBatch(in: accumulatedText) {
-                    pendingNativeToolInterception = pending
+                if interceptTools {
+                    pendingNativeToolInterception = toolSnapshot?.pendingNative
                 } else {
                     pendingNativeToolInterception = nil
                 }
 
-                let boundary = if let plan = structuredOutputPlan {
-                    Self.firstStructuredGenerationBoundary(
-                        in: accumulatedText,
-                        stopSequences: effectiveStopSequences,
-                        stopAtBalancedJSON: options.stopAtBalancedJSON,
-                        plan: plan
-                    )
-                } else {
-                    Self.firstGenerationBoundary(
-                        in: accumulatedText,
-                        stopSequences: effectiveStopSequences,
-                        stopAtBalancedJSON: options.stopAtBalancedJSON
-                    )
-                }
-
+                let boundary = parserSnapshot.boundary
+                var appliedBoundary = false
                 if let boundary,
                    !(interceptTools
                        && boundary.reason == "tool-call-complete"
                        && pendingNativeToolInterception != nil) {
                     accumulatedText = boundary.text
                     stopReason = boundary.reason
+                    appliedBoundary = true
                 }
 
-                let safeRaw = interceptTools
-                    ? LlamaToolStreamInterpreter.visibleRawPrefix(in: accumulatedText)
-                    : accumulatedText
-                updatePhase(Self.streamContentPhase(in: safeRaw, plan: streamPhasePlan))
+                let safeRaw = activeToolVisibleRaw ?? accumulatedText
+                updatePhase(appliedBoundary
+                    ? Self.streamContentPhase(in: safeRaw, plan: streamPhasePlan)
+                    : (activeToolCapturePhase ?? parserSnapshot.phase))
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
                     emitVisibleProgress(raw: safeRaw, snapshotReason: .streamCorrection)
                     if stopReason == "json-complete", structuredOutputPlan != nil {
+                        incrementalParser.markStructuredOutputComplete()
                         structuredPhase = .complete
                     }
                     return false
@@ -1265,9 +1304,7 @@ private extension LlamaEngine {
             let now = Date()
             if now.timeIntervalSince(streamState.lastHeartbeat) >= configuration.heartbeatInterval {
                 streamState.lastHeartbeat = now
-                let safeRaw = interceptTools
-                    ? LlamaToolStreamInterpreter.visibleRawPrefix(in: accumulatedText)
-                    : accumulatedText
+                let safeRaw = activeToolVisibleRaw ?? accumulatedText
                 emitVisibleProgress(raw: safeRaw, snapshotReason: .streamCorrection)
                 emit(.tokenChunk(
                     preview: String(safeRaw.suffix(60)),
@@ -1331,21 +1368,23 @@ private extension LlamaEngine {
         var generatedTokenHistory: [llama_token] = []
 
         func sampleTargetToken(at index: Int32) -> llama_token {
-            llama_synchronize(context)
             return llama_sampler_sample(sampler, context, index)
         }
 
         let mtpDiagnosticsEnabled = configuration.emitsMTPDiagnostics
             && activeMTPContext != nil
             && (accelerationStats?.maxDraftTokens ?? 0) > 2
-        func emitMTPDiagnostic(_ message: String) {
-            guard mtpDiagnosticsEnabled else { return }
+        func emitMTPDiagnostic(_ message: @autoclosure () -> String) {
+            guard let message = Self.mtpDiagnosticMessage(
+                enabled: mtpDiagnosticsEnabled,
+                makeMessage: message
+            ) else { return }
             emit(.diagnostic(message: "mtp-diagnostic \(message)"))
         }
 
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
-            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+            if accumulatedData.isEmpty || incrementalUTF8.isAtUTF8Boundary {
                 applyThinkingTerminationIfRequested(
                     control: control,
                     generationID: controlGenerationID,
@@ -1390,7 +1429,9 @@ private extension LlamaEngine {
                 var draftCallIndex: Int?
                 let draftTokens: [llama_token]
                 if draftLimit > 0 {
-                    draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
+                    if mtpDiagnosticsEnabled {
+                        draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
+                    }
                     var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
                     let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
                         carbocation_llama_mtp_draft_bridge(
@@ -1433,7 +1474,6 @@ private extension LlamaEngine {
                     }
                     try processLastMTPVerificationBatch(mtpContext: activeMTPContext)
                 } else {
-                    let verificationPrefixTokens = promptTokens + generatedTokenHistory
                     let verificationTokens = [next] + draftTokens
                     try decodeMTPVerificationTargetTokens(
                         verificationTokens,
@@ -1443,10 +1483,10 @@ private extension LlamaEngine {
 
                     var correctionToken: llama_token?
                     var correctionReasoningBudgetState: carbocation_llama_reasoning_budget_state?
-                    var verifierSamples: [llama_token] = []
+                    var verifierSamples: [llama_token]? = mtpDiagnosticsEnabled ? [] : nil
                     for (verifierIndex, draftToken) in draftTokens.enumerated() {
                         let sampled = sampleTargetToken(at: Int32(verifierIndex))
-                        verifierSamples.append(sampled)
+                        verifierSamples?.append(sampled)
                         let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
                             carbocation_llama_reasoning_budget_sampler_state($0)
                         }
@@ -1500,27 +1540,32 @@ private extension LlamaEngine {
                                 )
                             }
                         }
-                        if let command = diagnosticBatchEquivalenceCommand(
-                            modelPath: loadedDescriptor?.url.path,
-                            prefixTokens: verificationPrefixTokens,
-                            windowTokens: verificationTokens,
-                            recurrentStateSnapshots: accelerationStats?.maxDraftTokens ?? 0,
-                            samplerPrefixSkip: promptTokens.count
-                        ) {
-                            emitMTPDiagnostic("repro-command \(command)")
+                        if mtpDiagnosticsEnabled {
+                            let verificationPrefixTokens = promptTokens + generatedTokenHistory
+                            if let command = diagnosticBatchEquivalenceCommand(
+                                modelPath: loadedDescriptor?.url.path,
+                                prefixTokens: verificationPrefixTokens,
+                                windowTokens: verificationTokens,
+                                recurrentStateSnapshots: accelerationStats?.maxDraftTokens ?? 0,
+                                samplerPrefixSkip: promptTokens.count
+                            ) {
+                                emitMTPDiagnostic("repro-command \(command)")
+                            }
+                            emitMTPDiagnostic(
+                                "repro call=\(draftCallIndex ?? 0) pos=\(tokenPosition) prefix-token-count=\(verificationPrefixTokens.count) prefix-token-ids=\(diagnosticTokenIDList(verificationPrefixTokens)) window-token-ids=\(diagnosticTokenIDList(verificationTokens))"
+                            )
+                            emitMTPDiagnostic(
+                                "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples ?? [], vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                            )
                         }
-                        emitMTPDiagnostic(
-                            "repro call=\(draftCallIndex ?? 0) pos=\(tokenPosition) prefix-token-count=\(verificationPrefixTokens.count) prefix-token-ids=\(diagnosticTokenIDList(verificationPrefixTokens)) window-token-ids=\(diagnosticTokenIDList(verificationTokens))"
-                        )
-                        emitMTPDiagnostic(
-                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
-                        )
                     } else {
                         var prefetchedDiagnosticToken: llama_token?
                         if shouldContinue,
                            generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount < maxNew {
                             let sampledPrefetch = sampleTargetToken(at: Int32(draftTokens.count))
-                            prefetchedDiagnosticToken = sampledPrefetch
+                            if mtpDiagnosticsEnabled {
+                                prefetchedDiagnosticToken = sampledPrefetch
+                            }
                             pendingNextToken = PendingMTPToken(
                                 token: sampledPrefetch,
                                 reasoningBudgetState: samplerRuntime.reasoningBudgetSampler.map {
@@ -1537,7 +1582,7 @@ private extension LlamaEngine {
                             Int32(emittedAcceptedDraftCount)
                         )
                         emitMTPDiagnostic(
-                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples ?? [], vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
                         )
                     }
                 }
@@ -1657,7 +1702,11 @@ private extension LlamaEngine {
             "Tool-aware generation sanitized output: grammarMode=\(grammarMode.logLabel, privacy: .public) rawBytes=\(rawForReturn.utf8.count, privacy: .public) sanitizedBytes=\(returnedText.utf8.count, privacy: .public) stopReason=\(stopReason, privacy: .public)"
         )
 
-        commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
+        commitPromptCache(
+            promptTokens,
+            decodedGeneratedTokens: generatedTokenHistory,
+            mtpSynchronized: activeMTPContext != nil
+        )
         promptCacheCommitted = true
         emitAccelerationStatsIfNeeded()
         emittedStats = true

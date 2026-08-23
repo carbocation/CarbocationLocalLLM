@@ -17,12 +17,45 @@ func carbocation_llama_mtp_free_bridge(_ context: UnsafeMutableRawPointer?)
 @_silgen_name("carbocation_llama_mtp_clear")
 func carbocation_llama_mtp_clear_bridge(_ context: UnsafeMutableRawPointer?)
 
+@_silgen_name("carbocation_llama_prompt_checkpoint_create")
+func carbocation_llama_prompt_checkpoint_create_bridge(
+    _ context: OpaquePointer?
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("carbocation_llama_prompt_checkpoint_free")
+func carbocation_llama_prompt_checkpoint_free_bridge(
+    _ checkpoint: UnsafeMutableRawPointer?
+)
+
+@_silgen_name("carbocation_llama_prompt_checkpoint_clear")
+func carbocation_llama_prompt_checkpoint_clear_bridge(
+    _ checkpoint: UnsafeMutableRawPointer?
+)
+
+@_silgen_name("carbocation_llama_prompt_checkpoint_capture")
+func carbocation_llama_prompt_checkpoint_capture_bridge(
+    _ checkpoint: UnsafeMutableRawPointer?,
+    _ tokenCount: Int32
+) -> Int32
+
+@_silgen_name("carbocation_llama_prompt_checkpoint_restore")
+func carbocation_llama_prompt_checkpoint_restore_bridge(
+    _ checkpoint: UnsafeMutableRawPointer?,
+    _ tokenCount: Int32
+) -> Int32
+
+@_silgen_name("carbocation_llama_prompt_checkpoint_size")
+func carbocation_llama_prompt_checkpoint_size_bridge(
+    _ checkpoint: UnsafeMutableRawPointer?
+) -> UInt64
+
 @_silgen_name("carbocation_llama_mtp_decode_target_tokens")
 func carbocation_llama_mtp_decode_target_tokens_bridge(
     _ context: UnsafeMutableRawPointer?,
     _ tokens: UnsafePointer<llama_token>?,
     _ tokenCount: Int32,
-    _ startPosition: Int32
+    _ startPosition: Int32,
+    _ requestLastTokenLogits: Int32
 ) -> Int32
 
 @_silgen_name("carbocation_llama_mtp_decode_verification_target_tokens")

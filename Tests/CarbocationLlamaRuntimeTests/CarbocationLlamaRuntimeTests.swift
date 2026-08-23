@@ -14,6 +14,13 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(LlamaRuntimeSmoke.defaultContextBatchSize(), 0)
     }
 
+    func testDefaultConfigurationDisablesAccelerationAndUsesSingleTokenDraftWidth() {
+        let configuration = LlamaEngineConfiguration()
+
+        XCTAssertEqual(configuration.accelerationPolicy, .disabled)
+        XCTAssertEqual(configuration.mtpMaxDraftTokens, 1)
+    }
+
     func testRuntimeImportsAndLinksMTMDSymbols() {
         XCTAssertEqual(LlamaRuntimeSmoke.defaultMediaMarker(), "<__media__>")
         XCTAssertEqual(LlamaRuntimeSmoke.audioBitmapBridgeSummary(), "is_audio=true;samples=1")
@@ -330,6 +337,31 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testDisabledMTPDiagnosticDoesNotEvaluateMessage() {
+        var evaluationCount = 0
+        let disabledMessage = LlamaEngine.mtpDiagnosticMessage(
+            enabled: false,
+            makeMessage: {
+                evaluationCount += 1
+                return "disabled"
+            }
+        )
+
+        XCTAssertNil(disabledMessage)
+        XCTAssertEqual(evaluationCount, 0)
+
+        let enabledMessage = LlamaEngine.mtpDiagnosticMessage(
+            enabled: true,
+            makeMessage: {
+                evaluationCount += 1
+                return "enabled"
+            }
+        )
+
+        XCTAssertEqual(enabledMessage, "enabled")
+        XCTAssertEqual(evaluationCount, 1)
+    }
+
     func testResolvedSamplerDiagnosticsReportsGreedyRuntimeSettings() {
         let options = LLMSamplingDefaults.extractionSafe.applying(to: GenerationOptions())
         let diagnostics = LlamaEngine.resolvedSamplerDiagnostics(options: options)
@@ -589,6 +621,146 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.prefillRanges(tokenCount: 10, maxBatchSize: 0).count, 0)
     }
 
+    func testPromptPrefillChunkPlansRequestLogitsOnlyForFinalChunk() {
+        let chunks = LlamaEngine.promptPrefillChunkPlans(tokenCount: 10, maxBatchSize: 4)
+
+        XCTAssertEqual(
+            chunks.map { [$0.range.lowerBound, $0.range.upperBound] },
+            [[0, 4], [4, 8], [8, 10]]
+        )
+        XCTAssertEqual(chunks.map(\.requestsLogits), [false, false, true])
+        XCTAssertEqual(
+            LlamaEngine.promptPrefillChunkPlans(tokenCount: 4, maxBatchSize: 4)
+                .map(\.requestsLogits),
+            [true]
+        )
+        XCTAssertTrue(
+            LlamaEngine.promptPrefillChunkPlans(tokenCount: 0, maxBatchSize: 4).isEmpty
+        )
+        XCTAssertEqual(
+            LlamaEngine.promptPrefillChunkPlans(
+                tokenCount: 6,
+                maxBatchSize: 4,
+                requestsFinalLogits: false
+            ).map(\.requestsLogits),
+            [false, false]
+        )
+    }
+
+    func testPromptCheckpointAnchorUsesLastUserOccurrenceAndTemplateTrim() {
+        let rendered = "system repeated value\nuser: repeated value\nassistant:"
+        XCTAssertEqual(
+            LlamaEngine.promptCheckpointAnchorText(
+                renderedPrompt: rendered,
+                userContent: "  repeated value  "
+            ),
+            "system repeated value\nuser: repeated value"
+        )
+    }
+
+    func testPromptCheckpointBacksOffFromUserBoundaryForExtendedTemplateReuse() {
+        let oldPrompt: [Int32] = [1, 2, 3, 4, 5, 6, 20, 21, 22]
+        let userBoundary: [Int32] = [1, 2, 3, 4, 5, 6]
+        let extendedPrompt: [Int32] = [1, 2, 3, 4, 5, 6, 7, 8, 20, 21, 22]
+
+        let checkpoint = LlamaEngine.promptCheckpointTokenCount(
+            promptTokens: oldPrompt,
+            anchorTokens: userBoundary,
+            boundaryBackoff: 2
+        )
+
+        XCTAssertEqual(checkpoint, 4)
+        XCTAssertEqual(
+            LlamaEngine.commonTokenPrefixCount(
+                Array(oldPrompt.prefix(checkpoint ?? 0)),
+                extendedPrompt
+            ),
+            checkpoint
+        )
+    }
+
+    func testPromptCheckpointRetainsNearbyBoundaryForBranchReuse() {
+        XCTAssertTrue(LlamaEngine.shouldRetainPromptCheckpoint(
+            savedTokenCount: 399,
+            requestedTokenCount: 413
+        ))
+        XCTAssertTrue(LlamaEngine.shouldRetainPromptCheckpoint(
+            savedTokenCount: 413,
+            requestedTokenCount: 399
+        ))
+        XCTAssertFalse(LlamaEngine.shouldRetainPromptCheckpoint(
+            savedTokenCount: 399,
+            requestedTokenCount: 464
+        ))
+    }
+
+    func testPromptCheckpointRestoreTrimFailureRequiresFullReset() {
+        XCTAssertEqual(
+            LlamaEngine.promptCheckpointRestoreDisposition(
+                bridgeResult: 399,
+                expectedTokenCount: 399
+            ),
+            .restored
+        )
+        XCTAssertEqual(
+            LlamaEngine.promptCheckpointRestoreDisposition(
+                bridgeResult: -1,
+                expectedTokenCount: 399
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            LlamaEngine.promptCheckpointRestoreDisposition(
+                bridgeResult: -2,
+                expectedTokenCount: 399
+            ),
+            .requiresFullReset
+        )
+    }
+
+    func testPromptCacheCommitPlanIncludesOnlyDecodedResidentTokens() {
+        let sampledButNotDecodedTerminal = Int32(99)
+        let synchronized = LlamaEngine.promptCacheCommitPlan(
+            promptTokens: [1, 2],
+            decodedGeneratedTokens: [3, 4],
+            mtpSynchronized: true
+        )
+
+        XCTAssertEqual(synchronized.cachedTokens, [1, 2, 3, 4])
+        XCTAssertEqual(synchronized.mtpCachedTokens, synchronized.cachedTokens)
+        XCTAssertFalse(synchronized.cachedTokens.contains(sampledButNotDecodedTerminal))
+
+        let targetOnly = LlamaEngine.promptCacheCommitPlan(
+            promptTokens: [1, 2],
+            decodedGeneratedTokens: [3, 4],
+            mtpSynchronized: false
+        )
+        XCTAssertEqual(targetOnly.cachedTokens, synchronized.cachedTokens)
+        XCTAssertNil(targetOnly.mtpCachedTokens)
+    }
+
+    func testDecodedGeneratedTokensExtendNextPromptReusablePrefix() {
+        let committed = LlamaEngine.promptCacheCommitPlan(
+            promptTokens: [1, 2],
+            decodedGeneratedTokens: [3, 4],
+            mtpSynchronized: false
+        )
+        let reuse = LlamaEngine.promptPrefillPlan(
+            cachedPromptTokens: committed.cachedTokens,
+            newPromptTokens: [1, 2, 3, 4, 5]
+        )
+
+        XCTAssertEqual(reuse.commonPrefixCount, 4)
+        XCTAssertEqual(reuse.retainedPrefixCount, 4)
+        XCTAssertNil(reuse.removeStartPosition)
+        XCTAssertEqual(reuse.decodeStartIndex, 4)
+        XCTAssertNil(LlamaEngine.promptCheckpointRestoreTokenCount(
+            plan: reuse,
+            checkpointTokens: [1, 2],
+            newPromptTokens: [1, 2, 3, 4, 5]
+        ))
+    }
+
     func testPromptPrefillPlanReusesCommonPrefixAndRedecodesTailForLogits() {
         let partial = LlamaEngine.promptPrefillPlan(
             cachedPromptTokens: [1, 2, 3, 4],
@@ -609,6 +781,14 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(exact.shouldClearMemory)
         XCTAssertEqual(exact.removeStartPosition, 2)
         XCTAssertEqual(exact.decodeStartIndex, 2)
+        XCTAssertEqual(
+            LlamaEngine.promptCheckpointRestoreTokenCount(
+                plan: exact,
+                checkpointTokens: [1, 2],
+                newPromptTokens: [1, 2, 3]
+            ),
+            2
+        )
     }
 
     func testPromptPrefillPlanFallsBackToFullPrefillWhenNoUsablePrefixCanBeKept() {
@@ -668,6 +848,16 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             LlamaEngine.contextBatchCandidates(contextSize: 32, batchSizeLimit: 512),
             [32, 16, 8, 4, 2, 1]
         )
+        XCTAssertEqual(
+            LlamaEngine.contextBatchCandidates(contextSize: 4_096, batchSizeLimit: 2_048),
+            [512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+        )
+    }
+
+    func testGPUOffloadTreatsNegativeLayerCountAsAllLayers() {
+        XCTAssertFalse(LlamaEngine.usesGPUOffload(gpuLayerCount: 0))
+        XCTAssertTrue(LlamaEngine.usesGPUOffload(gpuLayerCount: -1))
+        XCTAssertTrue(LlamaEngine.usesGPUOffload(gpuLayerCount: 999))
     }
 
     func testCalibrationMemoryGuardrailAllowsPlausibleCandidate() {
@@ -805,26 +995,29 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(estimate.requiredBytes, estimate.budgetBytes)
     }
 
-    func testContextParamsClampBatchAndMicroBatchTogether() {
+    func testContextParamsUseDeploymentSafeMicroBatchDefault() {
         let params = LlamaEngine.contextParams(
-            contextSize: 4_096,
-            batchSize: 64,
+            contextSize: 8_192,
+            batchSize: 2_048,
             threads: 2
         )
 
-        XCTAssertEqual(params.n_ctx, 4_096)
-        XCTAssertEqual(params.n_batch, 64)
-        XCTAssertEqual(params.n_ubatch, 64)
+        XCTAssertEqual(params.n_ctx, 8_192)
+        XCTAssertEqual(params.n_batch, 2_048)
+        XCTAssertEqual(params.n_ubatch, 512)
         XCTAssertEqual(params.n_threads, 2)
         XCTAssertEqual(params.n_threads_batch, 2)
         XCTAssertEqual(params.n_rs_seq, 0)
 
         let mtpParams = LlamaEngine.contextParams(
-            contextSize: 4_096,
-            batchSize: 64,
+            contextSize: 8_192,
+            batchSize: 2_048,
+            microBatchSize: 256,
             threads: 2,
             recurrentStateSnapshots: 3
         )
+        XCTAssertEqual(mtpParams.n_batch, 2_048)
+        XCTAssertEqual(mtpParams.n_ubatch, 256)
         XCTAssertEqual(mtpParams.n_rs_seq, 3)
     }
 
@@ -2530,6 +2723,263 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(boundary?.reason, "stop-sequence")
     }
 
+    func testIncrementalUTF8AccumulatorMatchesWholeBufferDecodingAcrossSplitScalar() {
+        let expected = "A🧪B"
+        var raw = Data()
+        var incremental = IncrementalUTF8Accumulator()
+        var incrementalText = ""
+        var legacyText = ""
+
+        for byte in expected.utf8 {
+            let piece = Data([byte])
+            raw.append(piece)
+            incrementalText.append(contentsOf: incremental.append(piece))
+            if let decoded = String(data: raw, encoding: .utf8) {
+                legacyText = decoded
+            }
+
+            XCTAssertEqual(incrementalText, legacyText)
+            XCTAssertEqual(
+                incremental.isAtUTF8Boundary,
+                String(data: raw, encoding: .utf8) != nil
+            )
+        }
+
+        XCTAssertEqual(incrementalText, expected)
+    }
+
+    func testIncrementalUTF8AccumulatorFreezesAfterIrrecoverablyInvalidPrefix() {
+        var incremental = IncrementalUTF8Accumulator()
+
+        XCTAssertEqual(incremental.append(Data([0xFF])), "")
+        XCTAssertFalse(incremental.isAtUTF8Boundary)
+        XCTAssertEqual(incremental.append(Data("later".utf8)), "")
+        XCTAssertFalse(incremental.isAtUTF8Boundary)
+    }
+
+    func testIncrementalGenerationParserFindsStopSequenceAcrossPieces() {
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: ["prefix S", "T", "OP", " trailing"],
+            stopSequences: ["STOP"],
+            stopAtBalancedJSON: false
+        )
+    }
+
+    func testIncrementalGenerationParserFindsUnicodeStopAcrossGraphemeBoundary() {
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: ["prefix e", "\u{301}", " trailing"],
+            stopSequences: ["e\u{301}"],
+            stopAtBalancedJSON: false
+        )
+    }
+
+    func testIncrementalGenerationParserMatchesCanonicallyEquivalentStop() {
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: ["prefix e", "\u{301}", " trailing"],
+            stopSequences: ["é"],
+            stopAtBalancedJSON: false
+        )
+    }
+
+    func testIncrementalGenerationParserMatchesCanonicallyEquivalentPhaseDelimiters() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "é")
+        let profile = OutputSanitizationProfile(thinkingPairs: [pair])
+        let streamPlan = LlamaEngine.StreamPhasePlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let structuredPlan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(grammar: "root ::= object", triggerPatterns: [])
+        )
+
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: ["<think>draft e", "\u{301}", #"{"answer":true}"#],
+            streamPlan: streamPlan,
+            structuredPlan: structuredPlan,
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+    }
+
+    func testIncrementalGenerationParserTracksNestedBalancedJSONAndEscapes() {
+        let text = #"preamble {"items":[{"text":"brace } and quote \""},[1,2]]}"#
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: text.map(String.init),
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+    }
+
+    func testIncrementalGenerationParserMatchesStructuredThinkingAndFinalPhases() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [pair],
+            finalMarkers: ["<final>"]
+        )
+        let streamPlan = LlamaEngine.StreamPhasePlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let structuredPlan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(
+                grammar: "root ::= object",
+                triggerPatterns: LlamaEngine.lazyGrammarTriggerPatterns(
+                    profile: profile,
+                    continuingOpenThinkingPairs: []
+                )
+            )
+        )
+
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: [
+                "<thi", "nk>draft {\"ignored\":true}", "</thi", "nk>",
+                "<fi", "nal>", " ", #"{"answer":[1,{"text":"}"}]}"#
+            ],
+            streamPlan: streamPlan,
+            structuredPlan: structuredPlan,
+            stopSequences: ["</think>"],
+            stopAtBalancedJSON: true
+        )
+    }
+
+    func testTerminalBoundaryPhaseUsesTrimmedText() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let plan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        var parser = IncrementalGenerationParser(
+            streamPhasePlan: plan,
+            structuredOutputPlan: nil,
+            stopSequences: [pair.close],
+            stopAtBalancedJSON: false
+        )
+        let text = "<think>draft</think>"
+        let snapshot = parser.append(text, fullText: text)
+
+        XCTAssertEqual(snapshot.phase, .final)
+        XCTAssertEqual(snapshot.boundary?.text, "<think>draft")
+        XCTAssertEqual(
+            snapshot.boundary.map { LlamaEngine.streamContentPhase(in: $0.text, plan: plan) },
+            .thinking
+        )
+    }
+
+    func testIncrementalGenerationParserDoesNotCompleteIncompleteToolJSON() {
+        assertIncrementalGenerationParserMatchesLegacy(
+            chunks: ["prose {", "\"tool_calls\":[{", "\"name\":\"lookup\"", "}"],
+            stopSequences: [],
+            stopAtBalancedJSON: true
+        )
+    }
+
+    func testIncrementalGenerationParserMatchesLegacyAtEverySplitPoint() {
+        let pair = OutputDelimiterPair(open: "<think>", close: "</think>")
+        let profile = OutputSanitizationProfile(
+            thinkingPairs: [pair],
+            finalMarkers: ["<final>"]
+        )
+        let streamPlan = LlamaEngine.StreamPhasePlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        )
+        let structuredPlan = LlamaEngine.StructuredOutputPlan(
+            profile: profile,
+            continuingOpenThinkingPairs: [],
+            grammarMode: .lazy(grammar: "root ::= object", triggerPatterns: [])
+        )
+        let cases: [(String, LlamaEngine.StructuredOutputPlan?, [String], Bool)] = [
+            ("ordinary output STOP trailing", nil, ["STOP"], false),
+            (#"prefix {"items":[{"value":"}"}]} trailing"#, nil, [], true),
+            (#"<|tool_call>call:lookup{"query":"swift"}<tool_call|>"#, nil, [], true),
+            (#"<think>draft</think><final>{"answer":[1,2]}"#, structuredPlan, ["</think>"], true)
+        ]
+
+        for (text, plan, stops, stopsAtJSON) in cases {
+            for split in text.indicesIncludingEnd {
+                assertIncrementalGenerationParserMatchesLegacy(
+                    chunks: [String(text[..<split]), String(text[split...])],
+                    streamPlan: streamPlan,
+                    structuredPlan: plan,
+                    stopSequences: stops,
+                    stopAtBalancedJSON: stopsAtJSON
+                )
+            }
+        }
+
+        let explicitlyFinalPlan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(thinkingPairs: [pair]),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: false
+        )
+        for text in ["<think>draft</think>", "<think>one</think><think>two</think>"] {
+            for split in text.indicesIncludingEnd {
+                assertIncrementalGenerationParserMatchesLegacy(
+                    chunks: [String(text[..<split]), String(text[split...])],
+                    streamPlan: explicitlyFinalPlan,
+                    stopSequences: [],
+                    stopAtBalancedJSON: false
+                )
+            }
+        }
+    }
+
+    func testIncrementalToolStreamParserMatchesLegacyAtEverySplitPoint() {
+        let cases = [
+            #"I will check <|tool_call>call:lookup{"query":"swift"}<tool_call|> done"#,
+            #"I will check <|tool_call>call:lookup{"query":"swift"}<tool_call|> <|tool_call>call:lookup{"query":"forums"}<tool_call|> done"#,
+            #"Before {   "tool_calls":[{"function":{"name":"lookup","arguments":{"query":"swift"}}}]}"#,
+            #"Before {"tool_calls":[{"function":{"name":"lookup","arguments":{"query":"swift"}}}"#,
+            "Before {\"id\":\"\(String(repeating: "x", count: 100))\",\"name\":\"lookup\",\"arguments\":{}}",
+            "Before [{\"id\":\"\(String(repeating: "x", count: 100))\",\"name\":\"lookup\",\"arguments\":{}}]",
+            "Before <|tool_call>call:<tool_call|> after",
+            #"{"x":{"name":"lookup","arguments":{}}}"#,
+            #"{] noise {"name":"lookup","arguments":{}}"#,
+            #"{"name":"outer","arguments":{"payload":"<|tool_call>call:inner{}<tool_call|>"}}"#,
+            #"{"name":"outer","arguments":{"payload":"<|tool_call>call:<tool_call|> then <|tool_call>call:inner{}<tool_call|>"}}"#,
+            "{\"name\":123,\"payload\":\"<|tool_call>call:oops\(String(repeating: "x", count: 100))\"}",
+            #"<|tool_call>call:<tool_call|> after <|tool_call>call:lookup{}<tool_call|> done"#,
+            #"<|tool_call>call:<tool_call|> <|tool_call>call:lookup{}<tool_call|> done"#,
+            #"<|tool_call>call:inner{}<tool_call|> {"name":"outer","arguments":{}} done"#,
+            #"<|tool_call>call:outer{"name":"inner","arguments":{}}<tool_call|>"#,
+            #"<|tool_call>call:lookup{}<tool_call|>"# + String(repeating: " ", count: 200) + "done",
+            "No tool call; marker-like <|tool_no and object {  not-a-tool"
+        ]
+
+        for text in cases {
+            for split in text.indicesIncludingEnd {
+                assertIncrementalToolStreamParserMatchesLegacy(
+                    chunks: [String(text[..<split]), String(text[split...])]
+                )
+            }
+            assertIncrementalToolStreamParserMatchesLegacy(chunks: text.map(String.init))
+        }
+    }
+
+    func testToolCaptureBudgetPreservesOriginalPotentialNativeEnvelope() {
+        let prefix = "🙂 preface "
+        let malformedThenValid = prefix
+            + #"<|tool_call>call:<tool_call|> then <|tool_call>call:lookup{}<tool_call|>"#
+        XCTAssertTrue(IncrementalToolStreamParser.shouldPreserveCaptureBudget(
+            in: malformedThenValid,
+            captureStartUTF8Offset: prefix.utf8.count
+        ))
+
+        let releasedJSON = prefix + #"{"not_a_tool":true}"#
+        XCTAssertFalse(IncrementalToolStreamParser.shouldPreserveCaptureBudget(
+            in: releasedJSON,
+            captureStartUTF8Offset: prefix.utf8.count
+        ))
+    }
+
     func testFallbackPromptRejectsUnknownTemplateFamily() {
         let descriptor = LlamaModelDescriptor(
             url: URL(fileURLWithPath: "/tmp/unknown.gguf"),
@@ -2570,6 +3020,152 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 }
 
 private extension CarbocationLlamaRuntimeTests {
+    func assertIncrementalGenerationParserMatchesLegacy(
+        chunks: [String],
+        streamPlan: LlamaEngine.StreamPhasePlan = LlamaEngine.StreamPhasePlan(
+            profile: OutputSanitizationProfile(),
+            continuingOpenThinkingPairs: [],
+            startsInThinking: nil
+        ),
+        structuredPlan: LlamaEngine.StructuredOutputPlan? = nil,
+        stopSequences: [String],
+        stopAtBalancedJSON: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var parser = IncrementalGenerationParser(
+            streamPhasePlan: streamPlan,
+            structuredOutputPlan: structuredPlan,
+            stopSequences: stopSequences,
+            stopAtBalancedJSON: stopAtBalancedJSON
+        )
+        var text = ""
+
+        for chunk in chunks {
+            text.append(contentsOf: chunk)
+            let snapshot = parser.append(chunk, fullText: text)
+            let expectedBoundary = if let structuredPlan {
+                LlamaEngine.firstStructuredGenerationBoundary(
+                    in: text,
+                    stopSequences: stopSequences,
+                    stopAtBalancedJSON: stopAtBalancedJSON,
+                    plan: structuredPlan
+                )
+            } else {
+                LlamaEngine.firstGenerationBoundary(
+                    in: text,
+                    stopSequences: stopSequences,
+                    stopAtBalancedJSON: stopAtBalancedJSON
+                )
+            }
+
+            XCTAssertEqual(
+                snapshot.phase,
+                LlamaEngine.streamContentPhase(in: text, plan: streamPlan),
+                "Phase mismatch after appending \(String(reflecting: chunk))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.structuredPhase,
+                structuredPlan.map { LlamaEngine.structuredOutputPhase(in: text, plan: $0) },
+                "Structured phase mismatch after appending \(String(reflecting: chunk))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.boundary,
+                expectedBoundary,
+                "Boundary mismatch after appending \(String(reflecting: chunk))",
+                file: file,
+                line: line
+            )
+
+            if expectedBoundary != nil { break }
+        }
+    }
+
+    func assertIncrementalToolStreamParserMatchesLegacy(
+        chunks: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var parser = IncrementalToolStreamParser()
+        var text = ""
+
+        for chunk in chunks {
+            text.append(contentsOf: chunk)
+            let snapshot = parser.append(chunk, fullText: text)
+            let expectedCapture = LlamaToolStreamInterpreter.startedToolCall(in: text)
+            let expectedVisible = LlamaToolStreamInterpreter.visibleRawPrefix(in: text)
+            let expectedCompleted = LlamaToolStreamInterpreter.completedToolCallForStreaming(in: text)
+            let expectedPending = LlamaToolStreamInterpreter.pendingNativeToolCallBatch(in: text)
+
+            XCTAssertEqual(
+                snapshot.captureStartUTF8Offset,
+                expectedCapture.map {
+                    text.utf8.distance(
+                        from: text.utf8.startIndex,
+                        to: $0.range.lowerBound.samePosition(in: text.utf8)!
+                    )
+                },
+                "Capture mismatch after appending \(String(reflecting: chunk)) to \(String(reflecting: text))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.visiblePrefixUTF8Count,
+                expectedVisible.utf8.count,
+                "Visible prefix mismatch after appending \(String(reflecting: chunk)) to \(String(reflecting: text))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.completed?.utf8Range,
+                expectedCompleted.map { utf8Offsets(of: $0.range, in: text) },
+                "Completed range mismatch after appending \(String(reflecting: chunk)) to \(String(reflecting: text))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.completed?.calls.map(\.name),
+                expectedCompleted?.calls.map(\.name),
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.pendingNative?.utf8Range,
+                expectedPending.map { utf8Offsets(of: $0.range, in: text) },
+                "Pending range mismatch after appending \(String(reflecting: chunk)) to \(String(reflecting: text))",
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(
+                snapshot.pendingNative?.calls.map(\.name),
+                expectedPending?.calls.map(\.name),
+                file: file,
+                line: line
+            )
+
+            if expectedCompleted != nil { break }
+        }
+    }
+
+    func utf8Offsets(
+        of range: Range<String.Index>,
+        in text: String
+    ) -> Range<Int> {
+        let lower = text.utf8.distance(
+            from: text.utf8.startIndex,
+            to: range.lowerBound.samePosition(in: text.utf8)!
+        )
+        let upper = text.utf8.distance(
+            from: text.utf8.startIndex,
+            to: range.upperBound.samePosition(in: text.utf8)!
+        )
+        return lower..<upper
+    }
+
     func makeAACEncodedAudioData(fileExtension: String, duration: TimeInterval) throws -> Data {
         let sampleRate = 44_100.0
         let frameCount = AVAudioFrameCount((duration * sampleRate).rounded(.up))
@@ -2690,6 +3286,12 @@ private extension Array where Element == LLMGenerationStreamEvent {
                 break
             }
         }
+    }
+}
+
+private extension String {
+    var indicesIncludingEnd: [String.Index] {
+        Array(indices) + [endIndex]
     }
 }
 

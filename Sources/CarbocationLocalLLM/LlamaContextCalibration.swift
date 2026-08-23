@@ -197,11 +197,10 @@ public struct LlamaContextCalibrationSearchResult: Hashable, Sendable {
 }
 
 public enum LlamaContextCalibrationAlgorithm {
-    // v7: the decode probe now stands up the same MTP draft context the live
-    // chat runtime builds and prefills a full micro-batch (synchronizing to
-    // surface asynchronous Metal command-buffer OOMs), so it reproduces the
-    // GPU-memory failures real chat hits instead of only allocating contexts.
-    public static let version = 7
+    // v8: logical prompt batches are decoupled from physical micro-batches.
+    // Context initialization and calibration now retain the requested logical
+    // batch while falling back through deployment-safe micro-batch sizes.
+    public static let version = 8
 
     public static func powerOfTwoTiers(
         upTo upperBound: Int,

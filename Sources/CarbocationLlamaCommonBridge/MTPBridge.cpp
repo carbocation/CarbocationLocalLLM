@@ -10,8 +10,16 @@
 namespace {
 
 constexpr llama_seq_id sequence_id = 0;
-constexpr llama_state_seq_flags checkpoint_flags =
+constexpr llama_state_seq_flags ephemeral_checkpoint_flags =
     LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+constexpr llama_state_seq_flags prompt_checkpoint_flags =
+    LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+
+struct carbocation_llama_prompt_checkpoint_impl {
+    llama_context * context = nullptr;
+    common_prompt_checkpoint saved;
+    bool active = false;
+};
 
 void clear_batch(llama_batch & batch) {
     batch.n_tokens = 0;
@@ -64,6 +72,16 @@ carbocation_llama_mtp_context_impl * mtp_context(void * context) {
     return static_cast<carbocation_llama_mtp_context_impl *>(context);
 }
 
+carbocation_llama_prompt_checkpoint_impl * prompt_checkpoint(void * checkpoint) {
+    return static_cast<carbocation_llama_prompt_checkpoint_impl *>(checkpoint);
+}
+
+bool model_uses_recurrent_memory(const llama_context * context) {
+    const llama_model * model = context == nullptr ? nullptr : llama_get_model(context);
+    return model != nullptr &&
+        (llama_model_is_recurrent(model) || llama_model_is_hybrid(model));
+}
+
 bool rollback_draft(carbocation_llama_mtp_context_impl * context, int32_t start_position) {
     if (context == nullptr || context->draft_context == nullptr) {
         return false;
@@ -76,7 +94,7 @@ bool rollback_draft(carbocation_llama_mtp_context_impl * context, int32_t start_
         context->draft_rollback_checkpoint.load_dft(
             context->draft_context,
             sequence_id,
-            checkpoint_flags
+            ephemeral_checkpoint_flags
         );
     }
 
@@ -132,6 +150,7 @@ int32_t decode_target_tokens(
     int32_t token_count,
     int32_t start_position,
     bool logits_for_all_tokens,
+    bool request_last_token_logits,
     bool process_speculative
 ) {
     if (context == nullptr || tokens == nullptr || token_count < 0) {
@@ -169,14 +188,14 @@ int32_t decode_target_tokens(
             context->verification_checkpoint.update_tgt(
                 context->target_context,
                 sequence_id,
-                checkpoint_flags
+                ephemeral_checkpoint_flags
             );
         }
         if (needs_draft_checkpoint) {
             context->verification_checkpoint.update_dft(
                 context->draft_context,
                 sequence_id,
-                checkpoint_flags
+                ephemeral_checkpoint_flags
             );
         }
         context->verification_checkpoint_active =
@@ -193,7 +212,7 @@ int32_t decode_target_tokens(
             context->target_batch_capacity,
             tokens[index],
             start_position + index,
-            (logits_for_all_tokens || index == token_count - 1) ? 1 : 0
+            (logits_for_all_tokens || (request_last_token_logits && index == token_count - 1)) ? 1 : 0
         );
         if (!added) {
             return -2;
@@ -281,6 +300,98 @@ int32_t process_last_target_batch(carbocation_llama_mtp_context_impl * context) 
 
 } // namespace
 
+extern "C" void * carbocation_llama_prompt_checkpoint_create(llama_context * context) {
+    if (context == nullptr || !model_uses_recurrent_memory(context)) {
+        return nullptr;
+    }
+
+    auto * checkpoint = new carbocation_llama_prompt_checkpoint_impl();
+    checkpoint->context = context;
+    return checkpoint;
+}
+
+extern "C" void carbocation_llama_prompt_checkpoint_free(void * opaque_checkpoint) {
+    delete prompt_checkpoint(opaque_checkpoint);
+}
+
+extern "C" void carbocation_llama_prompt_checkpoint_clear(void * opaque_checkpoint) {
+    auto * checkpoint = prompt_checkpoint(opaque_checkpoint);
+    if (checkpoint == nullptr) {
+        return;
+    }
+    checkpoint->saved.clear();
+    checkpoint->active = false;
+}
+
+extern "C" int32_t carbocation_llama_prompt_checkpoint_capture(
+    void * opaque_checkpoint,
+    int32_t token_count
+) {
+    auto * checkpoint = prompt_checkpoint(opaque_checkpoint);
+    if (checkpoint == nullptr || checkpoint->context == nullptr || token_count <= 0) {
+        return 0;
+    }
+
+    const llama_pos pos_min = llama_memory_seq_pos_min(
+        llama_get_memory(checkpoint->context),
+        sequence_id
+    );
+    const llama_pos pos_max = llama_memory_seq_pos_max(
+        llama_get_memory(checkpoint->context),
+        sequence_id
+    );
+    if (pos_min < 0 || pos_max < 0) {
+        return 0;
+    }
+
+    checkpoint->saved.clear();
+    checkpoint->active = false;
+    checkpoint->saved.update_pos(token_count, pos_min, pos_max);
+    checkpoint->saved.update_tgt(checkpoint->context, sequence_id, prompt_checkpoint_flags);
+    if (checkpoint->saved.data_tgt.empty()) {
+        checkpoint->saved.clear();
+        return 0;
+    }
+    checkpoint->active = true;
+    return 1;
+}
+
+extern "C" int32_t carbocation_llama_prompt_checkpoint_restore(
+    void * opaque_checkpoint,
+    int32_t token_count
+) {
+    auto * checkpoint = prompt_checkpoint(opaque_checkpoint);
+    if (checkpoint == nullptr || checkpoint->context == nullptr) {
+        return -1;
+    }
+    const auto & saved = checkpoint->saved;
+    if (!checkpoint->active || saved.data_tgt.empty() ||
+        saved.n_tokens <= 0 || saved.n_tokens != token_count) {
+        return -1;
+    }
+
+    saved.load_tgt(checkpoint->context, sequence_id, prompt_checkpoint_flags);
+    const llama_pos restore_position = saved.pos_max + 1;
+    const bool removed = llama_memory_seq_rm(
+        llama_get_memory(checkpoint->context),
+        sequence_id,
+        restore_position,
+        -1
+    );
+    // The recurrent state has already been loaded at this point. Distinguish a
+    // failed trailing-memory trim from an unavailable checkpoint so callers do
+    // not attempt ordinary rollback on a partially restored context.
+    return removed ? static_cast<int32_t>(saved.n_tokens) : -2;
+}
+
+extern "C" uint64_t carbocation_llama_prompt_checkpoint_size(void * opaque_checkpoint) {
+    const auto * checkpoint = prompt_checkpoint(opaque_checkpoint);
+    if (checkpoint == nullptr || !checkpoint->active) {
+        return 0;
+    }
+    return static_cast<uint64_t>(checkpoint->saved.size());
+}
+
 extern "C" void * carbocation_llama_mtp_create(
     llama_model * model,
     llama_context * target_context,
@@ -297,7 +408,7 @@ extern "C" void * carbocation_llama_mtp_create(
     llama_context_params draft_context_params = llama_context_default_params();
     draft_context_params.n_ctx = context_size;
     draft_context_params.n_batch = batch_size;
-    draft_context_params.n_ubatch = batch_size;
+    draft_context_params.n_ubatch = llama_n_ubatch(target_context);
     draft_context_params.n_threads = thread_count;
     draft_context_params.n_threads_batch = thread_count;
     draft_context_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
@@ -378,7 +489,8 @@ extern "C" int32_t carbocation_llama_mtp_decode_target_tokens(
     void * opaque_context,
     const llama_token * tokens,
     int32_t token_count,
-    int32_t start_position
+    int32_t start_position,
+    int32_t request_last_token_logits
 ) {
     return decode_target_tokens(
         mtp_context(opaque_context),
@@ -386,6 +498,7 @@ extern "C" int32_t carbocation_llama_mtp_decode_target_tokens(
         token_count,
         start_position,
         false,
+        request_last_token_logits != 0,
         true
     );
 }
@@ -401,6 +514,7 @@ extern "C" int32_t carbocation_llama_mtp_decode_verification_target_tokens(
         tokens,
         token_count,
         start_position,
+        true,
         true,
         false
     );
@@ -420,14 +534,14 @@ extern "C" int32_t carbocation_llama_mtp_restore_verification_checkpoint(void * 
         context->verification_checkpoint.load_tgt(
             context->target_context,
             sequence_id,
-            checkpoint_flags
+            ephemeral_checkpoint_flags
         );
     }
     if (!context->verification_checkpoint.data_dft.empty()) {
         context->verification_checkpoint.load_dft(
             context->draft_context,
             sequence_id,
-            checkpoint_flags
+            ephemeral_checkpoint_flags
         );
     }
 
@@ -489,7 +603,7 @@ extern "C" int32_t carbocation_llama_mtp_draft(
         context->draft_rollback_checkpoint.update_dft(
             context->draft_context,
             sequence_id,
-            checkpoint_flags
+            ephemeral_checkpoint_flags
         );
         context->draft_rollback_checkpoint_active = true;
     }

@@ -247,7 +247,7 @@ let response = try await LocalLLMEngine.shared.generate(
 
 `GenerationOptions` is a shared request surface, not a guarantee that every backend can apply every knob. llama.cpp-backed GGUF models support the sampler chain used by the package. Apple Intelligence exposes a narrower sampling API: GBNF grammars, min-p, non-neutral presence/repetition penalties, and combined top-k plus top-p filtering are reported as unsupported options. Token counts for Apple Intelligence are estimates rather than exact. Check `LocalLLMEngine.loadPlan(from:in:)`, `LocalLLMEngine.capabilities(for:in:)`, or the `LocalLLMLoadedModelInfo` returned by `load` before exposing provider-specific controls.
 
-MTP/speculative decoding is automatic for GGUF models that advertise the required `*.nextn_predict_layers` metadata, such as appropriately converted Gemma 4 MTP weights. App code does not need to pass a per-request option: `LocalLLMEngineConfiguration.accelerationPolicy` and `LlamaEngineConfiguration.accelerationPolicy` default to `.automatic`, and loaded-model capabilities expose `supportsMTPAcceleration` for UI or diagnostics. To disable this runtime acceleration, initialize the engine with `accelerationPolicy: .disabled`. MTP is not used for tool-aware generation, generation-control interrupts, or lazy structured-output grammar; eager grammar-constrained generation can still use the same sampler path.
+MTP/speculative decoding is available for GGUF models that advertise the required `*.nextn_predict_layers` metadata. It is opt-in because its throughput depends on the model, quantization, hardware, prompt, and draft width: `LocalLLMEngineConfiguration.accelerationPolicy` and `LlamaEngineConfiguration.accelerationPolicy` default to `.disabled`. Initialize the engine with `accelerationPolicy: .automatic` to enable MTP for compatible models, and use the loaded-model `supportsMTPAcceleration` capability for UI or diagnostics. Multimodal prompt prefill uses standard decoding instead.
 
 ### Use tools
 
@@ -792,6 +792,27 @@ Vendor/llama-artifacts/current/include/
 Both paths are gitignored. The script uses a build lock so concurrent app builds do not corrupt shared artifacts.
 
 For CI or a universal local build, omit `ARCHS=arm64`; the script defaults to `arm64 x86_64`.
+
+### Benchmark local llama inference
+
+Use the opt-in benchmark command with a GGUF model supplied by path. Run it in Release mode and outside a debugger so compiler and debugger overhead do not distort the measurements:
+
+```sh
+CLLM_BENCHMARK_MODEL_PATH=/absolute/path/to/model.gguf \
+  swift run -c release CLLMBenchmarkCommand
+```
+
+You can also pass the model path directly and emit a machine-readable report:
+
+```sh
+swift run -c release CLLMBenchmarkCommand \
+  --model /absolute/path/to/model.gguf \
+  --json > benchmark.json
+```
+
+One invocation loads the model once, then measures cold-prefix, warm-exact-prefix, and warm-extended-prefix requests. The report separates model load, prompt preflight, time to first token, and total request duration; it also includes the requested batch limit, effective llama.cpp `n_batch` and `n_ubatch`, prompt/generated token counts, a derived post-first-token rate, and MTP draft/acceptance statistics when enabled. MTP is disabled by default; pass `--enable-mtp` to measure it and `--mtp-max-draft N` to select a draft width. The derived rate uses public stream events and is not llama.cpp's internal decode timing.
+
+The command has no pass/fail thresholds and is never run by `swift test`. For useful comparisons, keep the model, build, prompt, hardware, and system load fixed, and repeat each configuration. Run `swift run -c release CLLMBenchmarkCommand --help` for controls including `--gpu-layers`, `--batch-size`, `--threads`, `--enable-mtp`, `--disable-mtp`, and `--mtp-max-draft`.
 
 ### Use a local binary artifact
 

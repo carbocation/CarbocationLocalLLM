@@ -29,10 +29,14 @@ private struct DemoRootView: View {
                     title: CLLMDemoMetadata.displayName,
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
+                    onModelDeleted: { model in
+                        state.modelDeleted(model)
+                    },
                     onConfirmSelection: { selection in
                         state.select(selection)
                     }
                 )
+                .disabled(state.isRunning)
                 .navigationTitle("Models")
                 .demoNavigationTitleDisplayModeInline()
             }

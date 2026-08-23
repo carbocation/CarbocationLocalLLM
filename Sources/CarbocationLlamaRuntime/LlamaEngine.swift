@@ -43,7 +43,7 @@ public struct LlamaEngineConfiguration: Hashable, Sendable {
         threadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
-        accelerationPolicy: LLMAccelerationPolicy = .automatic,
+        accelerationPolicy: LLMAccelerationPolicy = .disabled,
         mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens,
         emitsMTPDiagnostics: Bool = false
     ) {
@@ -112,6 +112,8 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
     public var supportedInputModalities: Set<LLMInputModality>
     public var architecture: String?
     public var nextNPredictLayers: Int?
+    public var logicalBatchSize: Int?
+    public var physicalMicroBatchSize: Int?
 
     public init(
         modelID: UUID?,
@@ -125,7 +127,9 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         supportsMTPAcceleration: Bool = false,
         supportedInputModalities: Set<LLMInputModality> = [.text],
         architecture: String? = nil,
-        nextNPredictLayers: Int? = nil
+        nextNPredictLayers: Int? = nil,
+        logicalBatchSize: Int? = nil,
+        physicalMicroBatchSize: Int? = nil
     ) {
         self.modelID = modelID
         self.modelPath = modelPath
@@ -139,6 +143,8 @@ public struct LlamaLoadedModelInfo: Hashable, Sendable {
         self.supportedInputModalities = supportedInputModalities
         self.architecture = architecture
         self.nextNPredictLayers = nextNPredictLayers
+        self.logicalBatchSize = logicalBatchSize
+        self.physicalMicroBatchSize = physicalMicroBatchSize
     }
 
     public var supportsVision: Bool {
@@ -229,6 +235,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         var text: String
         var mode: LLMChatTemplateMode
         var outputProfile: OutputSanitizationProfile
+        var checkpointAnchorText: String? = nil
     }
 
     struct ToolAwareGenerationSegmentOverrideInput: Sendable {
@@ -285,6 +292,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     var mtmdContext: UnsafeMutableRawPointer?
     var visionProjectorUnsupportedDetail: String?
     var mtpCachedPromptTokens: [llama_token]?
+    var promptCheckpoint: UnsafeMutableRawPointer?
+    var promptCheckpointTokens: [llama_token]?
     var loadedDescriptor: LlamaModelDescriptor?
     var loadedInfo: LlamaLoadedModelInfo?
     var chatTemplate: String?
@@ -302,6 +311,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     deinit {
         if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
+        if let promptCheckpoint { carbocation_llama_prompt_checkpoint_free_bridge(promptCheckpoint) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
@@ -359,6 +369,14 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             return .runtimeUnavailable
         }
         return .active
+    }
+
+    static func mtpDiagnosticMessage(
+        enabled: Bool,
+        makeMessage: () -> String
+    ) -> String? {
+        guard enabled else { return nil }
+        return makeMessage()
     }
 
     struct MTPAccelerationRuntime {
@@ -569,7 +587,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         modelParams.n_gpu_layers = configuration.gpuLayerCount
         modelParams.configureLoadMode(useMemoryMap: configuration.useMemoryMap)
         modelParams.load_mtp = shouldPrepareMTPAcceleration
-        if configuration.gpuLayerCount <= 0 {
+        if !Self.usesGPUOffload(gpuLayerCount: configuration.gpuLayerCount) {
             modelParams.configureForCPUOnly()
         }
 
@@ -588,35 +606,38 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         let threads = configuration.threadCount
             ?? Int32(max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
 
-        let batchCandidates = Self.contextBatchCandidates(
+        let logicalBatchSize = min(
+            max(1, chosenContext),
+            max(1, configuration.batchSizeLimit)
+        )
+        let microBatchCandidates = Self.contextBatchCandidates(
             contextSize: chosenContext,
             batchSizeLimit: configuration.batchSizeLimit
         )
         let requestedMTPDraftTokens = Self.clampedMTPMaxDraftTokens(configuration.mtpMaxDraftTokens)
         let maxMTPDraftTokens = Self.effectiveMTPMaxDraftTokens(requested: requestedMTPDraftTokens)
-        var attemptedBatchSizes: [Int] = []
+        var attemptedMicroBatchSizes: [Int] = []
         var initializedContext: OpaquePointer?
-        var initializedBatchSize: Int?
-        for batchSize in batchCandidates {
-            attemptedBatchSizes.append(batchSize)
+        for microBatchSize in microBatchCandidates {
+            attemptedMicroBatchSizes.append(microBatchSize)
             let contextParams = Self.contextParams(
                 contextSize: chosenContext,
-                batchSize: batchSize,
+                batchSize: logicalBatchSize,
+                microBatchSize: microBatchSize,
                 threads: threads,
                 recurrentStateSnapshots: shouldPrepareMTPAcceleration ? maxMTPDraftTokens : 0
             )
             if let context = llama_init_from_model(loadedModel, contextParams) {
                 initializedContext = context
-                initializedBatchSize = batchSize
                 break
             }
         }
 
         guard let loadedContext = initializedContext else {
             llama_model_free(loadedModel)
-            let attempted = attemptedBatchSizes.map(String.init).joined(separator: ", ")
+            let attempted = attemptedMicroBatchSizes.map(String.init).joined(separator: ", ")
             throw LLMEngineError.contextInitFailed(
-                "llama_init_from_model returned null (context=\(chosenContext), attempted batch sizes: \(attempted))"
+                "llama_init_from_model returned null (context=\(chosenContext), logical batch=\(logicalBatchSize), attempted micro-batch sizes: \(attempted))"
             )
         }
 
@@ -632,7 +653,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             mmprojURL: descriptor.mmprojURL,
             model: loadedModel,
             threads: threads,
-            useGPU: configuration.gpuLayerCount > 0
+            useGPU: Self.usesGPUOffload(gpuLayerCount: configuration.gpuLayerCount)
         )
         let info = LlamaLoadedModelInfo(
             modelID: descriptor.id,
@@ -646,15 +667,17 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             supportsMTPAcceleration: supportsMTPAcceleration,
             supportedInputModalities: loadedMultimodalProjector.supportedInputModalities,
             architecture: ggufMetadata.architecture,
-            nextNPredictLayers: ggufMetadata.nextNPredictLayers
+            nextNPredictLayers: ggufMetadata.nextNPredictLayers,
+            logicalBatchSize: Int(llama_n_batch(loadedContext)),
+            physicalMicroBatchSize: Int(llama_n_ubatch(loadedContext))
         )
         let loadedMTPContext: UnsafeMutableRawPointer?
-        if shouldPrepareMTPAcceleration, let initializedBatchSize {
+        if shouldPrepareMTPAcceleration {
             loadedMTPContext = carbocation_llama_mtp_create_bridge(
                 loadedModel,
                 loadedContext,
                 UInt32(chosenContext),
-                UInt32(initializedBatchSize),
+                UInt32(logicalBatchSize),
                 threads,
                 Int32(maxMTPDraftTokens),
                 0
@@ -667,10 +690,14 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         } else {
             loadedMTPContext = nil
         }
+        let loadedPromptCheckpoint = loadedMTPContext == nil
+            ? carbocation_llama_prompt_checkpoint_create_bridge(loadedContext)
+            : nil
 
         self.model = loadedModel
         self.context = loadedContext
         self.mtpContext = loadedMTPContext
+        self.promptCheckpoint = loadedPromptCheckpoint
         self.mtmdContext = loadedMultimodalProjector.context
         self.visionProjectorUnsupportedDetail = loadedMultimodalProjector.unsupportedDetail
         self.vocabulary = loadedVocabulary
@@ -745,6 +772,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.model = loadedModel
         self.context = nil
         self.mtpContext = nil
+        self.promptCheckpoint = nil
         self.mtmdContext = nil
         self.visionProjectorUnsupportedDetail = nil
         self.vocabulary = loadedVocabulary
@@ -793,7 +821,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     }
 
     private func performUnload() {
+        clearPromptCaches()
         if let mtmdContext { carbocation_mtmd_free_bridge(mtmdContext) }
+        if let promptCheckpoint { carbocation_llama_prompt_checkpoint_free_bridge(promptCheckpoint) }
         if let mtpContext { carbocation_llama_mtp_free_bridge(mtpContext) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
@@ -802,6 +832,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.model = nil
         self.context = nil
         self.mtpContext = nil
+        self.promptCheckpoint = nil
         self.mtmdContext = nil
         self.visionProjectorUnsupportedDetail = nil
         self.vocabulary = nil
@@ -810,7 +841,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.chatTemplate = nil
         self.preparedChatTemplate = nil
         self.outputSanitizationProfile = .empty
-        clearPromptCaches()
     }
 
     public func generate(
@@ -1062,6 +1092,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
             throw LLMEngineError.imageTokenizationFailed("mtmd produced no prompt tokens.")
         }
+        let promptCheckpointTokenCount = multimodalPrefill == nil
+            ? self.promptCheckpointTokenCount(
+                promptFormatting: promptFormatting,
+                promptTokens: promptTokens,
+                vocab: vocabulary
+            )
+            : nil
         guard promptPositionCount < currentContextSize() else {
             if multimodalPrefill == nil {
                 throw LLMEngineError.insufficientGenerationBudget(
@@ -1143,12 +1180,18 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                 batchSize: Int32(max(1, llama_n_batch(context)))
             )
         } else {
-            try preparePromptContext(promptTokens, context: context, mtpContext: activeMTPContext)
+            try preparePromptContext(
+                promptTokens,
+                context: context,
+                mtpContext: activeMTPContext,
+                checkpointTokenCount: promptCheckpointTokenCount
+            )
         }
         promptContextPrepared = true
 
         var accumulatedData = Data()
         var accumulatedText = ""
+        var incrementalUTF8 = IncrementalUTF8Accumulator()
         var reasoningBudgetExhaustionLogged = false
         func logReasoningBudgetExhaustionIfNeeded(
             state: carbocation_llama_reasoning_budget_state,
@@ -1286,6 +1329,12 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             options.stopSequences,
             activeOutputProfile.extraStopStrings
         )
+        var incrementalParser = IncrementalGenerationParser(
+            streamPhasePlan: streamPhasePlan,
+            structuredOutputPlan: structuredOutputPlan,
+            stopSequences: effectiveStopSequences,
+            stopAtBalancedJSON: options.stopAtBalancedJSON
+        )
 
         let tokenDiagnosticsEnabled = configuration.emitsMTPDiagnostics
         func emitTokenDiagnostic(
@@ -1327,10 +1376,12 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             let piece = rawPiece.isEmpty
                 ? tokenToPiece(vocab: vocabulary, token: token, special: true)
                 : rawPiece
+            var appendedText = ""
             if !piece.isEmpty {
                 accumulatedData.append(piece)
-                if let decoded = String(data: accumulatedData, encoding: .utf8) {
-                    accumulatedText = decoded
+                appendedText = incrementalUTF8.append(piece)
+                if !appendedText.isEmpty {
+                    accumulatedText.append(contentsOf: appendedText)
                 }
             }
 
@@ -1342,43 +1393,35 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
 
             if !piece.isEmpty {
-                if let plan = structuredOutputPlan {
-                    let nextPhase = Self.structuredOutputPhase(in: accumulatedText, plan: plan)
-                    if nextPhase != structuredPhase {
-                        structuredPhase = nextPhase
+                let snapshot = incrementalParser.append(
+                    appendedText,
+                    fullText: accumulatedText
+                )
+                if snapshot.structuredPhase != structuredPhase {
+                    structuredPhase = snapshot.structuredPhase
+                    if let nextPhase = snapshot.structuredPhase {
                         llamaRuntimeLog.info(
                             "Structured output phase changed: phase=\(nextPhase.rawValue, privacy: .public) rawBytes=\(accumulatedData.count, privacy: .public)"
                         )
                     }
                 }
 
-                let boundary = if let plan = structuredOutputPlan {
-                    Self.firstStructuredGenerationBoundary(
-                        in: accumulatedText,
-                        stopSequences: effectiveStopSequences,
-                        stopAtBalancedJSON: options.stopAtBalancedJSON,
-                        plan: plan
-                    )
-                } else {
-                    Self.firstGenerationBoundary(
-                        in: accumulatedText,
-                        stopSequences: effectiveStopSequences,
-                        stopAtBalancedJSON: options.stopAtBalancedJSON
-                    )
-                }
-
+                let boundary = snapshot.boundary
                 if let boundary {
                     accumulatedText = boundary.text
                     stopReason = boundary.reason
                 }
 
-                updatePhase(Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
+                updatePhase(boundary == nil
+                    ? snapshot.phase
+                    : Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
                     emitThinkingProgressIfNeeded()
                     emitFinalAnswerProgressIfNeeded()
                     if stopReason == "json-complete", structuredOutputPlan != nil {
+                        incrementalParser.markStructuredOutputComplete()
                         structuredPhase = .complete
                     }
                     return false
@@ -1455,21 +1498,23 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         var generatedTokenHistory: [llama_token] = []
 
         func sampleTargetToken(at index: Int32) -> llama_token {
-            llama_synchronize(context)
             return llama_sampler_sample(sampler, context, index)
         }
 
         let mtpDiagnosticsEnabled = configuration.emitsMTPDiagnostics
             && activeMTPContext != nil
             && maxMTPDraftTokens > 2
-        func emitMTPDiagnostic(_ message: String) {
-            guard mtpDiagnosticsEnabled else { return }
+        func emitMTPDiagnostic(_ message: @autoclosure () -> String) {
+            guard let message = Self.mtpDiagnosticMessage(
+                enabled: mtpDiagnosticsEnabled,
+                makeMessage: message
+            ) else { return }
             onPhaseAwareEvent(.diagnostic(message: "mtp-diagnostic \(message)"))
         }
 
         while generatedTokenCount < maxNew {
             try Task.checkCancellation()
-            if accumulatedData.isEmpty || String(data: accumulatedData, encoding: .utf8) != nil {
+            if accumulatedData.isEmpty || incrementalUTF8.isAtUTF8Boundary {
                 applyThinkingTerminationIfRequested(
                     control: control,
                     generationID: controlGenerationID,
@@ -1518,7 +1563,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                 var draftCallIndex: Int?
                 let draftTokens: [llama_token]
                 if draftLimit > 0 {
-                    draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
+                    if mtpDiagnosticsEnabled {
+                        draftCallIndex = (accelerationStats?.draftCalls ?? 0) + 1
+                    }
                     var draftBuffer = [llama_token](repeating: 0, count: draftLimit)
                     let draftCount = draftBuffer.withUnsafeMutableBufferPointer { buffer in
                         carbocation_llama_mtp_draft_bridge(
@@ -1562,7 +1609,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                     }
                     try processLastMTPVerificationBatch(mtpContext: activeMTPContext)
                 } else {
-                    let verificationPrefixTokens = promptTokens + generatedTokenHistory
                     let verificationTokens = [next] + draftTokens
                     try decodeMTPVerificationTargetTokens(
                         verificationTokens,
@@ -1572,10 +1618,10 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
                     var correctionToken: llama_token?
                     var correctionReasoningBudgetState: carbocation_llama_reasoning_budget_state?
-                    var verifierSamples: [llama_token] = []
+                    var verifierSamples: [llama_token]? = mtpDiagnosticsEnabled ? [] : nil
                     for (verifierIndex, draftToken) in draftTokens.enumerated() {
                         let sampled = sampleTargetToken(at: Int32(verifierIndex))
-                        verifierSamples.append(sampled)
+                        verifierSamples?.append(sampled)
                         let acceptedReasoningBudgetState = samplerRuntime.reasoningBudgetSampler.map {
                             carbocation_llama_reasoning_budget_sampler_state($0)
                         }
@@ -1632,27 +1678,32 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                                 )
                             }
                         }
-                        if let command = diagnosticBatchEquivalenceCommand(
-                            modelPath: loadedInfo?.modelPath,
-                            prefixTokens: verificationPrefixTokens,
-                            windowTokens: verificationTokens,
-                            recurrentStateSnapshots: maxMTPDraftTokens,
-                            samplerPrefixSkip: promptTokens.count
-                        ) {
-                            emitMTPDiagnostic("repro-command \(command)")
+                        if mtpDiagnosticsEnabled {
+                            let verificationPrefixTokens = promptTokens + generatedTokenHistory
+                            if let command = diagnosticBatchEquivalenceCommand(
+                                modelPath: loadedInfo?.modelPath,
+                                prefixTokens: verificationPrefixTokens,
+                                windowTokens: verificationTokens,
+                                recurrentStateSnapshots: maxMTPDraftTokens,
+                                samplerPrefixSkip: promptTokens.count
+                            ) {
+                                emitMTPDiagnostic("repro-command \(command)")
+                            }
+                            emitMTPDiagnostic(
+                                "repro call=\(draftCallIndex ?? 0) pos=\(tokenPosition) prefix-token-count=\(verificationPrefixTokens.count) prefix-token-ids=\(diagnosticTokenIDList(verificationPrefixTokens)) window-token-ids=\(diagnosticTokenIDList(verificationTokens))"
+                            )
+                            emitMTPDiagnostic(
+                                "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples ?? [], vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                            )
                         }
-                        emitMTPDiagnostic(
-                            "repro call=\(draftCallIndex ?? 0) pos=\(tokenPosition) prefix-token-count=\(verificationPrefixTokens.count) prefix-token-ids=\(diagnosticTokenIDList(verificationPrefixTokens)) window-token-ids=\(diagnosticTokenIDList(verificationTokens))"
-                        )
-                        emitMTPDiagnostic(
-                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=\(emittedAcceptedDraftCount)/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) correction=\(correctionToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
-                        )
                     } else {
                         var prefetchedDiagnosticToken: llama_token?
                         if shouldContinue,
                            generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount < maxNew {
                             let sampledPrefetch = sampleTargetToken(at: Int32(draftTokens.count))
-                            prefetchedDiagnosticToken = sampledPrefetch
+                            if mtpDiagnosticsEnabled {
+                                prefetchedDiagnosticToken = sampledPrefetch
+                            }
                             pendingNextToken = PendingMTPToken(
                                 token: sampledPrefetch,
                                 reasoningBudgetState: samplerRuntime.reasoningBudgetSampler.map {
@@ -1670,7 +1721,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                             Int32(emittedAcceptedDraftCount)
                         )
                         emitMTPDiagnostic(
-                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples, vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
+                            "verify call=\(draftCallIndex ?? 0) pos=\(tokenPosition) accepted=full/\(draftTokens.count) draft=\(diagnosticTokenList(draftTokens, vocab: vocabulary)) sampled=\(diagnosticTokenList(verifierSamples ?? [], vocab: vocabulary)) prefetch=\(prefetchedDiagnosticToken.map { diagnosticTokenDescription($0, vocab: vocabulary) } ?? "none")"
                         )
                     }
                 }
@@ -1757,7 +1808,11 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         )
 
         if multimodalPrefill == nil {
-            commitPromptCache(promptTokens, mtpSynchronized: activeMTPContext != nil)
+            commitPromptCache(
+                promptTokens,
+                decodedGeneratedTokens: generatedTokenHistory,
+                mtpSynchronized: activeMTPContext != nil
+            )
             promptCacheCommitted = true
         }
         emitAccelerationStatsIfNeeded()

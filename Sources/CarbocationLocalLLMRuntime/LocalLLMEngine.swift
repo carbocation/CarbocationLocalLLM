@@ -4,6 +4,8 @@ import CarbocationLocalLLM
 import Foundation
 
 public struct LocalLLMEngineConfiguration: Hashable, Sendable {
+    public static let defaultMTPMaxDraftTokens = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
+
     public var llamaGPULayerCount: Int32
     public var llamaUseMemoryMap: Bool
     public var llamaBatchSizeLimit: Int
@@ -20,8 +22,8 @@ public struct LocalLLMEngineConfiguration: Hashable, Sendable {
         llamaThreadCount: Int32? = nil,
         promptReserveTokens: Int = LLMGenerationBudget.outputTokenReserve,
         heartbeatInterval: TimeInterval = 2,
-        accelerationPolicy: LLMAccelerationPolicy = .automatic,
-        mtpMaxDraftTokens: Int = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
+        accelerationPolicy: LLMAccelerationPolicy = .disabled,
+        mtpMaxDraftTokens: Int = LocalLLMEngineConfiguration.defaultMTPMaxDraftTokens
     ) {
         self.llamaGPULayerCount = llamaGPULayerCount
         self.llamaUseMemoryMap = llamaUseMemoryMap

@@ -57,11 +57,37 @@ void carbocation_llama_mtp_free(void * context);
 
 void carbocation_llama_mtp_clear(void * context);
 
+// A prompt checkpoint preserves the portions of hybrid/recurrent memory that
+// cannot be removed by llama_memory_seq_rm(). Standard decoding owns at most one
+// checkpoint, so it can remain on-device without conflicting with speculative
+// snapshots.
+void * carbocation_llama_prompt_checkpoint_create(struct llama_context * context);
+
+void carbocation_llama_prompt_checkpoint_free(void * checkpoint);
+
+void carbocation_llama_prompt_checkpoint_clear(void * checkpoint);
+
+int32_t carbocation_llama_prompt_checkpoint_capture(
+    void * checkpoint,
+    int32_t token_count
+);
+
+// Restores the checkpoint and removes all context state after its saved
+// position. Returns -1 when unavailable and -2 when state was loaded but the
+// trailing-memory trim failed, in which case the caller must clear the context.
+int32_t carbocation_llama_prompt_checkpoint_restore(
+    void * checkpoint,
+    int32_t token_count
+);
+
+uint64_t carbocation_llama_prompt_checkpoint_size(void * checkpoint);
+
 int32_t carbocation_llama_mtp_decode_target_tokens(
     void * context,
     const llama_token * tokens,
     int32_t token_count,
-    int32_t start_position
+    int32_t start_position,
+    int32_t request_last_token_logits
 );
 
 int32_t carbocation_llama_mtp_decode_verification_target_tokens(

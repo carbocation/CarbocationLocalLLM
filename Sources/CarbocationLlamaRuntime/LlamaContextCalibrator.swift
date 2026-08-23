@@ -274,7 +274,7 @@ private enum LlamaContextCalibrator {
         modelParams.n_gpu_layers = configuration.gpuLayerCount
         modelParams.configureLoadMode(useMemoryMap: configuration.useMemoryMap)
         modelParams.load_mtp = shouldPrepareMTPAcceleration
-        if configuration.gpuLayerCount <= 0 {
+        if !LlamaEngine.usesGPUOffload(gpuLayerCount: configuration.gpuLayerCount) {
             modelParams.configureForCPUOnly()
         }
 
@@ -455,14 +455,16 @@ private enum LlamaContextCalibrator {
             )
         }
 
-        let batchCandidates = LlamaEngine.contextBatchCandidates(
+        let logicalBatchSize = min(max(1, contextSize), max(1, batchSizeLimit))
+        let microBatchCandidates = LlamaEngine.contextBatchCandidates(
             contextSize: contextSize,
             batchSizeLimit: batchSizeLimit
         )
-        for batchSize in batchCandidates {
+        for microBatchSize in microBatchCandidates {
             let params = LlamaEngine.contextParams(
                 contextSize: contextSize,
-                batchSize: batchSize,
+                batchSize: logicalBatchSize,
+                microBatchSize: microBatchSize,
                 threads: threads,
                 recurrentStateSnapshots: shouldPrepareMTPAcceleration ? maxMTPDraftTokens : 0
             )
@@ -472,7 +474,7 @@ private enum LlamaContextCalibrator {
                     contextParams: params
                 ),
                 contextSize: contextSize,
-                batchSize: batchSize,
+                batchSize: microBatchSize,
                 budgetBytes: memoryBudgetBytes
             )
             guard LlamaContextMemoryGuardrail.allowsProbe(estimate) else {
@@ -493,7 +495,7 @@ private enum LlamaContextCalibrator {
                     model,
                     context,
                     UInt32(contextSize),
-                    UInt32(batchSize),
+                    UInt32(logicalBatchSize),
                     threads,
                     Int32(maxMTPDraftTokens),
                     0
@@ -505,7 +507,7 @@ private enum LlamaContextCalibrator {
                 mtpContext: mtpContext,
                 safeToken: safeToken,
                 contextSize: contextSize,
-                batchSize: batchSize
+                batchSize: microBatchSize
             )
 
             // The bridge owns only the draft context; free it before the
@@ -548,7 +550,11 @@ private enum LlamaContextCalibrator {
         contextSize: Int,
         batchSize: Int
     ) -> Bool {
-        func decode(_ tokens: [llama_token], startPosition: Int) -> Int32 {
+        func decode(
+            _ tokens: [llama_token],
+            startPosition: Int,
+            requestLastTokenLogits: Bool
+        ) -> Int32 {
             var tokens = tokens
             return tokens.withUnsafeMutableBufferPointer { buffer -> Int32 in
                 guard let baseAddress = buffer.baseAddress else { return -1 }
@@ -557,11 +563,19 @@ private enum LlamaContextCalibrator {
                         mtpContext,
                         baseAddress,
                         Int32(buffer.count),
-                        Int32(startPosition)
+                        Int32(startPosition),
+                        requestLastTokenLogits ? 1 : 0
                     )
                 }
-                let batch = llama_batch_get_one(baseAddress, Int32(buffer.count))
-                return llama_decode(context, batch)
+                var logits = [Int8](repeating: 0, count: buffer.count)
+                if requestLastTokenLogits {
+                    logits[buffer.count - 1] = 1
+                }
+                return logits.withUnsafeMutableBufferPointer { logitsBuffer in
+                    var batch = llama_batch_get_one(baseAddress, Int32(buffer.count))
+                    batch.logits = logitsBuffer.baseAddress
+                    return llama_decode(context, batch)
+                }
             }
         }
 
@@ -569,7 +583,11 @@ private enum LlamaContextCalibrator {
         // follow-up decode that reads the backend's post-synchronize state.
         let primingTokenCount = max(1, min(batchSize, contextSize - 1))
         let primingTokens = [llama_token](repeating: safeToken, count: primingTokenCount)
-        guard decode(primingTokens, startPosition: 0) == 0 else {
+        guard decode(
+            primingTokens,
+            startPosition: 0,
+            requestLastTokenLogits: false
+        ) == 0 else {
             return false
         }
 
@@ -577,7 +595,11 @@ private enum LlamaContextCalibrator {
         // recorded before we decide the candidate succeeded.
         llama_synchronize(context)
 
-        return decode([safeToken], startPosition: primingTokenCount) == 0
+        return decode(
+            [safeToken],
+            startPosition: primingTokenCount,
+            requestLastTokenLogits: true
+        ) == 0
     }
 
     private static func decodeProbeTokens(vocabulary: OpaquePointer) -> [llama_token] {

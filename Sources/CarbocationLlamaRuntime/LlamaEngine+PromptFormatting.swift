@@ -46,7 +46,11 @@ extension LlamaEngine {
                     return PromptFormattingResult(
                         text: formatted,
                         mode: .embedded,
-                        outputProfile: outputSanitizationProfile
+                        outputProfile: outputSanitizationProfile,
+                        checkpointAnchorText: Self.promptCheckpointAnchorText(
+                            renderedPrompt: formatted,
+                            userContent: user
+                        )
                     )
                 } catch {
                     llamaRuntimeLog.info(
@@ -75,7 +79,11 @@ extension LlamaEngine {
                 return PromptFormattingResult(
                     text: formatted,
                     mode: .embedded,
-                    outputProfile: outputSanitizationProfile
+                    outputProfile: outputSanitizationProfile,
+                    checkpointAnchorText: Self.promptCheckpointAnchorText(
+                        renderedPrompt: formatted,
+                        userContent: user
+                    )
                 )
             }
 
@@ -96,7 +104,11 @@ extension LlamaEngine {
                     mode: fallback.mode,
                     outputProfile: outputSanitizationProfile.isEmpty
                         ? fallback.outputProfile
-                        : outputSanitizationProfile
+                        : outputSanitizationProfile,
+                    checkpointAnchorText: Self.promptCheckpointAnchorText(
+                        renderedPrompt: fallback.text,
+                        userContent: user
+                    )
                 )
             }
 
@@ -120,7 +132,11 @@ extension LlamaEngine {
         return PromptFormattingResult(
             text: fallback.text,
             mode: fallback.mode,
-            outputProfile: fallback.outputProfile
+            outputProfile: fallback.outputProfile,
+            checkpointAnchorText: Self.promptCheckpointAnchorText(
+                renderedPrompt: fallback.text,
+                userContent: user
+            )
         )
     }
 
@@ -158,7 +174,11 @@ extension LlamaEngine {
                 return PromptFormattingResult(
                     text: formatted,
                     mode: .embedded,
-                    outputProfile: outputSanitizationProfile
+                    outputProfile: outputSanitizationProfile,
+                    checkpointAnchorText: Self.promptCheckpointAnchorText(
+                        renderedPrompt: formatted,
+                        messages: messages
+                    )
                 )
             } catch {
                 llamaRuntimeLog.info(
@@ -173,6 +193,30 @@ extension LlamaEngine {
                 descriptor: loadedDescriptor
             ))
         }
+    }
+
+    static func promptCheckpointAnchorText(
+        renderedPrompt: String,
+        userContent: String
+    ) -> String? {
+        let trimmed = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = userContent == trimmed ? [userContent] : [userContent, trimmed]
+        for candidate in candidates where !candidate.isEmpty {
+            if let range = renderedPrompt.range(of: candidate, options: .backwards) {
+                return String(renderedPrompt[..<range.upperBound])
+            }
+        }
+        return nil
+    }
+
+    static func promptCheckpointAnchorText(
+        renderedPrompt: String,
+        messages: [ChatTemplateMessage]
+    ) -> String? {
+        guard let content = messages.last(where: { $0.role.lowercased() == "user" })?.content.stringValue else {
+            return nil
+        }
+        return promptCheckpointAnchorText(renderedPrompt: renderedPrompt, userContent: content)
     }
 
     static func fallbackPrompt(

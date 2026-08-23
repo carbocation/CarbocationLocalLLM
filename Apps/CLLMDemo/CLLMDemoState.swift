@@ -15,7 +15,7 @@ enum CLLMDemoMetadata {
     static let selectedModelDefaultsKey = "CLLMDemo.selectedModelID"
     static let accelerationPolicyDefaultsKey = "CLLMDemo.accelerationPolicy"
     static let mtpMaxDraftTokensDefaultsKey = "CLLMDemo.mtpMaxDraftTokens"
-    static let defaultMTPMaxDraftTokens = 3
+    static let defaultMTPMaxDraftTokens = LocalLLMEngineConfiguration.defaultMTPMaxDraftTokens
 }
 
 enum DemoRunMode: String, CaseIterable, Identifiable {
@@ -164,6 +164,10 @@ final class DemoState {
     var isRunning = false
 
     private var generationTask: Task<Void, Never>?
+    private var activeGenerationID: UUID?
+    private var activeGenerationSelection: LLMModelSelection?
+    private var deletedModelIDsAwaitingRelease: Set<UUID> = []
+    private var runtimeResetTask: Task<Void, Never>?
     private let appSamplingOverrides: [CuratedModelReference: LLMSamplingDefaults] = [:]
     private let generationControl = LLMGenerationControl()
     private var engine: LocalLLMEngine
@@ -173,7 +177,7 @@ final class DemoState {
     init() {
         let savedAccelerationPolicy = UserDefaults.standard
             .string(forKey: CLLMDemoMetadata.accelerationPolicyDefaultsKey)
-            .flatMap(LLMAccelerationPolicy.init(rawValue:)) ?? .automatic
+            .flatMap(LLMAccelerationPolicy.init(rawValue:)) ?? .disabled
         let savedMTPMaxDraftTokens = UserDefaults.standard
             .object(forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey) as? Int
             ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
@@ -599,14 +603,15 @@ final class DemoState {
     }
 
     func select(_ selection: LLMModelSelection) {
+        guard !isRunning else { return }
+
+        activeGenerationID = nil
         selectedModelID = selection.storageValue
         loadedInfo = nil
         errorMessage = nil
         resetSamplingControlsToDefaults()
         persistSelection(selectedModelID)
-        Task { [engine] in
-            await engine.unload()
-        }
+        scheduleRuntimeUnload(engine)
     }
 
     func setMTPAccelerationEnabled(_ enabled: Bool) {
@@ -617,6 +622,7 @@ final class DemoState {
 
         accelerationPolicy = newPolicy
         UserDefaults.standard.set(newPolicy.rawValue, forKey: CLLMDemoMetadata.accelerationPolicyDefaultsKey)
+        activeGenerationID = nil
         loadedInfo = nil
         errorMessage = nil
 
@@ -625,9 +631,7 @@ final class DemoState {
             accelerationPolicy: newPolicy,
             mtpMaxDraftTokens: parsedMTPMaxDraftTokens
         )
-        Task {
-            await oldEngine.unload()
-        }
+        scheduleRuntimeUnload(oldEngine)
     }
 
     func setMTPMaxDraftTokensText(_ value: String) {
@@ -637,6 +641,7 @@ final class DemoState {
         guard mtpMaxDraftTokensValidationMessage == nil else { return }
         let maxDraftTokens = parsedMTPMaxDraftTokens
         UserDefaults.standard.set(maxDraftTokens, forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey)
+        activeGenerationID = nil
         loadedInfo = nil
         errorMessage = nil
 
@@ -645,9 +650,7 @@ final class DemoState {
             accelerationPolicy: accelerationPolicy,
             mtpMaxDraftTokens: maxDraftTokens
         )
-        Task {
-            await oldEngine.unload()
-        }
+        scheduleRuntimeUnload(oldEngine)
     }
 
     func persistSelection(_ value: String) {
@@ -698,22 +701,21 @@ final class DemoState {
         errorMessage = nil
 
         let storedSelection = selectedModelID
+        let generationID = UUID()
+        activeGenerationID = generationID
+        activeGenerationSelection = LLMModelSelection(storageValue: storedSelection)
         generationTask = Task { @MainActor [weak self] in
-            await self?.run(storedSelection: storedSelection)
+            await self?.run(
+                storedSelection: storedSelection,
+                generationID: generationID
+            )
         }
     }
 
     func cancel() {
-        generationTask?.cancel()
-        generationTask = nil
-        isRunning = false
-        streamActivity = .idle
-        appendEvent("cancelled")
-
-        loadedInfo = nil
-        Task { [engine] in
-            await engine.unload()
-        }
+        guard let generationTask, !generationTask.isCancelled else { return }
+        generationTask.cancel()
+        appendEvent("cancellation requested")
     }
 
     func stopThinking() {
@@ -725,6 +727,7 @@ final class DemoState {
     }
 
     func clear() {
+        activeGenerationID = nil
         output = ""
         events = ""
         toolTranscript = ""
@@ -734,13 +737,20 @@ final class DemoState {
         errorMessage = nil
     }
 
-    private func run(storedSelection: String) async {
+    private func run(storedSelection: String, generationID: UUID) async {
         defer {
+            activeGenerationSelection = nil
             isRunning = false
             generationTask = nil
         }
 
         do {
+            if let runtimeResetTask {
+                await runtimeResetTask.value
+                self.runtimeResetTask = nil
+            }
+            try Task.checkCancellation()
+
             guard let plan = await LocalLLMEngine.loadPlan(
                 from: storedSelection,
                 in: library,
@@ -752,16 +762,26 @@ final class DemoState {
                 normalizeSelection()
                 errorMessage = "Selected model is unavailable. Pick a model in Settings."
                 appendEvent("failed: selected model unavailable")
-                await engine.unload()
+                await releaseLoadedModel()
+                await releaseDeletedModelAfterGenerationIfNeeded()
                 return
             }
+            try Task.checkCancellation()
 
-            let loaded = try await engine.load(
-                selection: plan.selection,
-                from: library,
-                requestedContext: plan.requestedContext
-            )
-            loadedInfo = loaded
+            let loaded: LocalLLMLoadedModelInfo
+            if let current = loadedInfo,
+               current.selection == plan.selection,
+               current.contextSize == plan.requestedContext {
+                loaded = current
+            } else {
+                loaded = try await engine.load(
+                    selection: plan.selection,
+                    from: library,
+                    requestedContext: plan.requestedContext
+                )
+                loadedInfo = loaded
+            }
+            try Task.checkCancellation()
 
             appendEvent("model: \(loaded.displayName)")
             appendEvent("context: \(loaded.contextSize)")
@@ -783,6 +803,7 @@ final class DemoState {
                     control: generationControl,
                     onPhaseAwareEvent: { [weak self] event in
                         Task { @MainActor [weak self] in
+                            guard self?.activeGenerationID == generationID else { return }
                             self?.handle(event: event)
                         }
                     }
@@ -812,6 +833,7 @@ final class DemoState {
                     control: generationControl,
                     onPhaseAwareEvent: { [weak self] event in
                         Task { @MainActor [weak self] in
+                            guard self?.activeGenerationID == generationID else { return }
                             self?.handle(event: event)
                         }
                     }
@@ -825,19 +847,62 @@ final class DemoState {
                     "final: stop=\(result.stopReason) rounds=\(result.roundsCompleted) calls=\(result.toolCalls.count)"
                 )
             }
+            try Task.checkCancellation()
             appendEvent("done")
-            await releaseLoadedModel()
         } catch is CancellationError {
+            activeGenerationID = nil
+            streamActivity = .idle
             appendEvent("cancelled")
             await releaseLoadedModel()
         } catch {
+            activeGenerationID = nil
             errorMessage = error.localizedDescription
             appendEvent("failed: \(error.localizedDescription)")
             await releaseLoadedModel()
         }
+
+        await releaseDeletedModelAfterGenerationIfNeeded()
+    }
+
+    func modelDeleted(_ model: InstalledModel) {
+        let deletedSelection = LLMModelSelection.installed(model.id)
+        guard loadedInfo?.selection == deletedSelection
+                || (isRunning && activeGenerationSelection == deletedSelection) else { return }
+
+        if isRunning {
+            deletedModelIDsAwaitingRelease.insert(model.id)
+            appendEvent("model release deferred: deleted")
+            return
+        }
+
+        activeGenerationID = nil
+        loadedInfo = nil
+        scheduleRuntimeUnload(engine)
+        appendEvent("model released: deleted")
+    }
+
+    private func scheduleRuntimeUnload(_ engine: LocalLLMEngine) {
+        let precedingReset = runtimeResetTask
+        runtimeResetTask = Task {
+            await precedingReset?.value
+            await engine.unload()
+        }
+    }
+
+    private func releaseDeletedModelAfterGenerationIfNeeded() async {
+        guard !deletedModelIDsAwaitingRelease.isEmpty else { return }
+        defer { deletedModelIDsAwaitingRelease.removeAll() }
+
+        guard case let .installed(modelID)? = loadedInfo?.selection,
+              deletedModelIDsAwaitingRelease.contains(modelID) else { return }
+
+        loadedInfo = nil
+        await engine.unload()
+        appendEvent("model released: deleted")
     }
 
     private func releaseLoadedModel() async {
+        deletedModelIDsAwaitingRelease.removeAll()
         let hadLoadedModel = loadedInfo != nil
         loadedInfo = nil
         await engine.unload()
