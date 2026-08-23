@@ -91,6 +91,15 @@ extension LlamaEngine {
         mtpContext: UnsafeMutableRawPointer? = nil,
         checkpointTokenCount: Int? = nil
     ) throws {
+        try Task.checkCancellation()
+        defer {
+            // A cancelled decode can leave only part of the prompt resident. Never
+            // expose that KV/recurrent state to the next request as reusable cache.
+            if Task.isCancelled {
+                clearPromptRuntimeState(context: context, mtpContext: mtpContext)
+            }
+        }
+
         let memory = llama_get_memory(context)
         let reusableCache: [llama_token]?
         if mtpContext != nil, mtpCachedPromptTokens != cachedPromptTokens {
@@ -105,6 +114,7 @@ extension LlamaEngine {
         clearPromptTokenCaches()
 
         func decodeFromEmptyContext() throws {
+            try Task.checkCancellation()
             clearPromptCaches()
             if let mtpContext {
                 carbocation_llama_mtp_clear_bridge(mtpContext)
@@ -135,6 +145,7 @@ extension LlamaEngine {
                checkpointTokens: savedTokens,
                newPromptTokens: promptTokens
            ) {
+            try Task.checkCancellation()
             let restoreStartedAt = Date()
             let restored = carbocation_llama_prompt_checkpoint_restore_bridge(
                 promptCheckpoint,
@@ -162,6 +173,7 @@ extension LlamaEngine {
         }
 
         if !restoredCheckpoint, let removeStartPosition = plan.removeStartPosition {
+            try Task.checkCancellation()
             let removed = if let mtpContext {
                 carbocation_llama_mtp_rollback_bridge(mtpContext, Int32(removeStartPosition)) != 0
             } else {
@@ -191,10 +203,12 @@ extension LlamaEngine {
                 checkpointTokenCount: checkpointTokenCount
             )
         } catch {
-            llamaRuntimeLog.info(
-                "Prompt prefix cache decode failed; falling back to full prompt prefill."
-            )
-            try decodeFromEmptyContext()
+            try Self.retryPromptPrefillAfterCachedPrefixFailure(error) {
+                llamaRuntimeLog.info(
+                    "Prompt prefix cache decode failed; falling back to full prompt prefill."
+                )
+                try decodeFromEmptyContext()
+            }
         }
     }
 
@@ -205,6 +219,7 @@ extension LlamaEngine {
         mtpContext: UnsafeMutableRawPointer? = nil,
         checkpointTokenCount: Int? = nil
     ) throws {
+        try Task.checkCancellation()
         guard startIndex < tokens.count else { return }
 
         let maxBatchSize = max(1, Int(llama_n_batch(context)))
@@ -229,6 +244,7 @@ extension LlamaEngine {
             nil
         }
         if capturePosition == startIndex {
+            try Task.checkCancellation()
             capturePromptCheckpoint(tokens: tokens, tokenCount: startIndex, context: context)
         }
 
@@ -248,7 +264,7 @@ extension LlamaEngine {
                 maxBatchSize: maxBatchSize,
                 requestsFinalLogits: isFinalSegment
             )
-            for chunkPlan in chunkPlans {
+            try Self.performPromptPrefillChunks(chunkPlans) { chunkPlan in
                 let lower = segmentStart + chunkPlan.range.lowerBound
                 let upper = segmentStart + chunkPlan.range.upperBound
                 var chunk = Array(tokens[lower..<upper])
@@ -279,9 +295,32 @@ extension LlamaEngine {
                 }
             }
             if segmentEnd == capturePosition {
+                try Task.checkCancellation()
                 capturePromptCheckpoint(tokens: tokens, tokenCount: segmentEnd, context: context)
             }
         }
+    }
+
+    static func performPromptPrefillChunks(
+        _ chunkPlans: [PromptPrefillChunkPlan],
+        decode: (PromptPrefillChunkPlan) throws -> Void
+    ) throws {
+        for chunkPlan in chunkPlans {
+            try Task.checkCancellation()
+            try decode(chunkPlan)
+            try Task.checkCancellation()
+        }
+    }
+
+    static func retryPromptPrefillAfterCachedPrefixFailure(
+        _ error: Error,
+        decodeFromEmptyContext: () throws -> Void
+    ) throws {
+        if error is CancellationError {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+        try decodeFromEmptyContext()
     }
 
     func capturePromptCheckpoint(
