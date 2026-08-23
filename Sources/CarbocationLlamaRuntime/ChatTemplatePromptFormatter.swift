@@ -44,16 +44,16 @@ struct ChatTemplateMessage: Equatable {
 }
 
 struct ChatTemplatePromptFormatter {
-    enum Error: Swift.Error, LocalizedError {
+    enum Error: Swift.Error, LocalizedError, Equatable {
         case notJinjaTemplate
-        case missingUserContent
+        case emptyPrompt
 
         var errorDescription: String? {
             switch self {
             case .notJinjaTemplate:
                 return "Embedded chat template is not a Jinja template."
-            case .missingUserContent:
-                return "Applied chat template did not include the user message."
+            case .emptyPrompt:
+                return "Applied chat template produced an empty prompt."
             }
         }
     }
@@ -137,12 +137,11 @@ struct ChatTemplatePromptFormatter {
         }
 
         let formatted = try template.render(context)
-        let requiredUserContent = messages
-            .filter { $0.role == "user" }
-            .compactMap(\.content.stringValue)
-            .filter { !$0.isEmpty }
-        guard requiredUserContent.allSatisfy({ formatted.contains($0) }) else {
-            throw Error.missingUserContent
+        // Embedded templates may intentionally trim, escape, or otherwise
+        // normalize message content. The renderer's structural contract is a
+        // nonempty prompt, not verbatim preservation of every input string.
+        guard !formatted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Error.emptyPrompt
         }
         return formatted
     }

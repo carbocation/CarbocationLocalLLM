@@ -72,14 +72,30 @@ extension LlamaEngine {
                         checkpointUserContent: user
                     ), for: cacheKey)
                 } catch {
-                    llamaRuntimeLog.info(
+                    llamaRuntimeLog.error(
                         "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
+                    )
+                    throw LLMEngineError.chatTemplateUnavailable(
+                        Self.swiftJinjaRenderFailureDescription(
+                            error: error,
+                            descriptor: loadedDescriptor
+                        )
                     )
                 }
             case .unavailable(let detail):
                 llamaRuntimeLog.info(
                     "Swift Jinja chat template unavailable: \(detail, privacy: .public)"
                 )
+                guard Self.legacyFallbackPreservesTemplateSemantics(
+                    template: chatTemplate,
+                    options: options
+                ) else {
+                    throw LLMEngineError.chatTemplateUnavailable(
+                        Self.legacyFallbackSemanticLossDescription(
+                            descriptor: loadedDescriptor
+                        )
+                    )
+                }
             case nil:
                 break
             }
@@ -196,10 +212,15 @@ extension LlamaEngine {
                     checkpointUserContent: Self.promptCheckpointUserContent(messages: messages)
                 ), for: cacheKey)
             } catch {
-                llamaRuntimeLog.info(
+                llamaRuntimeLog.error(
                     "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
                 )
-                throw error
+                throw LLMEngineError.chatTemplateUnavailable(
+                    Self.swiftJinjaRenderFailureDescription(
+                        error: error,
+                        descriptor: loadedDescriptor
+                    )
+                )
             }
         case .unavailable(let detail):
             throw LLMEngineError.chatTemplateUnavailable("Swift Jinja chat template unavailable: \(detail)")
@@ -315,6 +336,25 @@ extension LlamaEngine {
         }
     }
 
+    static func legacyFallbackPreservesTemplateSemantics(
+        template: String,
+        options: GenerationOptions
+    ) -> Bool {
+        // The legacy llama.cpp chat-template API accepts messages only. In
+        // particular, it cannot receive enable_thinking, so even `false` must be
+        // treated as meaningful when the template consumes that variable.
+        if template.contains("enable_thinking") {
+            return false
+        }
+        if options.reasoningEffort != nil, template.contains("reasoning_effort") {
+            return false
+        }
+        if options.preserveThinking != nil, template.contains("preserve_thinking") {
+            return false
+        }
+        return true
+    }
+
     private func formatMessagesViaSwiftJinja(
         formatter: ChatTemplatePromptFormatter,
         system: String,
@@ -378,6 +418,26 @@ extension LlamaEngine {
             return "Embedded template exists but could not be applied. Model: \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename))."
         }
         return "Embedded template exists but could not be applied."
+    }
+
+    private static func swiftJinjaRenderFailureDescription(
+        error: Swift.Error,
+        descriptor: LlamaModelDescriptor?
+    ) -> String {
+        let detail = String(describing: error)
+        if let descriptor {
+            return "Embedded Swift Jinja template failed while rendering model \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename)): \(detail)"
+        }
+        return "Embedded Swift Jinja template failed while rendering: \(detail)"
+    }
+
+    private static func legacyFallbackSemanticLossDescription(
+        descriptor: LlamaModelDescriptor?
+    ) -> String {
+        if let descriptor {
+            return "Embedded template for model \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename)) requires reasoning controls that the legacy template renderer cannot preserve."
+        }
+        return "Embedded template requires reasoning controls that the legacy template renderer cannot preserve."
     }
 
     private static func logChatTemplateSelection(
