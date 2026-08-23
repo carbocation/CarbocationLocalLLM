@@ -810,9 +810,24 @@ swift run -c release CLLMBenchmarkCommand \
   --json > benchmark.json
 ```
 
-One invocation loads the model once, then measures cold-prefix, warm-exact-prefix, and warm-extended-prefix requests. The report separates model load, prompt preflight, time to first token, and total request duration; it also includes the requested batch limit, effective llama.cpp `n_batch` and `n_ubatch`, prompt/generated token counts, a derived post-first-token rate, and MTP draft/acceptance statistics when enabled. MTP is disabled by default; pass `--enable-mtp` to measure it and `--mtp-max-draft N` to select a draft width. The derived rate uses public stream events and is not llama.cpp's internal decode timing.
+One invocation loads the model once, then measures cold-prefix, warm-exact-prefix, and warm-extended-prefix requests. Schema 2 reports both sampled-token TTFT (`timeToFirstTokenSeconds`, retained as the schema 1 compatibility key) and first non-whitespace visible-content TTFT (`firstVisibleContentSeconds` and its thinking/final phase). This makes application-level streaming delays visible without changing the older metric. The report also separates model load, prompt preflight, and total request duration; includes the requested batch and micro-batch limits, effective llama.cpp `n_batch` and `n_ubatch`, prompt/generated token counts, and a derived post-first-token rate; and includes MTP draft/acceptance statistics when enabled. MTP is disabled by default; pass `--enable-mtp` to measure it and `--mtp-max-draft N` to select a draft width. The derived rate uses public stream events and is not llama.cpp's internal decode timing.
 
-The command has no pass/fail thresholds and is never run by `swift test`. For useful comparisons, keep the model, build, prompt, hardware, and system load fixed, and repeat each configuration. Run `swift run -c release CLLMBenchmarkCommand --help` for controls including `--gpu-layers`, `--batch-size`, `--threads`, `--enable-mtp`, `--disable-mtp`, and `--mtp-max-draft`.
+Use `--prompt-repeat N` to create a repeatable long-prefill workload and `--ubatch-size N` to sweep the physical micro-batch ceiling. Larger micro-batches can improve prompt prefill at substantial memory cost, so the runtime keeps the deployment-safe 512-token default unless an advanced caller explicitly overrides it. For example:
+
+```sh
+swift run -c release CLLMBenchmarkCommand \
+  --model /absolute/path/to/qwen.gguf \
+  --context 8192 \
+  --prompt-repeat 8 \
+  --ubatch-size 1024 \
+  --max-output 2
+```
+
+Pass `--mmproj /absolute/path/to/mmproj.gguf` to include a model's projector descriptor. Projector capabilities are probed during model load, but the heavyweight projector context is initialized only on the first image or audio request, so text-only model-load measurements do not eagerly allocate it. If first-use compatibility validation fails after a projector file is repaired or replaced, unload and reload the model before retrying.
+
+The runtime keeps one bounded exact formatting entry and one exact normalized-prompt token entry. This avoids duplicate preparation for cases such as preflight followed by identical generation; it does not assume arbitrary Jinja templates are append-stable and therefore does not skip full rendering for a changed conversation.
+
+The command has no pass/fail thresholds and is never run by `swift test`. For useful comparisons, keep the model, build, prompt, hardware, and system load fixed, and repeat each configuration. Run `swift run -c release CLLMBenchmarkCommand --help` for all controls, including `--gpu-layers`, `--batch-size`, `--ubatch-size`, `--threads`, `--prompt-repeat`, `--mmproj`, `--enable-mtp`, `--disable-mtp`, and `--mtp-max-draft`.
 
 ### Use a local binary artifact
 

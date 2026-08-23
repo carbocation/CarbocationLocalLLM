@@ -12,14 +12,17 @@ private let defaultWarmSuffix = "\n\nContinue with additional short sentences wh
 
 private struct BenchmarkArguments {
     var modelPath: String = ProcessInfo.processInfo.environment["CLLM_BENCHMARK_MODEL_PATH"] ?? ""
+    var mmprojPath: String?
     var systemPrompt = "You are a deterministic benchmark assistant. Follow the continuation instruction without a conclusion."
     var prompt = ProcessInfo.processInfo.environment["CLLM_BENCHMARK_PROMPT"] ?? defaultBenchmarkPrompt
+    var promptRepeatCount = 1
     var warmSuffix = defaultWarmSuffix
     var contextSize = 4_096
     var maxOutputTokens = 128
     var gpuLayerCount = LlamaEngineConfiguration.defaultGPULayerCount
     var useMemoryMap = true
     var batchSizeLimit = LlamaEngineConfiguration.defaultBatchSizeLimit
+    var microBatchSizeLimit: Int?
     var threadCount: Int32?
     var accelerationPolicy = LLMAccelerationPolicy.disabled
     var mtpMaxDraftTokens = LlamaEngineConfiguration.defaultMTPMaxDraftTokens
@@ -29,6 +32,7 @@ private struct BenchmarkArguments {
 private enum BenchmarkError: LocalizedError {
     case missingModel
     case modelNotFound(String)
+    case projectorNotFound(String)
     case missingValue(String)
     case unknownArgument(String)
     case invalidInteger(name: String, value: String)
@@ -41,6 +45,8 @@ private enum BenchmarkError: LocalizedError {
             return "Provide --model PATH or set CLLM_BENCHMARK_MODEL_PATH."
         case .modelNotFound(let path):
             return "Benchmark model is not a readable file: \(path)"
+        case .projectorNotFound(let path):
+            return "Multimodal projector is not a readable file: \(path)"
         case .missingValue(let name):
             return "Missing value for \(name)."
         case .unknownArgument(let name):
@@ -78,17 +84,20 @@ private struct ConfigurationReport: Codable {
     var requestedGPULayerCount: Int
     var useMemoryMap: Bool
     var requestedBatchSizeLimit: Int
+    var requestedMicroBatchSizeLimit: Int?
     var effectiveLogicalBatchSize: Int?
     var effectivePhysicalMicroBatchSize: Int?
     var effectiveThreadCount: Int
     var accelerationPolicy: String
     var mtpMaxDraftTokens: Int
     var promptUTF8Bytes: Int
+    var promptRepeatCount: Int
     var warmSuffixUTF8Bytes: Int
 }
 
 private struct ModelReport: Codable {
     var path: String
+    var mmprojPath: String?
     var filename: String
     var fileSizeBytes: UInt64?
     var architecture: String?
@@ -105,7 +114,10 @@ private struct RunReport: Codable {
     var preflightSeconds: Double
     var promptTokens: Int
     var effectiveMaxOutputTokens: Int
+    /// Compatibility alias for sampled-token TTFT from schema 1.
     var timeToFirstTokenSeconds: Double?
+    var firstVisibleContentSeconds: Double?
+    var firstVisibleContentPhase: String?
     var totalRequestSeconds: Double
     var runtimeReportedSeconds: Double?
     var generatedTokens: Int
@@ -139,6 +151,8 @@ private struct AccelerationReport: Codable {
 
 private struct EventSnapshot {
     var firstTokenInstant: ContinuousClock.Instant?
+    var firstVisibleContentInstant: ContinuousClock.Instant?
+    var firstVisibleContentPhase: LLMStreamContentPhase?
     var runtimeReportedSeconds: Double?
     var promptTokens: Int?
     var generatedTokens: Int?
@@ -150,6 +164,8 @@ private struct EventSnapshot {
 private final class EventRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var firstTokenInstant: ContinuousClock.Instant?
+    private var firstVisibleContentInstant: ContinuousClock.Instant?
+    private var firstVisibleContentPhase: LLMStreamContentPhase?
     private var runtimeReportedSeconds: Double?
     private var promptTokens: Int?
     private var generatedTokens: Int?
@@ -157,12 +173,19 @@ private final class EventRecorder: @unchecked Sendable {
     private var templateMode: LLMChatTemplateMode?
     private var accelerationStats: LLMGenerationAccelerationStats?
 
-    func record(_ event: LLMPhaseAwareStreamEvent, at instant: ContinuousClock.Instant) {
+    func record(_ event: LLMGenerationStreamEvent, at instant: ContinuousClock.Instant) {
         lock.withLock {
             switch event {
             case .firstByteReceived:
                 if firstTokenInstant == nil {
                     firstTokenInstant = instant
+                }
+            case .contentDelta(let phase, let text, _),
+                 .contentSnapshot(let phase, let text, _, _):
+                if firstVisibleContentInstant == nil,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    firstVisibleContentInstant = instant
+                    firstVisibleContentPhase = phase
                 }
             case .generationStats(let promptTokens, let generatedTokens, let stopReason, let templateMode, _):
                 self.promptTokens = promptTokens
@@ -173,7 +196,7 @@ private final class EventRecorder: @unchecked Sendable {
                 accelerationStats = stats
             case .done(_, let duration, _):
                 runtimeReportedSeconds = duration
-            case .requestSent, .phaseChanged, .tokenChunk, .finalAnswerDelta, .finalAnswerSnapshot, .diagnostic:
+            case .requestSent, .phaseChanged, .tokenChunk, .diagnostic:
                 break
             }
         }
@@ -183,6 +206,8 @@ private final class EventRecorder: @unchecked Sendable {
         lock.withLock {
             EventSnapshot(
                 firstTokenInstant: firstTokenInstant,
+                firstVisibleContentInstant: firstVisibleContentInstant,
+                firstVisibleContentPhase: firstVisibleContentPhase,
                 runtimeReportedSeconds: runtimeReportedSeconds,
                 promptTokens: promptTokens,
                 generatedTokens: generatedTokens,
@@ -237,6 +262,8 @@ private enum CLLMBenchmarkCommand {
             switch argument {
             case "--model":
                 arguments.modelPath = try requireValue(argument)
+            case "--mmproj":
+                arguments.mmprojPath = try requireValue(argument)
             case "--system":
                 arguments.systemPrompt = try requireValue(argument)
             case "--prompt":
@@ -248,6 +275,8 @@ private enum CLLMBenchmarkCommand {
                 } catch {
                     throw BenchmarkError.unreadablePromptFile(path, error.localizedDescription)
                 }
+            case "--prompt-repeat":
+                arguments.promptRepeatCount = try parseInteger(argument)
             case "--warm-suffix":
                 arguments.warmSuffix = try requireValue(argument)
             case "--context":
@@ -262,6 +291,8 @@ private enum CLLMBenchmarkCommand {
                 arguments.gpuLayerCount = converted
             case "--batch-size":
                 arguments.batchSizeLimit = try parseInteger(argument)
+            case "--ubatch-size":
+                arguments.microBatchSizeLimit = try parseInteger(argument)
             case "--threads":
                 let value = try parseInteger(argument)
                 guard let converted = Int32(exactly: value) else {
@@ -303,6 +334,15 @@ private enum CLLMBenchmarkCommand {
             throw BenchmarkError.modelNotFound(arguments.modelPath)
         }
 
+        if let mmprojPath = arguments.mmprojPath {
+            isDirectory = false
+            guard FileManager.default.fileExists(atPath: mmprojPath, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  FileManager.default.isReadableFile(atPath: mmprojPath) else {
+                throw BenchmarkError.projectorNotFound(mmprojPath)
+            }
+        }
+
         guard arguments.contextSize >= LlamaContextPolicy.minimumContext else {
             throw BenchmarkError.invalidRange(
                 name: "--context",
@@ -313,8 +353,37 @@ private enum CLLMBenchmarkCommand {
         guard arguments.maxOutputTokens > 1 else {
             throw BenchmarkError.invalidRange(name: "--max-output", value: arguments.maxOutputTokens, expected: "at least 2")
         }
+        guard (1...256).contains(arguments.promptRepeatCount) else {
+            throw BenchmarkError.invalidRange(
+                name: "--prompt-repeat",
+                value: arguments.promptRepeatCount,
+                expected: "1 through 256"
+            )
+        }
+        let (repeatedPromptBytes, repeatedPromptOverflow) = arguments.prompt.utf8.count
+            .multipliedReportingOverflow(by: arguments.promptRepeatCount)
+        let (expandedPromptBytes, separatorOverflow) = repeatedPromptBytes.addingReportingOverflow(
+            max(0, arguments.promptRepeatCount - 1)
+        )
+        guard !repeatedPromptOverflow,
+              !separatorOverflow,
+              expandedPromptBytes <= 64 * 1_024 * 1_024 else {
+            throw BenchmarkError.invalidRange(
+                name: "--prompt-repeat",
+                value: arguments.promptRepeatCount,
+                expected: "an expanded prompt no larger than 64 MiB"
+            )
+        }
         guard arguments.batchSizeLimit > 0 else {
             throw BenchmarkError.invalidRange(name: "--batch-size", value: arguments.batchSizeLimit, expected: "a positive integer")
+        }
+        if let microBatchSizeLimit = arguments.microBatchSizeLimit,
+           microBatchSizeLimit <= 0 {
+            throw BenchmarkError.invalidRange(
+                name: "--ubatch-size",
+                value: microBatchSizeLimit,
+                expected: "a positive integer"
+            )
         }
         if let threadCount = arguments.threadCount, threadCount <= 0 {
             throw BenchmarkError.invalidRange(name: "--threads", value: Int(threadCount), expected: "a positive integer")
@@ -326,10 +395,16 @@ private enum CLLMBenchmarkCommand {
 
     private static func benchmark(_ arguments: BenchmarkArguments) async throws -> BenchmarkReport {
         let modelURL = URL(fileURLWithPath: arguments.modelPath).standardizedFileURL
+        let mmprojURL = arguments.mmprojPath.map {
+            URL(fileURLWithPath: $0).standardizedFileURL
+        }
+        let benchmarkPrompt = Array(repeating: arguments.prompt, count: arguments.promptRepeatCount)
+            .joined(separator: "\n")
         let configuration = LlamaEngineConfiguration(
             gpuLayerCount: arguments.gpuLayerCount,
             useMemoryMap: arguments.useMemoryMap,
             batchSizeLimit: arguments.batchSizeLimit,
+            microBatchSizeLimit: arguments.microBatchSizeLimit,
             threadCount: arguments.threadCount,
             accelerationPolicy: arguments.accelerationPolicy,
             mtpMaxDraftTokens: arguments.mtpMaxDraftTokens
@@ -339,7 +414,10 @@ private enum CLLMBenchmarkCommand {
         let clock = ContinuousClock()
 
         let loadStart = clock.now
-        let loaded = try await engine.load(modelAt: modelURL, requestedContext: arguments.contextSize)
+        let loaded = try await engine.load(
+            descriptor: LlamaModelDescriptor(url: modelURL, mmprojURL: mmprojURL),
+            requestedContext: arguments.contextSize
+        )
         let loadEnd = clock.now
 
         let options = GenerationOptions(
@@ -348,12 +426,12 @@ private enum CLLMBenchmarkCommand {
             enableThinking: false
         )
         let scenarios = [
-            (name: "cold-prefix", condition: "empty prompt KV cache", prompt: arguments.prompt),
-            (name: "warm-exact-prefix", condition: "same prompt as prior run", prompt: arguments.prompt),
+            (name: "cold-prefix", condition: "empty prompt KV cache", prompt: benchmarkPrompt),
+            (name: "warm-exact-prefix", condition: "same prompt as prior run", prompt: benchmarkPrompt),
             (
                 name: "warm-extended-prefix",
                 condition: "prior prompt plus deterministic suffix",
-                prompt: arguments.prompt + arguments.warmSuffix
+                prompt: benchmarkPrompt + arguments.warmSuffix
             )
         ]
 
@@ -380,7 +458,7 @@ private enum CLLMBenchmarkCommand {
         let buildConfiguration = "release"
         #endif
         return BenchmarkReport(
-            schemaVersion: 1,
+            schemaVersion: 2,
             generatedAt: ISO8601DateFormatter().string(from: Date()),
             buildConfiguration: buildConfiguration,
             system: SystemReport(
@@ -394,16 +472,19 @@ private enum CLLMBenchmarkCommand {
                 requestedGPULayerCount: runtimeFingerprint.gpuLayerCount,
                 useMemoryMap: runtimeFingerprint.useMemoryMap,
                 requestedBatchSizeLimit: runtimeFingerprint.batchSizeLimit,
+                requestedMicroBatchSizeLimit: runtimeFingerprint.microBatchSizeLimit,
                 effectiveLogicalBatchSize: loaded.logicalBatchSize,
                 effectivePhysicalMicroBatchSize: loaded.physicalMicroBatchSize,
                 effectiveThreadCount: runtimeFingerprint.threadCount,
                 accelerationPolicy: arguments.accelerationPolicy.rawValue,
                 mtpMaxDraftTokens: runtimeFingerprint.mtpMaxDraftTokens,
-                promptUTF8Bytes: arguments.prompt.utf8.count,
+                promptUTF8Bytes: benchmarkPrompt.utf8.count,
+                promptRepeatCount: arguments.promptRepeatCount,
                 warmSuffixUTF8Bytes: arguments.warmSuffix.utf8.count
             ),
             model: ModelReport(
                 path: modelURL.path,
+                mmprojPath: mmprojURL?.path,
                 filename: loaded.filename,
                 fileSizeBytes: fileSize(at: modelURL),
                 architecture: loaded.architecture,
@@ -433,20 +514,22 @@ private enum CLLMBenchmarkCommand {
 
         let recorder = EventRecorder()
         let requestStart = clock.now
-        let response = try await engine.generate(
+        let response = try await engine.generatePhased(
             system: systemPrompt,
             prompt: prompt,
             options: options,
-            onPhaseAwareEvent: { event in
+            onEvent: { event in
                 recorder.record(event, at: clock.now)
-            },
-            ()
+            }
         )
         let requestEnd = clock.now
         let snapshot = recorder.snapshot()
 
         let totalSeconds = requestStart.duration(to: requestEnd).secondsDouble
         let timeToFirstToken = snapshot.firstTokenInstant.map {
+            requestStart.duration(to: $0).secondsDouble
+        }
+        let firstVisibleContent = snapshot.firstVisibleContentInstant.map {
             requestStart.duration(to: $0).secondsDouble
         }
         let generatedTokens = snapshot.generatedTokens ?? 0
@@ -470,12 +553,14 @@ private enum CLLMBenchmarkCommand {
             promptTokens: snapshot.promptTokens ?? preflight.promptTokens,
             effectiveMaxOutputTokens: preflight.effectiveMaxOutputTokens,
             timeToFirstTokenSeconds: timeToFirstToken,
+            firstVisibleContentSeconds: firstVisibleContent,
+            firstVisibleContentPhase: snapshot.firstVisibleContentPhase?.rawValue,
             totalRequestSeconds: totalSeconds,
             runtimeReportedSeconds: snapshot.runtimeReportedSeconds,
             generatedTokens: generatedTokens,
             stopReason: snapshot.stopReason ?? "missing-stats",
             templateMode: snapshot.templateMode?.rawValue ?? preflight.templateMode.rawValue,
-            outputUTF8Bytes: response.utf8.count,
+            outputUTF8Bytes: response.finalText.utf8.count,
             endToEndGeneratedTokensPerSecond: endToEndRate,
             postFirstTokenTokensPerSecond: postFirstTokenRate,
             acceleration: snapshot.accelerationStats.map(AccelerationReport.init)
@@ -507,8 +592,11 @@ private enum CLLMBenchmarkCommand {
         print("system: \(report.system.operatingSystem), processors=\(report.system.activeProcessorCount), memory=\(report.system.physicalMemoryBytes)")
         print("model: \(report.model.filename)")
         print("model-path: \(report.model.path)")
+        if let mmprojPath = report.model.mmprojPath {
+            print("mmproj-path: \(mmprojPath)")
+        }
         print("context: requested=\(report.configuration.requestedContextSize) loaded=\(report.model.loadedContextSize) training=\(report.model.trainingContextSize)")
-        print("runtime: gpuLayersRequested=\(report.configuration.requestedGPULayerCount) batchLimit=\(report.configuration.requestedBatchSizeLimit) nBatch=\(formatted(report.configuration.effectiveLogicalBatchSize)) nUbatch=\(formatted(report.configuration.effectivePhysicalMicroBatchSize)) threads=\(report.configuration.effectiveThreadCount) mmap=\(report.configuration.useMemoryMap) mtp=\(report.configuration.accelerationPolicy) mtpDraft=\(report.configuration.mtpMaxDraftTokens)")
+        print("runtime: gpuLayersRequested=\(report.configuration.requestedGPULayerCount) batchLimit=\(report.configuration.requestedBatchSizeLimit) ubatchLimit=\(formatted(report.configuration.requestedMicroBatchSizeLimit)) nBatch=\(formatted(report.configuration.effectiveLogicalBatchSize)) nUbatch=\(formatted(report.configuration.effectivePhysicalMicroBatchSize)) threads=\(report.configuration.effectiveThreadCount) mmap=\(report.configuration.useMemoryMap) mtp=\(report.configuration.accelerationPolicy) mtpDraft=\(report.configuration.mtpMaxDraftTokens)")
         print(String(format: "model-load: %.6fs", report.modelLoadSeconds))
 
         for run in report.runs {
@@ -523,8 +611,10 @@ private enum CLLMBenchmarkCommand {
                 run.stopReason
             ))
             print(String(
-                format: "  ttft=%@ total=%.6fs runtimeReported=%@ endToEndTokPerSec=%@ postFirstTokenTokPerSec=%@",
+                format: "  sampledTTFT=%@ visibleTTFT=%@ visiblePhase=%@ total=%.6fs runtimeReported=%@ endToEndTokPerSec=%@ postFirstTokenTokPerSec=%@",
                 formatted(run.timeToFirstTokenSeconds),
+                formatted(run.firstVisibleContentSeconds),
+                run.firstVisibleContentPhase ?? "n/a",
                 run.totalRequestSeconds,
                 formatted(run.runtimeReportedSeconds),
                 formatted(run.endToEndGeneratedTokensPerSecond),
@@ -544,7 +634,8 @@ private enum CLLMBenchmarkCommand {
             }
         }
 
-        print("note: postFirstTokenTokPerSec is derived as (generatedTokens - 1) / (requestEnd - firstToken).")
+        print("note: sampledTTFT is the llama target-token event; visibleTTFT is the first non-empty thinking/final content event.")
+        print("note: postFirstTokenTokPerSec is derived as (generatedTokens - 1) / (requestEnd - sampled token).")
         print("note: compare Release runs on the same idle hardware, model file, prompt, and runtime settings.")
     }
 
@@ -569,14 +660,17 @@ private enum CLLMBenchmarkCommand {
 
         Options:
           --model PATH             GGUF model path (or CLLM_BENCHMARK_MODEL_PATH)
+          --mmproj PATH            optional multimodal projector path
           --system TEXT            system prompt
           --prompt TEXT            benchmark prompt (or CLLM_BENCHMARK_PROMPT)
           --prompt-file PATH       read the benchmark prompt from a UTF-8 file
+          --prompt-repeat N        repeat the prompt N times for long-prefill sweeps
           --warm-suffix TEXT       suffix used by the warm-extended-prefix run
           --context N              requested context size (default: 4096)
           --max-output N           maximum generated tokens (default: 128)
           --gpu-layers N           llama GPU layer count (platform default when omitted)
           --batch-size N           context batch-size limit (platform default when omitted)
+          --ubatch-size N          physical micro-batch limit (default: 512)
           --threads N              decode and batch thread count (runtime default when omitted)
           --no-mmap                disable memory-mapped model loading
           --enable-mtp             enable MTP acceleration for supported models
