@@ -5,27 +5,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 TAG=""
-PUBLISH=0
+PUBLISH=""
 PRERELEASE=1
 SOURCE_REF="HEAD"
-WORKTREE=""
-WORKTREE_IS_EPHEMERAL=0
-WORKTREE_DESCRIPTION=""
 REPOSITORY=""
 REMOTE_NAME="origin"
-KEEP_PACKAGE_SWIFT_DIRTY=0
 SKIP_PUBLISHED_VALIDATION=0
 RELEASE_NOTES=""
+MANIFEST_BACKUP=""
+TEMP_INDEX=""
+RELEASE_COMMIT=""
 
 usage() {
   cat <<'USAGE'
-usage: Scripts/publish-llama-binary-local.sh --tag <vX.Y.Z> [options]
+usage: Scripts/publish-llama-binary-local.sh --tag <vX.Y.Z> (--publish | --dry-run) [options]
 
 Builds the llama XCFramework locally and optionally publishes the same
 tag-only GitHub release that .github/workflows/publish-llama-binary.yml creates.
 
-Defaults to a dry run. Dry runs build, stamp Package.swift in an isolated
-worktree, validate against the local XCFramework, then restore Package.swift.
+The script requires a clean current checkout, reuses its ignored build caches,
+and restores Package.swift after validation. Publishing creates a tag-only
+release commit without moving the current branch. Choose a mode explicitly.
 
 Options:
   --tag <tag>                    Release tag to prepare, for example v0.3.0.
@@ -33,12 +33,10 @@ Options:
   --dry-run                      Build and validate without committing, tagging, or uploading.
   --prerelease                   Mark the GitHub release as a prerelease. Default.
   --no-prerelease                Publish as a stable GitHub release.
-  --source-ref <ref>             Source commit/ref to release. Default: HEAD.
-  --worktree <path>              Use a caller-managed reusable worktree instead of temporary staging.
+  --source-ref <ref>             Source commit/ref to release; it must equal HEAD. Default: HEAD.
   --remote <name>                Git remote to check and push tags to. Default: origin.
   --repo <owner/name>            GitHub repository. Default: parsed from origin.
-  --skip-published-validation    Skip post-upload clean consumer/app validation.
-  --keep-package-swift-dirty     Leave stamped Package.swift in a caller-managed worktree after a dry run.
+  --skip-published-validation    Skip the post-upload clean consumer validation.
   -h, --help                     Show this help.
 USAGE
 }
@@ -54,10 +52,18 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
     --publish)
+      if [[ -n "$PUBLISH" ]]; then
+        echo "error: release mode provided more than once" >&2
+        exit 2
+      fi
       PUBLISH=1
       shift
       ;;
     --dry-run)
+      if [[ -n "$PUBLISH" ]]; then
+        echo "error: release mode provided more than once" >&2
+        exit 2
+      fi
       PUBLISH=0
       shift
       ;;
@@ -75,14 +81,6 @@ while [[ "$#" -gt 0 ]]; do
         exit 2
       fi
       SOURCE_REF="${2:-}"
-      shift 2
-      ;;
-    --worktree)
-      if [[ "$#" -lt 2 ]]; then
-        echo "error: --worktree requires a value" >&2
-        exit 2
-      fi
-      WORKTREE="${2:-}"
       shift 2
       ;;
     --remote)
@@ -103,10 +101,6 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --skip-published-validation)
       SKIP_PUBLISHED_VALIDATION=1
-      shift
-      ;;
-    --keep-package-swift-dirty)
-      KEEP_PACKAGE_SWIFT_DIRTY=1
       shift
       ;;
     -h|--help)
@@ -132,6 +126,12 @@ done
 
 if [[ -z "$TAG" ]]; then
   echo "error: --tag is required" >&2
+  usage >&2
+  exit 2
+fi
+
+if [[ -z "$PUBLISH" ]]; then
+  echo "error: choose exactly one release mode: --publish or --dry-run" >&2
   usage >&2
   exit 2
 fi
@@ -260,6 +260,8 @@ check_xcode
 if [[ "$PUBLISH" == "1" ]]; then
   require_command gh
   gh auth status --hostname github.com >/dev/null
+  git -C "$ROOT_DIR" var GIT_AUTHOR_IDENT >/dev/null
+  git -C "$ROOT_DIR" var GIT_COMMITTER_IDENT >/dev/null
 fi
 
 if [[ -z "$SOURCE_REF" ]]; then
@@ -272,26 +274,20 @@ if [[ -z "$REMOTE_NAME" ]]; then
   exit 2
 fi
 
-if [[ -z "$WORKTREE" ]]; then
-  WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/carbocation-llama-release.XXXXXX")"
-  rmdir "$WORKTREE"
-  WORKTREE_IS_EPHEMERAL=1
-  WORKTREE_DESCRIPTION="$WORKTREE (temporary; removed on exit)"
-else
-  case "$WORKTREE" in
-    /*) ;;
-    *) WORKTREE="$ROOT_DIR/$WORKTREE" ;;
-  esac
-  WORKTREE_DESCRIPTION="$WORKTREE (caller-managed)"
-fi
-
 if ! SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify "$SOURCE_REF^{commit}" 2>/dev/null)"; then
   echo "error: source ref does not resolve to a commit: $SOURCE_REF" >&2
   exit 1
 fi
 
-if [[ "$SOURCE_REF" == "HEAD" ]] && [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
-  echo "error: current worktree is dirty; commit/stash changes or pass --source-ref for an explicit clean ref" >&2
+HEAD_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify HEAD^{commit})"
+if [[ "$SOURCE_COMMIT" != "$HEAD_COMMIT" ]]; then
+  echo "error: --source-ref must resolve to the current HEAD; check it out before releasing" >&2
+  echo "       this avoids creating a second checkout and duplicating its build cache" >&2
+  exit 1
+fi
+
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
+  echo "error: current checkout is dirty; commit or stash changes before releasing" >&2
   exit 1
 fi
 
@@ -307,26 +303,9 @@ if [[ "$PUBLISH" == "1" ]]; then
   fi
 fi
 
-prepare_worktree() {
-  local parent_dir
-  parent_dir="$(dirname "$WORKTREE")"
-  mkdir -p "$parent_dir"
-
-  if [[ -e "$WORKTREE" ]]; then
-    local worktree_root
-    worktree_root="$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null || true)"
-    if [[ "$worktree_root" != "$WORKTREE" ]]; then
-      echo "error: worktree path exists but is not a git worktree rooted there: $WORKTREE" >&2
-      exit 1
-    fi
-    if [[ -n "$(git -C "$WORKTREE" status --porcelain)" ]]; then
-      echo "error: release worktree is dirty: $WORKTREE" >&2
-      echo "       clean it, remove it with 'git worktree remove', or pass --worktree for another path." >&2
-      exit 1
-    fi
-    git -C "$WORKTREE" checkout --detach "$SOURCE_COMMIT"
-  else
-    git -C "$ROOT_DIR" worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+restore_manifest() {
+  if [[ -n "$MANIFEST_BACKUP" && -f "$MANIFEST_BACKUP" ]]; then
+    cp "$MANIFEST_BACKUP" "$ROOT_DIR/Package.swift"
   fi
 }
 
@@ -334,31 +313,25 @@ cleanup_release_staging() {
   local exit_status="$?"
   set +e
 
-  if [[ "$PUBLISH" == "0" && "$KEEP_PACKAGE_SWIFT_DIRTY" == "0" ]]; then
-    git -C "$WORKTREE" checkout -- Package.swift >/dev/null 2>&1 || true
+  restore_manifest
+  if [[ -n "$MANIFEST_BACKUP" ]]; then
+    rm -f "$MANIFEST_BACKUP"
+  fi
+  if [[ -n "$TEMP_INDEX" ]]; then
+    rm -f "$TEMP_INDEX" "$TEMP_INDEX.lock"
   fi
   if [[ -n "$RELEASE_NOTES" ]]; then
     rm -f "$RELEASE_NOTES"
   fi
 
-  if [[ "$WORKTREE_IS_EPHEMERAL" == "1" ]]; then
-    cd "$ROOT_DIR" || true
-    if git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      if ! git -C "$ROOT_DIR" worktree remove --force "$WORKTREE"; then
-        echo "warning: failed to remove temporary release worktree: $WORKTREE" >&2
-      fi
-    fi
-    git -C "$ROOT_DIR" worktree prune >/dev/null 2>&1 || true
-  fi
-
   return "$exit_status"
 }
 
+MANIFEST_BACKUP="$(mktemp "${TMPDIR:-/tmp}/cllm-package-swift.XXXXXX")"
+cp "$ROOT_DIR/Package.swift" "$MANIFEST_BACKUP"
 trap cleanup_release_staging EXIT
 
-prepare_worktree
-
-cd "$WORKTREE"
+cd "$ROOT_DIR"
 git submodule update --init --recursive
 
 Scripts/build-llama-xcframework.sh
@@ -377,18 +350,40 @@ Dry run complete
 
 Tag: $TAG
 Source: $SOURCE_COMMIT
-Asset: $WORKTREE/$ZIP_PATH
+Asset: $ROOT_DIR/$ZIP_PATH
 URL: $ARTIFACT_URL
 Checksum: $CHECKSUM
-Staging worktree: $WORKTREE_DESCRIPTION
+Checkout: $ROOT_DIR (Package.swift restored on exit)
 EOF
   exit 0
 fi
 
-git add Package.swift
-git diff --cached --check
-git commit -m "Publish llama binary artifact $TAG"
-git tag "$TAG"
+TEMP_INDEX="$(mktemp "${TMPDIR:-/tmp}/cllm-release-index.XXXXXX")"
+rm -f "$TEMP_INDEX"
+GIT_INDEX_FILE="$TEMP_INDEX" git read-tree "$SOURCE_COMMIT^{tree}"
+PACKAGE_BLOB="$(git hash-object -w Package.swift)"
+GIT_INDEX_FILE="$TEMP_INDEX" git update-index \
+  --add --cacheinfo "100644,$PACKAGE_BLOB,Package.swift"
+GIT_INDEX_FILE="$TEMP_INDEX" git diff --cached --check "$SOURCE_COMMIT"
+RELEASE_TREE="$(GIT_INDEX_FILE="$TEMP_INDEX" git write-tree)"
+RELEASE_COMMIT="$(printf 'Publish llama binary artifact %s\n' "$TAG" \
+  | git commit-tree "$RELEASE_TREE" -p "$SOURCE_COMMIT")"
+
+CHANGED_PATHS="$(git diff-tree --no-commit-id --name-only -r "$SOURCE_COMMIT" "$RELEASE_COMMIT")"
+if [[ "$CHANGED_PATHS" != "Package.swift" ]]; then
+  echo "error: release commit changed unexpected paths:" >&2
+  printf '%s\n' "$CHANGED_PATHS" >&2
+  exit 1
+fi
+
+restore_manifest
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "error: checkout changed during release validation; refusing to publish" >&2
+  git status --short >&2
+  exit 1
+fi
+
+git tag "$TAG" "$RELEASE_COMMIT"
 git push "$REMOTE_NAME" "$TAG"
 
 RELEASE_NOTES="$(mktemp "${TMPDIR:-/tmp}/cllm-release-notes.XXXXXX")"
@@ -429,8 +424,9 @@ Release published
 
 Tag: $TAG
 Source: $SOURCE_COMMIT
-Asset: $WORKTREE/$ZIP_PATH
+Asset: $ROOT_DIR/$ZIP_PATH
 URL: $ARTIFACT_URL
 Checksum: $CHECKSUM
-Staging worktree: $WORKTREE_DESCRIPTION
+Release commit: $RELEASE_COMMIT
+Checkout: $ROOT_DIR (branch unchanged)
 EOF

@@ -905,45 +905,37 @@ Scripts/set-llama-binary-artifact.sh \
 ### Publish a binary release locally
 
 Use the local release script when you want to avoid waiting for a fresh GitHub
-Actions runner. By default it creates a detached worktree in the system temporary
-directory and removes it on exit, keeping both the main checkout and `.build`
-disposable. Pass `--worktree <path>` only when you deliberately want to manage
-and reuse a persistent release worktree and its llama build cache.
-
-First run a dry run:
-
-```sh
-Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease
-```
-
-The dry run builds the artifact, stamps `Package.swift` inside the isolated
-worktree, validates the package against the local XCFramework, and restores the
-worktree manifest without committing, tagging, or uploading.
-
-Then publish from the same machine:
+Actions runner. It operates from the current clean checkout so it can reuse
+`.build` and `Vendor/llama-artifacts`, and it does not create a release worktree
+or a second llama build cache. Publish in one pass:
 
 ```sh
 Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease --publish
 ```
 
-The publish run creates the same tag-only release commit as CI, pushes only the
-tag, uploads `llama.xcframework.zip` with `gh release create`, and validates the
-published release from a clean consumer package plus app-style links. Pass
-`--prerelease` for shakedown releases.
+The publish run builds the artifact, temporarily stamps `Package.swift`, runs
+the complete local package and app matrix, and restores the manifest byte for
+byte. It then creates the release-only commit through a temporary Git index,
+leaving the current branch and checkout unchanged, pushes only the tag, uploads
+`llama.xcframework.zip`, and verifies public resolution from a clean SwiftPM
+consumer. Pass `--prerelease` for shakedown releases.
+
+`--dry-run` remains available when intentionally developing the release process,
+but it is not a routine prerequisite. It uses the same checkout and reusable
+caches and never commits, tags, or uploads. The ignored `.build` directory is
+disposable and can be deleted whenever its cached products are not worth keeping.
 
 ### Publish a binary release with GitHub Actions
 
 Use the **Publish Llama Binary Artifact** GitHub workflow.
 
-First run with:
+For a routine release, run once with:
 
 - `tag`: the intended release tag, for example `v0.3.0`
 - `prerelease`: `true` for shakedown releases
-- `dry_run`: `true`
+- `dry_run`: `false`
 
-The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing. Validation includes macOS tests, iOS package imports, iOS app-style links for device and simulator, and a clean external SwiftPM consumer that rejects any compile command sourcing files from llama.cpp's `common` or `tools/mtmd` trees.
-
-Then run the workflow again with the same tag and `dry_run=false`. The release run creates a tag-only release commit with the binary URL/checksum, creates the tag, uploads the release asset, and validates the published release from a clean temporary consumer package.
+The workflow builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework before publishing. Validation includes macOS tests, arm64 iOS package imports, arm64 app-style links for device and simulator, and a clean external SwiftPM consumer that rejects any compile command sourcing files from llama.cpp's `common` or `tools/mtmd` trees. It then creates a tag-only release commit with the binary URL/checksum, creates the tag, uploads the release asset, and validates public resolution from a clean temporary consumer package. Set `dry_run=true` only for deliberate release-process development.
 
 Keeping the manifest change on the release tag lets `main` stay source-build friendly while tagged consumers get the binary target.
 
@@ -953,52 +945,21 @@ Keeping the manifest change on the release tag lets `main` stay source-build fri
 Scripts/test-binary-release.sh v0.3.0
 ```
 
-The release workflow runs a consumer import check after uploading the GitHub release asset, then builds the smoke and demo apps from the root Xcode project against the published artifact. This catches problems local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, app-style macOS/iOS links, and llama symbol linkage from the published binary target.
+The release workflow runs clean macOS, iOS-device arm64, and iOS-simulator arm64 consumer import/link checks after uploading the GitHub release asset. This catches the publication failures local validation cannot: tag resolution, checksum mismatch, asset availability, downstream product imports, and llama symbol linkage from the downloaded binary target. The full smoke/demo app matrix already ran before publication and is not repeated afterward.
 
 ### Quick release checklist
 
 For example, to cut `v0.3.0`:
 
-1. Finish and push the source changes that should be released.
-2. Confirm the package is clean locally:
-
-   ```sh
-   CARBOCATION_RUN_LIVE_TESTS=0 swift test
-   xcodebuild build \
-     -project Apps.xcodeproj \
-     -scheme CLLMSmokeMac \
-     -destination 'generic/platform=macOS' \
-     -derivedDataPath .build/CLLMSmokeMacDerivedData \
-     CODE_SIGNING_ALLOWED=NO
-   xcodebuild build \
-     -project Apps.xcodeproj \
-     -scheme CLLMSmokeIOS \
-     -destination 'generic/platform=iOS' \
-     -derivedDataPath .build/CLLMSmokeIOSDerivedData \
-     CODE_SIGNING_ALLOWED=NO
-   xcodebuild build \
-     -project Apps.xcodeproj \
-     -scheme CLLMDemoMac \
-     -destination 'generic/platform=macOS' \
-     -derivedDataPath .build/CLLMDemoMacDerivedData \
-     CODE_SIGNING_ALLOWED=NO
-   xcodebuild build \
-     -project Apps.xcodeproj \
-     -scheme CLLMDemoIOS \
-     -destination 'generic/platform=iOS' \
-     -derivedDataPath .build/CLLMDemoIOSDerivedData \
-     CODE_SIGNING_ALLOWED=NO
-   ```
-
-3. Run `Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease`.
-4. If the dry run passes, run `Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease --publish`. If local publishing is unavailable, run the GitHub workflow with `dry_run: true`, then `dry_run: false`.
-5. Optionally verify from a clean consumer package:
+1. Finish and push the source changes that should be released, and confirm the checkout is clean.
+2. Run `Scripts/publish-llama-binary-local.sh --tag v0.3.0 --no-prerelease --publish`. The script performs the complete prepublication validation itself. If local publishing is unavailable, run the GitHub workflow once with `dry_run: false`.
+3. Optionally repeat the published-consumer check:
 
    ```sh
    Scripts/test-binary-release.sh v0.3.0
    ```
 
-6. In host apps, update the Swift package version to `0.3.0`, add the `CarbocationLocalLLMRuntime` product, and route model selection/generation through `LLMModelSelection` and `LocalLLMEngine`.
+4. In host apps, update the Swift package version to `0.3.0`, add the `CarbocationLocalLLMRuntime` product, and route model selection/generation through `LLMModelSelection` and `LocalLLMEngine`.
 
 ### Runtime modes
 

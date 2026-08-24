@@ -15,7 +15,7 @@ on:
       dry_run:
         description: "Build and validate without committing, tagging, or uploading"
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:

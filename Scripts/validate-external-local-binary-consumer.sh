@@ -35,8 +35,8 @@ let package = Package(
     name: "CarbocationLocalBinaryConsumer",
     platforms: [.macOS(.v14), .iOS(.v17)],
     dependencies: [
-        // Keep the dependency identity stable when the package is checked out
-        // into an isolated release worktree whose directory has another name.
+        // Keep the dependency identity stable regardless of the checkout's
+        // local directory name.
         .package(name: "CarbocationLocalLLM", path: "$ROOT_DIR")
     ],
     targets: [
