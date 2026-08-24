@@ -440,7 +440,7 @@ let response = try await LocalLLMEngine.shared.generate(
 ) { _ in }
 ```
 
-The option is passed through to embedded Jinja chat templates as `enable_thinking`. Templates that do not use that variable ignore it. Models with native effort controls can also receive `reasoning_effort`, while `preserve_thinking` controls whether compatible templates include reasoning from earlier assistant messages:
+The option is passed through llama.cpp's `common/chat` renderer to embedded GGUF templates as `enable_thinking`. Templates that do not use that variable ignore it. Models with native effort controls can also receive `reasoning_effort`, while `preserve_thinking` controls whether compatible templates include reasoning from earlier assistant messages:
 
 ```swift
 let options = GenerationOptions(
@@ -683,6 +683,8 @@ Model weights are not distributed by this package. Downloaded or imported GGUF f
 
 `CarbocationAppleIntelligenceRuntime` is an internal implementation target used by the unified runtime; consume Apple Intelligence through `CarbocationLocalLLMRuntime`.
 
+Carbocation is the stable Swift application layer: it owns the public APIs, unified provider selection, model management, streaming events, cancellation, lifecycle safety, and Apple Intelligence integration. For GGUF models, the pinned llama.cpp revision owns model-specific embedded-template rendering and response protocols through `common/chat`, including reasoning channels, tool syntax, generated grammars, lazy grammar triggers, preserved tokens, and stop sequences. A model with no usable embedded template may use the logged legacy compatibility renderer; a model that has an embedded template but fails upstream rendering returns an explicit error and never silently changes prompt semantics.
+
 ### How the binary release works
 
 For a published release tag such as `v0.3.0`, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`, links the products you chose, and builds your app.
@@ -692,6 +694,8 @@ The binary artifact is a static XCFramework containing:
 - macOS `arm64` and `x86_64`
 - iOS device `arm64`
 - iOS simulator `arm64` and `x86_64`
+
+Every slice contains llama, ggml, llama.cpp `common`/`common-base`, and MTMD plus their required static dependencies, all built from the exact pinned submodule revision. SwiftPM consumers compile only Carbocation's small C/C++ bridges; they do not compile llama.cpp's `common` or MTMD source trees.
 
 SwiftPM handles the link step. The llama runtime declares its own system links for `Metal`, `Accelerate`, `Foundation`, and `libc++`. The archive redistributes static llama.cpp/ggml object code through `libllama-combined.a`; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled and linked notices.
 
@@ -825,7 +829,7 @@ swift run -c release CLLMBenchmarkCommand \
 
 Pass `--mmproj /absolute/path/to/mmproj.gguf` to include a model's projector descriptor. Projector capabilities are probed during model load, but the heavyweight projector context is initialized only on the first image or audio request, so text-only model-load measurements do not eagerly allocate it. If first-use compatibility validation fails after a projector file is repaired or replaced, unload and reload the model before retrying.
 
-The runtime keeps one bounded exact formatting entry and one exact normalized-prompt token entry. This avoids duplicate preparation for cases such as preflight followed by identical generation; it does not assume arbitrary Jinja templates are append-stable and therefore does not skip full rendering for a changed conversation.
+The runtime keeps one bounded exact formatting entry and one exact normalized-prompt token entry. This avoids duplicate preparation for cases such as preflight followed by identical generation; it does not assume arbitrary embedded templates are append-stable and therefore does not skip full rendering for a changed conversation.
 
 The command has no pass/fail thresholds and is never run by `swift test`. For useful comparisons, keep the model, build, prompt, hardware, and system load fixed, and repeat each configuration. Run `swift run -c release CLLMBenchmarkCommand --help` for all controls, including `--gpu-layers`, `--batch-size`, `--ubatch-size`, `--threads`, `--prompt-repeat`, `--mmproj`, `--enable-mtp`, `--disable-mtp`, and `--mtp-max-draft`.
 
@@ -1016,7 +1020,7 @@ Build the local multi-platform llama artifact first:
 Scripts/build-llama-xcframework.sh
 ```
 
-For GGUFs with an embedded chat template, the runtime should report `embeddedTemplate: true` with `formatter=swift-jinja` or, for templates accepted by llama.cpp's legacy C API, `formatter=legacy-c-api`. If both embedded-template paths fail, the runtime reports a template error instead of silently falling back to descriptor- or filename-inferred prompt tokens.
+For GGUFs with an embedded chat template, the runtime should report `embeddedTemplate: true` with `formatter=llama-common-chat`. An embedded-template render or parse failure is reported explicitly instead of silently falling back to descriptor- or filename-inferred prompt tokens. `formatter=legacy-c-api` and the logged compatibility renderer are reserved for models that do not provide a usable embedded template.
 
 ### Package layout
 
@@ -1033,7 +1037,7 @@ Sources/
   CarbocationLlamaRuntime/                llama.cpp-backed runtime
   CarbocationAppleIntelligenceRuntime/    Foundation Models-backed runtime (consumed via the unified facade)
   CarbocationLocalLLMUI/                  Lower-level SwiftUI model library picker
-  llama/                                  module map for the llama.cpp build
+  llama/                                  module map for the precompiled llama.cpp artifact
 Tests/
 Scripts/
   build-llama-apple-platform.sh           Shared Apple-platform llama.cpp static library builder
@@ -1057,7 +1061,8 @@ Stays in this package:
 - provider-aware model selection and persistence
 - Apple Intelligence availability gating
 - llama.cpp model/context loading, grammar-aware generation, streaming, cancellation
-- chat-template fallback handling (including Gemma)
+- stable Swift translation of llama.cpp `common/chat` rendering and parsing results
+- logged compatibility prompts for models without usable embedded templates
 - shared generation options and balanced-JSON post-processing
 - SwiftUI model-management surfaces
 - smoke tests and diagnostics hooks
