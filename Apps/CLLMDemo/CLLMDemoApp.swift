@@ -29,6 +29,15 @@ private struct DemoRootView: View {
                     title: CLLMDemoMetadata.displayName,
                     confirmTitle: "Use Model",
                     confirmDisabled: state.isRunning,
+                    configuration: state.modelSettingsConfiguration,
+                    accelerationPolicy: Binding(
+                        get: { state.accelerationPolicy },
+                        set: { state.setMTPAccelerationEnabled($0 == .automatic) }
+                    ),
+                    mtpMaxDraftTokens: Binding(
+                        get: { state.mtpMaxDraftTokens },
+                        set: { state.setMTPMaxDraftTokens($0) }
+                    ),
                     onModelDeleted: { model in
                         state.modelDeleted(model)
                     },
@@ -184,28 +193,6 @@ private struct PromptPane: View {
             Toggle("Thinking", isOn: $state.enableThinking)
                 .disabled(state.isRunning)
 
-            HStack {
-                Toggle(
-                    isOn: Binding(
-                        get: { state.mtpAccelerationEnabled },
-                        set: { state.setMTPAccelerationEnabled($0) }
-                    )
-                ) {
-                    Label(
-                        "MTP",
-                        systemImage: state.mtpAccelerationEnabled ? "bolt.fill" : "bolt.slash"
-                    )
-                }
-                .disabled(state.isRunning)
-                .help("Enable or disable MTP acceleration for the next model load")
-
-                Spacer()
-
-                Text(state.accelerationPolicyStatusLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("Max output")
                     .frame(width: 84, alignment: .leading)
@@ -215,26 +202,6 @@ private struct PromptPane: View {
                     .demoNumericInput()
                     .disabled(state.isRunning)
                     .frame(maxWidth: 180)
-
-                Text("tokens")
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("MTP draft")
-                    .frame(width: 84, alignment: .leading)
-
-                TextField(
-                    "3",
-                    text: Binding(
-                        get: { state.mtpMaxDraftTokensText },
-                        set: { state.setMTPMaxDraftTokensText($0) }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
-                .demoNumericInput()
-                .disabled(state.isRunning || !state.mtpAccelerationEnabled)
-                .frame(maxWidth: 180)
 
                 Text("tokens")
                     .foregroundStyle(.secondary)

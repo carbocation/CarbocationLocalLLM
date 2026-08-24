@@ -105,12 +105,26 @@ func makeLibrary() -> ModelLibrary {
 
 struct ModelSettingsView: View {
     @AppStorage("llama.selectedModelID") private var selectedModelID = ""
+    @AppStorage("llama.accelerationPolicy")
+    private var accelerationPolicy = LLMAccelerationPolicy.disabled
+    @AppStorage("llama.mtpMaxDraftTokens")
+    private var mtpMaxDraftTokens = LocalLLMEngineConfiguration.defaultMTPMaxDraftTokens
     let library: ModelLibrary
+
+    private var runtimeConfiguration: LocalLLMEngineConfiguration {
+        LocalLLMEngineConfiguration(
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: mtpMaxDraftTokens
+        )
+    }
 
     var body: some View {
         LocalLLMModelConfigurationView(
             library: library,
-            selectedModelID: $selectedModelID
+            selectedModelID: $selectedModelID,
+            configuration: runtimeConfiguration,
+            accelerationPolicy: $accelerationPolicy,
+            mtpMaxDraftTokens: $mtpMaxDraftTokens
         )
     }
 }
@@ -118,19 +132,25 @@ struct ModelSettingsView: View {
 func generate(
     prompt: String,
     using library: ModelLibrary,
-    storedSelection: String
+    storedSelection: String,
+    engine: LocalLLMEngine,
+    configuration: LocalLLMEngineConfiguration
 ) async throws -> String {
-    guard let plan = await LocalLLMEngine.loadPlan(from: storedSelection, in: library) else {
+    guard let plan = await LocalLLMEngine.loadPlan(
+        from: storedSelection,
+        in: library,
+        configuration: configuration
+    ) else {
         throw LocalLLMEngineError.invalidSelection(storedSelection)
     }
 
-    let loaded = try await LocalLLMEngine.shared.load(
+    _ = try await engine.load(
         selection: plan.selection,
         from: library,
         requestedContext: plan.requestedContext
     )
 
-    let response = try await LocalLLMEngine.shared.generate(
+    let response = try await engine.generate(
         system: "You are a helpful assistant.",
         prompt: prompt,
         options: GenerationOptions(maxOutputTokens: 512)
@@ -139,6 +159,12 @@ func generate(
     return response
 }
 ```
+
+The optional acceleration bindings expose MTP in the reusable settings view.
+Use the same values to construct the app's `LocalLLMEngineConfiguration`, and
+unload or replace an existing engine when either value changes because MTP is a
+model-load setting. The view uses the bound values for context-calibration keys,
+so standard and MTP-assisted configurations retain separate calibration records.
 
 `LocalLLMModelConfigurationView` is the preferred app-facing model configuration surface. It wires installed GGUF models, system models, curated downloads, imports, context calibration, automatic context-window limits, and manual fixed-context preferences. `storedSelection` is whatever you persisted in `@AppStorage` or `UserDefaults`.
 

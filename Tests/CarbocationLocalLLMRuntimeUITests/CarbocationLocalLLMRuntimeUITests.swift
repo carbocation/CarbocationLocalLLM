@@ -96,6 +96,45 @@ final class CarbocationLocalLLMRuntimeUITests: XCTestCase {
         ])
     }
 
+    func testEditableMTPControlsUpdateTheEffectiveRuntimeConfiguration() throws {
+        let root = try makeTemporaryDirectory()
+        let library = ModelLibrary(root: root, searchConfiguration: .managedOnly, contextLengthProbe: { _ in nil })
+        let settings = AccelerationSettings()
+        let baseConfiguration = LocalLLMEngineConfiguration(heartbeatInterval: 0.25)
+
+        let view = LocalLLMModelConfigurationView(
+            library: library,
+            selectedModelID: .constant(""),
+            configuration: baseConfiguration,
+            accelerationPolicy: Binding(
+                get: { settings.policy },
+                set: { settings.policy = $0 }
+            ),
+            mtpMaxDraftTokens: Binding(
+                get: { settings.maxDraftTokens },
+                set: { settings.maxDraftTokens = $0 }
+            )
+        )
+
+        XCTAssertEqual(view.effectiveConfiguration.accelerationPolicy, .disabled)
+        XCTAssertEqual(view.effectiveConfiguration.mtpMaxDraftTokens, 1)
+        XCTAssertEqual(view.effectiveConfiguration.heartbeatInterval, 0.25)
+
+        view.setMTPAccelerationEnabled(true)
+        view.setMTPMaxDraftTokens(99)
+
+        XCTAssertEqual(settings.policy, .automatic)
+        XCTAssertEqual(settings.maxDraftTokens, 32)
+        XCTAssertEqual(view.effectiveConfiguration.accelerationPolicy, .automatic)
+        XCTAssertEqual(view.effectiveConfiguration.mtpMaxDraftTokens, 32)
+        XCTAssertEqual(
+            view.pickerCalibrationAdapter?.runtimeFingerprint,
+            LocalLLMEngine.contextCalibrationRuntimeFingerprint(
+                configuration: view.effectiveConfiguration
+            )
+        )
+    }
+
     func testUncalibratedContextWindowTiersStayConservative() {
         let candidates = LocalLLMContextWindowTiers.candidates(
             trainingContext: 262_144,
@@ -136,4 +175,10 @@ final class CarbocationLocalLLMRuntimeUITests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
+}
+
+@MainActor
+private final class AccelerationSettings {
+    var policy = LLMAccelerationPolicy.disabled
+    var maxDraftTokens = 1
 }

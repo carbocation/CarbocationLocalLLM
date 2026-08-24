@@ -70,7 +70,7 @@ extension LocalLLMModelConfigurationView {
         return Self.makeCalibrationAdapter(
             library: library,
             store: calibrationStore,
-            configuration: configuration,
+            configuration: effectiveConfiguration,
             onCalibrationStarted: { model in
                 prepareSelectedContextForCalibration(model)
             },
@@ -242,7 +242,7 @@ extension LocalLLMModelConfigurationView {
     func calibrationRecord(for model: InstalledModel) -> LlamaContextCalibrationRecord? {
         calibrationStore.record(
             for: model,
-            runtime: LocalLLMEngine.contextCalibrationRuntimeFingerprint(configuration: configuration)
+            runtime: LocalLLMEngine.contextCalibrationRuntimeFingerprint(configuration: effectiveConfiguration)
         )
     }
 
@@ -427,7 +427,7 @@ extension LocalLLMModelConfigurationView {
         let adapter = Self.makeCalibrationAdapter(
             library: library,
             store: calibrationStore,
-            configuration: configuration,
+            configuration: effectiveConfiguration,
             onCalibrationStarted: { model in
                 prepareSelectedContextForCalibration(model)
             },

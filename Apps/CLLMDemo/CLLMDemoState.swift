@@ -146,7 +146,7 @@ final class DemoState {
     var enableThinking = false
     var thinkingBudgetText = ""
     var maxOutputTokensText = ""
-    var mtpMaxDraftTokensText: String
+    var mtpMaxDraftTokens: Int
     var accelerationPolicy: LLMAccelerationPolicy
     var runMode: DemoRunMode = .plain
     var enableLoadWebpageTool = true
@@ -178,10 +178,11 @@ final class DemoState {
         let savedAccelerationPolicy = UserDefaults.standard
             .string(forKey: CLLMDemoMetadata.accelerationPolicyDefaultsKey)
             .flatMap(LLMAccelerationPolicy.init(rawValue:)) ?? .disabled
-        let savedMTPMaxDraftTokens = UserDefaults.standard
+        let storedMTPMaxDraftTokens = UserDefaults.standard
             .object(forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey) as? Int
             ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
-        mtpMaxDraftTokensText = String(savedMTPMaxDraftTokens)
+        let savedMTPMaxDraftTokens = min(max(storedMTPMaxDraftTokens, 1), 32)
+        mtpMaxDraftTokens = savedMTPMaxDraftTokens
         accelerationPolicy = savedAccelerationPolicy
         engine = Self.makeEngine(
             accelerationPolicy: savedAccelerationPolicy,
@@ -222,23 +223,9 @@ final class DemoState {
         isRunning && enableThinking && streamPhase == .thinking
     }
 
-    var mtpAccelerationEnabled: Bool {
-        accelerationPolicy == .automatic
-    }
-
-    var accelerationPolicyStatusLabel: String {
-        switch accelerationPolicy {
-        case .automatic:
-            return "Auto"
-        case .disabled:
-            return "Off"
-        }
-    }
-
     var generationOptionsValidationMessage: String? {
         thinkingBudgetValidationMessage
             ?? maxOutputTokensValidationMessage
-            ?? mtpMaxDraftTokensValidationMessage
             ?? samplingOptionsValidationMessage
     }
 
@@ -378,10 +365,6 @@ final class DemoState {
         validateInt(maxOutputTokensText, name: "Max output tokens", lowerBound: 1)
     }
 
-    var mtpMaxDraftTokensValidationMessage: String? {
-        validateInt(mtpMaxDraftTokensText, name: "MTP draft tokens", lowerBound: 1, upperBound: 32)
-    }
-
     var samplingOptionsValidationMessage: String? {
         validateDouble(
             temperatureText,
@@ -476,8 +459,11 @@ final class DemoState {
         )
     }
 
-    private var parsedMTPMaxDraftTokens: Int {
-        parsedInt(mtpMaxDraftTokensText) ?? CLLMDemoMetadata.defaultMTPMaxDraftTokens
+    var modelSettingsConfiguration: LocalLLMEngineConfiguration {
+        Self.engineConfiguration(
+            accelerationPolicy: accelerationPolicy,
+            mtpMaxDraftTokens: mtpMaxDraftTokens
+        )
     }
 
     private func parsedDouble(_ text: String) -> Double? {
@@ -629,17 +615,16 @@ final class DemoState {
         let oldEngine = engine
         engine = Self.makeEngine(
             accelerationPolicy: newPolicy,
-            mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+            mtpMaxDraftTokens: mtpMaxDraftTokens
         )
         scheduleRuntimeUnload(oldEngine)
     }
 
-    func setMTPMaxDraftTokensText(_ value: String) {
+    func setMTPMaxDraftTokens(_ value: Int) {
         guard !isRunning else { return }
-        mtpMaxDraftTokensText = value
-
-        guard mtpMaxDraftTokensValidationMessage == nil else { return }
-        let maxDraftTokens = parsedMTPMaxDraftTokens
+        let maxDraftTokens = min(max(value, 1), 32)
+        guard mtpMaxDraftTokens != maxDraftTokens else { return }
+        mtpMaxDraftTokens = maxDraftTokens
         UserDefaults.standard.set(maxDraftTokens, forKey: CLLMDemoMetadata.mtpMaxDraftTokensDefaultsKey)
         activeGenerationID = nil
         loadedInfo = nil
@@ -756,7 +741,7 @@ final class DemoState {
                 in: library,
                 configuration: Self.engineConfiguration(
                     accelerationPolicy: accelerationPolicy,
-                    mtpMaxDraftTokens: parsedMTPMaxDraftTokens
+                    mtpMaxDraftTokens: mtpMaxDraftTokens
                 )
             ) else {
                 normalizeSelection()
@@ -788,7 +773,7 @@ final class DemoState {
             appendEvent("grammar: \(loaded.supportsGrammar ? "yes" : "no")")
             appendEvent("mtp-support: \(loaded.supportsMTPAcceleration ? "yes" : "no")")
             appendEvent("mtp-policy: \(accelerationPolicy.rawValue)")
-            appendEvent("mtp-max-draft: \(parsedMTPMaxDraftTokens)")
+            appendEvent("mtp-max-draft: \(mtpMaxDraftTokens)")
 
             let options = generationOptions(for: loaded)
             appendGenerationOptionsEvent(options: options, loaded: loaded)

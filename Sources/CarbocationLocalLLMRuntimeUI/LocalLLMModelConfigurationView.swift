@@ -24,6 +24,8 @@ public struct LocalLLMModelConfigurationView: View {
     let contextControls: LocalLLMModelConfigurationContextControls
     let calibrationStore: LlamaContextCalibrationStore
     let configuration: LocalLLMEngineConfiguration
+    let accelerationPolicyBinding: Binding<LLMAccelerationPolicy>?
+    let mtpMaxDraftTokensBinding: Binding<Int>?
     let onModelDeleted: @MainActor (InstalledModel) -> Void
     let onConfirmSelection: (@MainActor (LLMModelSelection) -> Void)?
 
@@ -51,6 +53,8 @@ public struct LocalLLMModelConfigurationView: View {
         contextControls: LocalLLMModelConfigurationContextControls = .visible,
         calibrationStore: LlamaContextCalibrationStore = .shared,
         configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration(),
+        accelerationPolicy: Binding<LLMAccelerationPolicy>? = nil,
+        mtpMaxDraftTokens: Binding<Int>? = nil,
         onModelDeleted: @escaping @MainActor (InstalledModel) -> Void = { _ in },
         onConfirmSelection: (@MainActor (LLMModelSelection) -> Void)? = nil
     ) {
@@ -67,6 +71,8 @@ public struct LocalLLMModelConfigurationView: View {
         self.contextControls = contextControls
         self.calibrationStore = calibrationStore
         self.configuration = configuration
+        self.accelerationPolicyBinding = accelerationPolicy
+        self.mtpMaxDraftTokensBinding = mtpMaxDraftTokens
         self.onModelDeleted = onModelDeleted
         self.onConfirmSelection = onConfirmSelection
         self._contextModeRaw = State(initialValue: LlamaContextPolicy.currentMode(
@@ -110,6 +116,12 @@ public struct LocalLLMModelConfigurationView: View {
                 contextSection
                     .padding(20)
                     .id(refreshToken)
+            }
+
+            if accelerationPolicyBinding != nil {
+                Divider()
+                accelerationSection
+                    .padding(20)
             }
         }
         .task {
