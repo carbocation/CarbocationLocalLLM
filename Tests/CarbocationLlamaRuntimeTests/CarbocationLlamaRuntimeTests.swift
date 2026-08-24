@@ -2593,12 +2593,10 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
     }
 
     func testPreflightLiveReportsExactCountsAndRejectsInvalidGrammarWhenModelPathProvided() async throws {
-        guard let path = ProcessInfo.processInfo.environment["LLAMA_TEST_MODEL_PATH"]
-                ?? ProcessInfo.processInfo.environment["CALGACUS_TEST_MODEL_PATH"],
-              !path.isEmpty
-        else {
-            throw XCTSkip("Set LLAMA_TEST_MODEL_PATH or CALGACUS_TEST_MODEL_PATH to run the live llama preflight test.")
-        }
+        let path = try LiveModelTestPolicy.requiredReadablePath(
+            "LLAMA_TEST_MODEL_PATH",
+            for: .textPreflight
+        )
 
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
             gpuLayerCount: 0,
@@ -2645,13 +2643,16 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
     func testVisionLiveClearsKVCacheAfterPriorTextGenerationWhenModelPathsProvided() async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let modelPath = environment["CLLM_VISION_MODEL_PATH"],
-              let mmprojPath = environment["CLLM_VISION_MMPROJ_PATH"],
-              !modelPath.isEmpty,
-              !mmprojPath.isEmpty
-        else {
-            throw XCTSkip("Set CLLM_VISION_MODEL_PATH and CLLM_VISION_MMPROJ_PATH to run the live vision KV reset test.")
-        }
+        let modelPath = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_VISION_MODEL_PATH",
+            for: .visionKVReset,
+            environment: environment
+        )
+        let mmprojPath = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_VISION_MMPROJ_PATH",
+            for: .visionKVReset,
+            environment: environment
+        )
 
         let requestedContext = environment["CLLM_VISION_CONTEXT"].flatMap(Int.init) ?? 4_096
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
@@ -2704,15 +2705,21 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
     func testAudioLiveTranscribesWhenModelPathsProvided() async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let modelPath = environment["CLLM_AUDIO_MODEL_PATH"],
-              let mmprojPath = environment["CLLM_AUDIO_MMPROJ_PATH"],
-              let samplePath = environment["CLLM_AUDIO_SAMPLE_PATH"],
-              !modelPath.isEmpty,
-              !mmprojPath.isEmpty,
-              !samplePath.isEmpty
-        else {
-            throw XCTSkip("Set CLLM_AUDIO_MODEL_PATH, CLLM_AUDIO_MMPROJ_PATH, and CLLM_AUDIO_SAMPLE_PATH to run the live audio test.")
-        }
+        let modelPath = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_AUDIO_MODEL_PATH",
+            for: .audioTranscription,
+            environment: environment
+        )
+        let mmprojPath = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_AUDIO_MMPROJ_PATH",
+            for: .audioTranscription,
+            environment: environment
+        )
+        let samplePath = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_AUDIO_SAMPLE_PATH",
+            for: .audioTranscription,
+            environment: environment
+        )
 
         let requestedContext = environment["CLLM_AUDIO_CONTEXT"].flatMap(Int.init) ?? 4_096
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
@@ -2751,11 +2758,10 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
     }
 
     func testCalgacusLiveRoundTripWhenModelPathProvided() async throws {
-        guard let path = ProcessInfo.processInfo.environment["CALGACUS_TEST_MODEL_PATH"],
-              !path.isEmpty
-        else {
-            throw XCTSkip("Set CALGACUS_TEST_MODEL_PATH to run the live Calgacus round-trip test.")
-        }
+        let path = try LiveModelTestPolicy.requiredReadablePath(
+            "CALGACUS_TEST_MODEL_PATH",
+            for: .calgacusRoundTrip
+        )
 
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
             gpuLayerCount: 0,

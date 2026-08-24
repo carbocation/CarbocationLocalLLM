@@ -333,9 +333,7 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
     }
 
     func testLiveGenerationWhenExplicitlyEnabled() async throws {
-        guard ProcessInfo.processInfo.environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
-            throw XCTSkip("Set CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 to run the live Apple Intelligence smoke test.")
-        }
+        try requireAppleIntelligenceLiveTests()
 
         let availability = AppleIntelligenceEngine.availability()
         guard availability.isAvailable else {
@@ -429,6 +427,18 @@ final class CarbocationAppleIntelligenceRuntimeTests: XCTestCase {
         }
     }
     #endif
+}
+
+private func requireAppleIntelligenceLiveTests(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) throws {
+    guard environment["CARBOCATION_RUN_LIVE_TESTS"] == "1",
+          environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
+        throw XCTSkip(
+            "Apple Intelligence live tests are disabled. "
+                + "Run Scripts/run-live-tests.sh apple-intelligence on an eligible system."
+        )
+    }
 }
 
 private struct AppleIntelligenceLivePayload: Decodable {

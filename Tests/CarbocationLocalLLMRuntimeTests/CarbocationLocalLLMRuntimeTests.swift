@@ -508,11 +508,13 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testSystemModelPreflightUsesEstimatedTokenCountsWhenAvailable() async throws {
+    func testLiveSystemModelPreflightUsesEstimatedTokenCountsWhenExplicitlyEnabled() async throws {
+        try requireAppleIntelligenceLiveTests()
+
         guard let option = LocalLLMEngine.availableSystemModels().first(where: {
             $0.selection == .system(.appleIntelligence)
         }) else {
-            return
+            throw XCTSkip("Apple Intelligence is not available through LocalLLMEngine.")
         }
 
         let root = try makeTemporaryDirectory()
@@ -541,9 +543,7 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
 
     @MainActor
     func testLiveSystemModelGenerationWhenExplicitlyEnabled() async throws {
-        guard ProcessInfo.processInfo.environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
-            throw XCTSkip("Set CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 to run the live system-model smoke test.")
-        }
+        try requireAppleIntelligenceLiveTests()
 
         guard let option = LocalLLMEngine.availableSystemModels().first(where: {
             $0.selection == .system(.appleIntelligence)
@@ -573,6 +573,18 @@ final class CarbocationLocalLLMRuntimeTests: XCTestCase {
         let payload = try JSONSalvage.decode(RuntimeLivePayload.self, from: response)
         XCTAssertNotNil(payload.ok)
         XCTAssertNotNil(payload.message)
+    }
+}
+
+private func requireAppleIntelligenceLiveTests(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) throws {
+    guard environment["CARBOCATION_RUN_LIVE_TESTS"] == "1",
+          environment["CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST"] == "1" else {
+        throw XCTSkip(
+            "Apple Intelligence live tests are disabled. "
+                + "Run Scripts/run-live-tests.sh apple-intelligence on an eligible system."
+        )
     }
 }
 

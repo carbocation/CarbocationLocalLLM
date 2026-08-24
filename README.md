@@ -770,12 +770,18 @@ There are two entry points and they show different schemes — pick the one that
 
 Avoid `open . -a Xcode` — with both `Package.swift` and `Apps.xcodeproj` at the root, Xcode 26 picks package mode and the app schemes will not appear.
 
-The Apple Intelligence live generation smoke test is skipped by default so normal CI does not depend on a supported device. To run it locally on an eligible macOS 26+ system:
+Normal `swift test`, CI, and release qualification do not load installed models or run live Apple Intelligence generation. Live tests require a master opt-in and are grouped into explicit, model-family-neutral capability profiles. Run only the profile you intend to evaluate:
 
 ```sh
-CARBOCATION_RUN_APPLE_INTELLIGENCE_LIVE_TEST=1 swift test \
-  --filter CarbocationAppleIntelligenceRuntimeTests/testLiveGenerationWhenExplicitlyEnabled
+Scripts/run-live-tests.sh text-preflight /absolute/path/to/model.gguf
+Scripts/run-live-tests.sh common-chat-thinking-tools /absolute/path/to/model.gguf
+Scripts/run-live-tests.sh vision-kv-reset /absolute/path/to/model.gguf /absolute/path/to/mmproj.gguf
+Scripts/run-live-tests.sh audio-transcription /absolute/path/to/model.gguf /absolute/path/to/mmproj.gguf /absolute/path/to/sample.wav
+Scripts/run-live-tests.sh calgacus-round-trip /absolute/path/to/model.gguf
+Scripts/run-live-tests.sh apple-intelligence
 ```
+
+The runner validates the supplied files, clears unrelated live-test paths from its environment, enables one capability profile, and invokes only that profile's tests. `common-chat-thinking-tools` requires an embedded llama.cpp common/chat template that supports low-effort thinking and named native tool calls; the multimodal profiles require a compatible projector. No profile assumes a model family, filename, or model-library location. Release validation explicitly disables the master opt-in and removes all live-model paths inherited from the caller.
 
 ### Build the local llama source artifact
 
@@ -930,7 +936,7 @@ For example, to cut `v0.3.0`:
 2. Confirm the package is clean locally:
 
    ```sh
-   swift test
+   CARBOCATION_RUN_LIVE_TESTS=0 swift test
    xcodebuild build \
      -project Apps.xcodeproj \
      -scheme CLLMSmokeMac \

@@ -5,10 +5,10 @@ import XCTest
 
 final class LlamaCommonChatLiveTests: XCTestCase {
     func testLiveEmbeddedTemplateThinkingAndNamedToolChoice() async throws {
-        guard let path = ProcessInfo.processInfo.environment["CLLM_COMMON_CHAT_LIVE_MODEL_PATH"],
-              FileManager.default.isReadableFile(atPath: path) else {
-            throw XCTSkip("Set CLLM_COMMON_CHAT_LIVE_MODEL_PATH to run the live common-chat smoke test.")
-        }
+        let path = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_COMMON_CHAT_LIVE_MODEL_PATH",
+            for: .commonChatThinkingAndTools
+        )
 
         let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
             gpuLayerCount: -1,
