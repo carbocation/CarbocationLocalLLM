@@ -438,6 +438,42 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         }
     }
 
+    func testUnphasedToolGenerationPreservesIncompleteSegmentStopReason() async throws {
+        let engine = LlamaEngine()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "Tool Stop Reason Vocab",
+            requestedContext: 1_024
+        )
+        await engine.setToolAwareGenerationSegmentOverrideForTesting { _ in
+            LlamaEngine.ToolAwareGenerationSegmentOverrideOutput(
+                finalText: "Partial response",
+                reasoningContent: nil,
+                toolCalls: [],
+                stopReason: "max-tokens",
+                triggerPhase: .final,
+                remainingThinkingBudgetTokens: nil,
+                generatedTokens: 8
+            )
+        }
+        let tool = LLMTool(
+            definition: LLMToolDefinition(name: "lookup", description: "Lookup test data.")
+        ) { _ in
+            ["ok": true]
+        }
+
+        let result = try await engine.generateWithTools(LLMToolGenerationRequest(
+            prompt: "Use lookup.",
+            tools: [tool]
+        ))
+
+        XCTAssertEqual(result.finalText, "Partial response")
+        XCTAssertEqual(result.stopReason, "max-tokens")
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertTrue(result.toolOutputs.isEmpty)
+        XCTAssertEqual(result.roundsCompleted, 0)
+    }
+
     func testNativeToolHistoryKeepsAssistantReasoningSeparate() {
         let messages = LlamaEngine.nativeToolMessages(
             system: "System",
@@ -620,7 +656,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         }
 
         XCTAssertEqual(result.finalText, "Final answer after tool.")
-        XCTAssertEqual(result.stopReason, "complete")
+        XCTAssertEqual(result.stopReason, "eog")
         XCTAssertEqual(result.roundsCompleted, 1)
         XCTAssertEqual(result.toolCalls.map(\.name), ["lookup"])
         XCTAssertEqual(result.toolOutputs.map(\.content), [["answer": "tool output"]])

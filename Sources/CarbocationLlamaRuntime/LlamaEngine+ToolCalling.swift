@@ -192,13 +192,13 @@ extension LlamaEngine {
 
             let calls = idAllocator.materialize(segment.toolCalls)
             guard !calls.isEmpty else {
-                emitAggregateStats(stopReason: "complete")
+                emitAggregateStats(stopReason: segment.stopReason)
                 return LLMToolGenerationResult(
                     finalText: streamState.text,
                     toolCalls: allCalls,
                     toolOutputs: allOutputs,
                     roundsCompleted: roundsCompleted,
-                    stopReason: "complete"
+                    stopReason: segment.stopReason
                 )
             }
 
