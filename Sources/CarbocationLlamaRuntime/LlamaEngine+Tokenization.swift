@@ -508,6 +508,31 @@ extension LlamaEngine {
         }
     }
 
+    func commonChatPreservedTokenIDs(
+        metadata: LlamaCommonChatRenderMetadata?,
+        vocab: OpaquePointer
+    ) -> Set<llama_token> {
+        guard let metadata else { return [] }
+        return Set(metadata.preservedTokens.compactMap { value in
+            guard let tokens = try? tokenize(vocab: vocab, text: value, addSpecial: false),
+                  tokens.count == 1 else {
+                return nil
+            }
+            return tokens[0]
+        })
+    }
+
+    func generatedTokenPiece(
+        vocab: OpaquePointer,
+        token: llama_token,
+        preservedTokenIDs: Set<llama_token>
+    ) -> Data {
+        let rawPiece = tokenToPiece(vocab: vocab, token: token)
+        return rawPiece.isEmpty || preservedTokenIDs.contains(token)
+            ? tokenToPiece(vocab: vocab, token: token, special: true)
+            : rawPiece
+    }
+
     func diagnosticTokenDescription(_ token: llama_token, vocab: OpaquePointer) -> String {
         let rawPiece = tokenToPiece(vocab: vocab, token: token)
         let pieceData = rawPiece.isEmpty

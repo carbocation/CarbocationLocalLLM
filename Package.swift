@@ -340,7 +340,6 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", exact: "2.9.6")
     ],
     targets: [
@@ -384,8 +383,7 @@ let package = Package(
                 "CarbocationLocalLLM",
                 "CarbocationLlamaCommonBridge",
                 "CarbocationLlamaMTMDBridge",
-                "llama",
-                .product(name: "Jinja", package: "swift-jinja")
+                "llama"
             ],
             linkerSettings: llamaUnsafeLinkerSettings + [
                 .linkedLibrary("c++"),

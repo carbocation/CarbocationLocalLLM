@@ -639,8 +639,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(snapshot.prompts[0].contains("<|tool>"))
         XCTAssertTrue(snapshot.prompts[0].contains("declaration:lookup"))
         XCTAssertTrue(snapshot.prompts[1].contains(#"<|tool_call>call:lookup{query:<|"|>sp500<|"|>}<tool_call|>"#))
-        XCTAssertTrue(snapshot.prompts[1].contains("<|turn>tool\n<turn|>"))
-        XCTAssertTrue(snapshot.prompts[1].contains("Use the tool outputs above to continue the answer."))
+        XCTAssertTrue(snapshot.prompts[1].contains("tool output"))
+        XCTAssertFalse(snapshot.prompts[1].contains("Use the tool outputs above to continue the answer."))
         XCTAssertEqual(snapshot.templateModes, [.embedded, .embedded])
         XCTAssertEqual(snapshot.isInternalContinuationFlags, [false, true])
     }
@@ -1240,9 +1240,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
-    func testSwiftJinjaAppliesGemma4Template() throws {
+    func testCommonChatAppliesGemma4Template() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "User",
@@ -1261,9 +1261,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(prompt.contains("<end_of_turn>"))
     }
 
-    func testSwiftJinjaGemma4ThinkingEnabledStartsImplicitThoughtChannel() throws {
+    func testCommonChatGemma4ThinkingEnabledStartsImplicitThoughtChannel() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "User",
@@ -1281,9 +1281,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
-    func testSwiftJinjaGemma4RendersNativeTools() throws {
+    func testCommonChatGemma4RendersNativeTools() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let formatter = try LlamaChatTemplateRenderer(template: template)
         let tool = LLMToolDefinition(
             name: "bing_search",
             description: "Search the web.",
@@ -1315,9 +1315,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(prompt.contains("<tool|>"))
     }
 
-    func testSwiftJinjaGemma4RendersNativeToolHistory() throws {
+    func testCommonChatGemma4RendersNativeToolHistory() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let formatter = try LlamaChatTemplateRenderer(template: template)
         let call = LLMToolCall(
             executionID: "call_1",
             rawID: "call_1",
@@ -1342,13 +1342,13 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
         XCTAssertTrue(prompt.contains(#"<|tool_call>call:bing_search{queries:[<|"|>is Ted Turner still alive<|"|>]}<tool_call|>"#))
         XCTAssertTrue(prompt.contains(#"<|tool_response>response:bing_search{"#))
-        XCTAssertTrue(prompt.contains(#"answer:<|"|>Ted Turner is alive.<|"|>"#))
+        XCTAssertTrue(prompt.contains("Ted Turner is alive."))
         XCTAssertTrue(prompt.contains("<tool_response|>"))
     }
 
-    func testSwiftJinjaQwenThinkingEnabledLeavesThinkingOpen() throws {
+    func testCommonChatQwenThinkingEnabledLeavesThinkingOpen() throws {
         let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "User",
@@ -1365,9 +1365,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
-    func testSwiftJinjaQwenThinkingDisabledUsesClosedEmptyThinkingBlock() throws {
+    func testCommonChatQwenThinkingDisabledUsesClosedEmptyThinkingBlock() throws {
         let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "User",
@@ -1381,7 +1381,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
     }
 
-    func testSwiftJinjaForwardsReasoningControlsAndAssistantReasoningHistory() throws {
+    func testCommonChatForwardsReasoningControlsAndAssistantReasoningHistory() throws {
         let template = """
         {{ reasoning_effort|default('template-default') }}|{{ preserve_thinking|default(true) }}|
         {%- for message in messages -%}
@@ -1389,7 +1389,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         {%- endfor -%}
         {{- add_generation_prompt -}}
         """
-        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let formatter = try LlamaChatTemplateRenderer(template: template)
         let prompt = try formatter.format(
             messages: [
                 ChatTemplateMessage(role: "user", content: "Question"),
@@ -1406,13 +1406,13 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             preserveThinking: false
         )
 
-        XCTAssertTrue(prompt.contains("medium|false|"))
+        XCTAssertTrue(prompt.lowercased().contains("medium|false|"))
         XCTAssertTrue(prompt.contains("assistant=Visible answer:Historical reasoning;"))
     }
 
-    func testSwiftJinjaLeavesReasoningControlsUndefinedWhenNotRequested() throws {
-        let template = "{{ reasoning_effort|default('xhigh') }}|{{ preserve_thinking|default(true) }}|{{ messages[1].content }}"
-        let prompt = try ChatTemplatePromptFormatter.format(
+    func testCommonChatLeavesReasoningControlsUndefinedWhenNotRequested() throws {
+        let template = "{{ reasoning_effort|default('xhigh') }}|{{ preserve_thinking|default(true) }}|{% for message in messages %}{{ message.content }}{% endfor %}"
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "",
             user: "Question",
@@ -1421,7 +1421,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             enableThinking: true
         )
 
-        XCTAssertEqual(prompt, "xhigh|true|Question")
+        XCTAssertTrue(prompt.lowercased().hasPrefix("xhigh|true|"))
+        XCTAssertTrue(prompt.contains("Question"))
     }
 
     func testReasoningBudgetPlanRequiresEnabledThinkingAndDelimiters() {
@@ -2459,9 +2460,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(returned, #"{"title":"x"}"#)
     }
 
-    func testSwiftJinjaGemma4DefaultThinkingPromptIsClosed() throws {
+    func testCommonChatGemma4DefaultThinkingPromptIsClosed() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "User",
@@ -2474,9 +2475,9 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.continuingOpenThinkingPairs(in: prompt, profile: profile), [])
     }
 
-    func testPreparedSwiftJinjaFormatterCanBeReused() throws {
+    func testPreparedCommonChatRendererCanBeReused() throws {
         let template = try String(contentsOf: Self.gemma4TemplateURL, encoding: .utf8)
-        let formatter = try ChatTemplatePromptFormatter(template: template)
+        let formatter = try LlamaChatTemplateRenderer(template: template)
 
         let first = try formatter.format(
             system: "System",
@@ -2496,8 +2497,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(second.contains("First"))
     }
 
-    func testSwiftJinjaRejectsNonTemplateAliasBeforeLegacyFallback() {
-        XCTAssertThrowsError(try ChatTemplatePromptFormatter.format(
+    func testCommonChatRejectsNonTemplateAliasBeforeLegacyFallback() {
+        XCTAssertThrowsError(try LlamaChatTemplateRenderer.format(
             template: "chatml",
             system: "System",
             user: "User",

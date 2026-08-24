@@ -23,6 +23,7 @@ struct carbocation_llama_chat_plan {
     common_chat_params value;
     common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
     bool is_continuation = false;
+    bool grammar_needs_prefill = false;
 };
 
 struct carbocation_llama_chat_parser {
@@ -114,6 +115,23 @@ bridge_json diff_json(const common_chat_msg_diff & diff) {
     return result;
 }
 
+bool has_only_valid_tool_calls(const common_chat_msg & message) {
+    for (const auto & call : message.tool_calls) {
+        if (call.name.empty()) {
+            return false;
+        }
+        try {
+            const auto arguments = bridge_json::parse(call.arguments);
+            if (!arguments.is_object()) {
+                return false;
+            }
+        } catch (const bridge_json::exception &) {
+            return false;
+        }
+    }
+    return true;
+}
+
 const char * trigger_type_name(common_grammar_trigger_type type) {
     switch (type) {
         case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN: return "token";
@@ -126,7 +144,8 @@ const char * trigger_type_name(common_grammar_trigger_type type) {
 
 bridge_json render_result_json(
     const carbocation_llama_chat_templates & templates,
-    const common_chat_params & params
+    const common_chat_params & params,
+    bool grammar_needs_prefill
 ) {
     bridge_json triggers = bridge_json::array();
     for (const auto & trigger : params.grammar_triggers) {
@@ -146,6 +165,7 @@ bridge_json render_result_json(
         {"format_code", static_cast<int>(params.format)},
         {"grammar", params.grammar},
         {"grammar_lazy", params.grammar_lazy},
+        {"grammar_needs_prefill", grammar_needs_prefill},
         {"generation_prompt", params.generation_prompt},
         {"supports_thinking", params.supports_thinking},
         {"thinking_start_tag", params.thinking_start_tag},
@@ -329,11 +349,18 @@ extern "C" carbocation_llama_chat_status carbocation_llama_chat_templates_render
         auto result = std::make_unique<carbocation_llama_chat_plan>();
         result->is_continuation = inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE;
         result->value = common_chat_templates_apply(templates->value.get(), inputs);
+        // llama.cpp only prefills template-generated output/tool grammars. A grammar
+        // supplied by the application is already positioned at its root.
+        result->grammar_needs_prefill = inputs.grammar.empty() && !result->value.grammar.empty();
         if (result->value.prompt.empty()) {
             return fail(CARBOCATION_LLAMA_CHAT_STATUS_TEMPLATE_ERROR, "Chat template rendered an empty prompt", out_error);
         }
 
-        const std::string output = render_result_json(*templates, result->value).dump();
+        const std::string output = render_result_json(
+            *templates,
+            result->value,
+            result->grammar_needs_prefill
+        ).dump();
         if (!copy_string(output, out_result_json)) {
             return fail(CARBOCATION_LLAMA_CHAT_STATUS_ALLOCATION_ERROR, "Unable to allocate render result", out_error);
         }
@@ -412,7 +439,8 @@ extern "C" carbocation_llama_chat_status carbocation_llama_chat_parser_update(
         const std::string generated_text = parser->generated_text + utf8_chunk;
         common_chat_msg parsed = common_chat_parse(generated_text, is_partial, parser->params);
         bool used_raw_content_fallback = false;
-        if (parsed.empty() && !is_partial) {
+        if (!is_partial && (parsed.empty() || !has_only_valid_tool_calls(parsed))) {
+            parsed = {};
             parsed.role = "assistant";
             parsed.content = generated_text;
             used_raw_content_fallback = true;

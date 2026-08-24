@@ -37,6 +37,7 @@ struct LlamaCommonChatRenderMetadata: Decodable, Equatable, Sendable {
     var formatCode: Int
     var grammar: String
     var grammarLazy: Bool
+    var grammarNeedsPrefill: Bool
     var generationPrompt: String
     var supportsThinking: Bool
     var thinkingStartTag: String
@@ -134,7 +135,16 @@ private struct LlamaCommonChatMessage: Encodable {
 
     init(_ message: ChatTemplateMessage) throws {
         role = message.role
-        content = message.content
+        switch message.content {
+        case .string:
+            content = message.content
+        case .array where message.role != "tool":
+            content = message.content
+        case .null:
+            content = .string("")
+        default:
+            content = .string(try message.content.jsonString(prettyPrinted: false))
+        }
         reasoningContent = message.reasoningContent
         toolCallID = message.toolCallID
         name = message.name

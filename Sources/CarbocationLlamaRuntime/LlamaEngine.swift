@@ -206,21 +206,29 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         case none
         case eager(grammar: String)
         case lazy(grammar: String, triggerPatterns: [String])
+        case upstreamEager(grammar: String, generationPrompt: String?)
+        case upstreamLazy(
+            grammar: String,
+            triggerPatterns: [String],
+            triggerTokens: [llama_token]
+        )
 
         var logLabel: String {
             switch self {
             case .none:
                 return "none"
-            case .eager:
+            case .eager, .upstreamEager:
                 return "eager"
-            case .lazy:
+            case .lazy, .upstreamLazy:
                 return "lazy"
             }
         }
 
         var usesLazyGrammar: Bool {
-            if case .lazy = self { return true }
-            return false
+            switch self {
+            case .lazy, .upstreamLazy: return true
+            default: return false
+            }
         }
     }
 
@@ -271,6 +279,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         var mode: LLMChatTemplateMode
         var outputProfile: OutputSanitizationProfile
         var checkpointUserContent: String? = nil
+        var commonChatPlan: LlamaCommonChatPlan? = nil
     }
 
     struct PromptTemplateOptions: Equatable {
@@ -294,6 +303,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         case messages(
             messages: [ChatTemplateMessage],
             tools: [LLMToolDefinition],
+            toolChoice: LLMToolChoice,
             options: PromptTemplateOptions
         )
     }
@@ -343,11 +353,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     private static let mtpAcceleratorName = "mtp"
 
-    enum PreparedChatTemplate {
-        case swiftJinja(ChatTemplatePromptFormatter)
-        case unavailable(String)
-    }
-
     enum MultimodalProjectorState {
         case missing
         case deferred(url: URL, declaredModalities: Set<LLMInputModality>)
@@ -379,7 +384,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     var loadedDescriptor: LlamaModelDescriptor?
     var loadedInfo: LlamaLoadedModelInfo?
     var chatTemplate: String?
-    var preparedChatTemplate: PreparedChatTemplate?
+    var commonChatTemplates: LlamaCommonChatTemplates?
     var outputSanitizationProfile: OutputSanitizationProfile = .empty
     var cachedPromptTokens: [llama_token]?
     var promptFormattingCache: (key: PromptFormattingCacheKey, result: PromptFormattingResult)?
@@ -396,6 +401,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     }
 
     deinit {
+        commonChatTemplates = nil
         if case .ready(let context, _) = multimodalProjectorState {
             carbocation_mtmd_free_bridge(context)
         }
@@ -553,7 +559,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         let grammarMode = Self.generationGrammarMode(
             for: options,
             profile: activeOutputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            commonChatMetadata: promptFormatting.commonChatPlan?.metadata
         )
         let reasoningBudgetPlan = Self.reasoningBudgetPlan(
             for: options,
@@ -561,7 +568,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             continuingOpenThinkingPairs: continuingOpenThinkingPairs,
             startsInThinking: options.streamPhaseConfiguration.startsInThinking == true
         )
-        if options.grammar != nil {
+        if grammarMode != .none {
             let samplerRuntime = try buildSampler(
                 grammarMode: grammarMode,
                 options: options,
@@ -767,8 +774,17 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             llama_model_free(loadedModel)
             throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
         }
+        let loadedCommonChatTemplates: LlamaCommonChatTemplates
+        do {
+            loadedCommonChatTemplates = try LlamaCommonChatTemplates(model: loadedModel)
+        } catch {
+            llama_free(loadedContext)
+            llama_model_free(loadedModel)
+            throw LLMEngineError.chatTemplateUnavailable(
+                "Unable to initialize the embedded llama.cpp chat template: \(error.localizedDescription)"
+            )
+        }
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
-        let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         let projectorPreparation = Self.deferredMultimodalProjectorState(
             mmprojURL: descriptor.mmprojURL
@@ -823,7 +839,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.modelLifecycleState = .ready
         self.runtimeIdentity = LlamaRuntimeIdentity()
         self.chatTemplate = template
-        self.preparedChatTemplate = preparedTemplate
+        self.commonChatTemplates = loadedCommonChatTemplates
         self.outputSanitizationProfile = outputProfile
         clearPromptCaches()
 
@@ -865,6 +881,15 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             llama_model_free(loadedModel)
             throw LLMEngineError.modelLoadFailed("llama_model_get_vocab returned null")
         }
+        let loadedCommonChatTemplates: LlamaCommonChatTemplates
+        do {
+            loadedCommonChatTemplates = try LlamaCommonChatTemplates(model: loadedModel)
+        } catch {
+            llama_model_free(loadedModel)
+            throw LLMEngineError.chatTemplateUnavailable(
+                "Unable to initialize the embedded llama.cpp chat template: \(error.localizedDescription)"
+            )
+        }
 
         let trainingContext = Int(llama_model_n_ctx_train(loadedModel))
         let chosenContext = Self.clampedContextSize(
@@ -872,7 +897,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             trainingContext: trainingContext
         )
         let template = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) }
-        let preparedTemplate = Self.prepareChatTemplate(template)
         let outputProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         let info = LlamaLoadedModelInfo(
             modelID: nil,
@@ -897,7 +921,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.modelLifecycleState = .ready
         self.runtimeIdentity = LlamaRuntimeIdentity()
         self.chatTemplate = template
-        self.preparedChatTemplate = preparedTemplate
+        self.commonChatTemplates = loadedCommonChatTemplates
         self.outputSanitizationProfile = outputProfile
         clearPromptCaches()
 
@@ -914,7 +938,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     func setChatTemplateForTesting(_ template: String?) {
         chatTemplate = template
-        preparedChatTemplate = Self.prepareChatTemplate(template)
+        commonChatTemplates = template.flatMap {
+            try? LlamaCommonChatTemplates(model: model, templateOverride: $0)
+        }
         outputSanitizationProfile = OutputSanitizationProfile.derived(fromChatTemplate: template)
         clearPromptCaches()
         clearPromptPreparationCaches()
@@ -992,6 +1018,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     private func performUnload() {
         clearPromptCaches()
         clearPromptPreparationCaches()
+        commonChatTemplates = nil
         if case .ready(let context, _) = multimodalProjectorState {
             carbocation_mtmd_free_bridge(context)
         }
@@ -1011,7 +1038,6 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.loadedInfo = nil
         self.runtimeIdentity = nil
         self.chatTemplate = nil
-        self.preparedChatTemplate = nil
         self.outputSanitizationProfile = .empty
     }
 
@@ -1297,9 +1323,10 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         let grammarMode = Self.generationGrammarMode(
             for: options,
             profile: activeOutputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            commonChatMetadata: promptFormatting.commonChatPlan?.metadata
         )
-        let structuredOutputPlan = grammarMode.usesLazyGrammar
+        let structuredOutputPlan = options.grammar != nil && grammarMode.usesLazyGrammar
             ? StructuredOutputPlan(
                 profile: activeOutputProfile,
                 continuingOpenThinkingPairs: continuingOpenThinkingPairs,
@@ -1360,6 +1387,12 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         var accumulatedData = Data()
         var accumulatedText = ""
         var incrementalUTF8 = IncrementalUTF8Accumulator()
+        let commonChatStreamParser = try promptFormatting.commonChatPlan?.makeParser()
+        var commonChatStreamUpdate: LlamaCommonChatParseUpdate?
+        let preservedTokenIDs = commonChatPreservedTokenIDs(
+            metadata: promptFormatting.commonChatPlan?.metadata,
+            vocab: vocabulary
+        )
         var reasoningBudgetExhaustionLogged = false
         func logReasoningBudgetExhaustionIfNeeded(
             state: carbocation_llama_reasoning_budget_state,
@@ -1462,6 +1495,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         }
 
         func emitFinalAnswerProgressIfNeeded(raw: String? = nil) {
+            if let commonChatStreamUpdate {
+                emitFinalAnswer(
+                    commonChatStreamUpdate.message.content,
+                    snapshotReason: .streamCorrection
+                )
+                return
+            }
             guard Self.shouldEmitFinalAnswerProgress(
                 currentPhase: currentPhase,
                 structuredPhase: structuredPhase
@@ -1478,6 +1518,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         }
 
         func emitThinkingProgressIfNeeded(raw: String? = nil) {
+            if let commonChatStreamUpdate {
+                emitThinking(
+                    commonChatStreamUpdate.message.reasoningContent,
+                    snapshotReason: .streamCorrection
+                )
+                return
+            }
             let snapshot = Self.phasedGeneratedText(raw ?? accumulatedText, plan: streamPhasePlan)
             emitThinking(snapshot.thinkingText, snapshotReason: .streamCorrection)
         }
@@ -1534,7 +1581,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             generatedTokensIncludingThisToken: Int,
             reasoningBudgetState: carbocation_llama_reasoning_budget_state?,
             diagnosticSource: String
-        ) -> Bool {
+        ) throws -> Bool {
             emitTokenDiagnostic(
                 token,
                 generatedTokensIncludingThisToken: generatedTokensIncludingThisToken,
@@ -1552,16 +1599,23 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                 return false
             }
 
-            let rawPiece = tokenToPiece(vocab: vocabulary, token: token)
-            let piece = rawPiece.isEmpty
-                ? tokenToPiece(vocab: vocabulary, token: token, special: true)
-                : rawPiece
+            let piece = generatedTokenPiece(
+                vocab: vocabulary,
+                token: token,
+                preservedTokenIDs: preservedTokenIDs
+            )
             var appendedText = ""
             if !piece.isEmpty {
                 accumulatedData.append(piece)
                 appendedText = incrementalUTF8.append(piece)
                 if !appendedText.isEmpty {
                     accumulatedText.append(contentsOf: appendedText)
+                    if let commonChatStreamParser {
+                        commonChatStreamUpdate = try commonChatStreamParser.append(
+                            appendedText,
+                            isPartial: true
+                        )
+                    }
                 }
             }
 
@@ -1592,9 +1646,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                     stopReason = boundary.reason
                 }
 
-                updatePhase(boundary == nil
+                let fallbackPhase = boundary == nil
                     ? snapshot.phase
-                    : Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
+                    : Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan)
+                let parsedPhase = commonChatStreamUpdate.map(Self.streamContentPhase(for:))
+                updatePhase(parsedPhase == nil || parsedPhase == .unknown
+                    ? fallbackPhase
+                    : parsedPhase!)
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
@@ -1742,7 +1800,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
             var emittedNextTokenCount = 0
             if !nextAlreadyProcessed {
-                guard processGeneratedToken(
+                guard try processGeneratedToken(
                     next,
                     generatedTokensIncludingThisToken: generatedTokenCount + 1,
                     reasoningBudgetState: reasoningBudgetState,
@@ -1829,7 +1887,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                         }
 
                         emittedAcceptedDraftCount += 1
-                        shouldContinue = processGeneratedToken(
+                        shouldContinue = try processGeneratedToken(
                             draftToken,
                             generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount,
                             reasoningBudgetState: acceptedReasoningBudgetState,
@@ -1859,7 +1917,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
                         if let correctionToken, shouldContinue {
                             emittedCorrectionToken = correctionToken
-                            shouldContinue = processGeneratedToken(
+                            shouldContinue = try processGeneratedToken(
                                 correctionToken,
                                 generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount + 1,
                                 reasoningBudgetState: correctionReasoningBudgetState,
@@ -1949,8 +2007,23 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
         }
 
-        updatePhase(Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan))
-        if stopReason == "max-tokens", currentPhase == .thinking {
+        let finalCommonChatUpdate: LlamaCommonChatParseUpdate?
+        if let commonChatPlan = promptFormatting.commonChatPlan {
+            let finalParser = try commonChatPlan.makeParser()
+            finalCommonChatUpdate = try finalParser.append(accumulatedText, isPartial: false)
+        } else {
+            finalCommonChatUpdate = nil
+        }
+
+        let fallbackFinalPhase = Self.streamContentPhase(in: accumulatedText, plan: streamPhasePlan)
+        let parsedFinalPhase = finalCommonChatUpdate.map(Self.streamContentPhase(for:))
+        updatePhase(parsedFinalPhase == nil || parsedFinalPhase == .unknown
+            ? fallbackFinalPhase
+            : parsedFinalPhase!)
+        let endedInsideThinking = finalCommonChatUpdate.map {
+            !$0.message.reasoningContent.isEmpty && $0.message.content.isEmpty
+        } ?? (currentPhase == .thinking)
+        if stopReason == "max-tokens", endedInsideThinking {
             stopReason = "thinking-not-closed"
         }
         let shouldReturnIncompleteThinking = stopReason == "thinking-not-closed"
@@ -1972,9 +2045,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             }
         }
 
-        let phasedText = Self.phasedGeneratedText(accumulatedText, plan: streamPhasePlan)
+        let phasedText = finalCommonChatUpdate.map {
+            Self.phasedGeneratedText($0, rawGeneratedText: accumulatedText)
+        } ?? Self.phasedGeneratedText(accumulatedText, plan: streamPhasePlan)
         let returnedText: String
         if stopReason == "thinking-not-closed" {
+            returnedText = phasedText.finalText
+        } else if finalCommonChatUpdate != nil {
             returnedText = phasedText.finalText
         } else {
             do {

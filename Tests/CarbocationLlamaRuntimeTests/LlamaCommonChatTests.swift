@@ -60,6 +60,57 @@ final class LlamaCommonChatTests: XCTestCase {
         XCTAssertFalse(plan.metadata.grammar.isEmpty)
     }
 
+    func testToolChoicesAndUpstreamGrammarPlanStayCoupled() throws {
+        let templates = try Self.templates(named: "Qwen3-Coder.jinja")
+        let tool = LLMToolDefinition(name: "lookup", description: "Look up information")
+        let messages = [ChatTemplateMessage(role: "user", content: "Use a tool")]
+
+        let automatic = try templates.render(
+            messages: messages,
+            tools: [tool],
+            toolChoice: .auto,
+            options: GenerationOptions()
+        )
+        let required = try templates.render(
+            messages: messages,
+            tools: [tool],
+            toolChoice: .required,
+            options: GenerationOptions()
+        )
+        let disabled = try templates.render(
+            messages: messages,
+            tools: [tool],
+            toolChoice: .none,
+            options: GenerationOptions()
+        )
+
+        XCTAssertFalse(automatic.metadata.grammar.isEmpty)
+        XCTAssertFalse(required.metadata.grammar.isEmpty)
+        XCTAssertTrue(disabled.metadata.grammar.isEmpty)
+
+        let mode = LlamaEngine.generationGrammarMode(
+            for: GenerationOptions(),
+            profile: automatic.metadata.outputProfile,
+            continuingOpenThinkingPairs: [],
+            commonChatMetadata: automatic.metadata
+        )
+        if automatic.metadata.grammarLazy {
+            guard case .upstreamLazy(let grammar, let patterns, let tokens) = mode else {
+                return XCTFail("Expected the upstream lazy grammar plan.")
+            }
+            XCTAssertEqual(grammar, automatic.metadata.grammar)
+            XCTAssertEqual(
+                patterns.count + tokens.count,
+                automatic.metadata.grammarTriggers.count
+            )
+        } else {
+            guard case .upstreamEager(let grammar, _) = mode else {
+                return XCTFail("Expected the upstream eager grammar plan.")
+            }
+            XCTAssertEqual(grammar, automatic.metadata.grammar)
+        }
+    }
+
     func testQwenParserBuffersPartialToolCallAndReturnsStructuredCallAtEOF() throws {
         let templates = try Self.templates(named: "Qwen3-Coder.jinja")
         let tool = LLMToolDefinition(
@@ -113,6 +164,60 @@ final class LlamaCommonChatTests: XCTestCase {
         )
 
         XCTAssertTrue(result.message.toolCalls.compactMap { $0.materialized() }.isEmpty)
+        XCTAssertTrue(result.usedRawContentFallback)
+        XCTAssertTrue(result.message.content.contains("<tool_call>"))
+    }
+
+    func testParallelQwenCallsAreMaterializedOnlyAtEOF() throws {
+        let templates = try Self.templates(named: "Qwen3-Coder.jinja")
+        let parameters: LLMJSONValue = .object([
+            "type": .string("object"),
+            "properties": .object([
+                "value": .object(["type": .string("integer")])
+            ]),
+            "required": .array([.string("value")])
+        ])
+        let tools = [
+            LLMToolDefinition(name: "first", description: "First tool", parameters: parameters),
+            LLMToolDefinition(name: "second", description: "Second tool", parameters: parameters),
+        ]
+        let plan = try templates.render(
+            messages: [ChatTemplateMessage(role: "user", content: "Call both")],
+            tools: tools,
+            options: GenerationOptions()
+        )
+        let parser = try plan.makeParser()
+        _ = try parser.append(
+            "<tool_call>\n<function=first>\n<parameter=value>\n1\n</parameter>\n</function>\n</tool_call>",
+            isPartial: true
+        )
+        let complete = try parser.append(
+            "\n<tool_call>\n<function=second>\n<parameter=value>\n2\n</parameter>\n</function>\n</tool_call>",
+            isPartial: false
+        )
+
+        XCTAssertEqual(complete.message.toolCalls.compactMap { $0.materialized() }.map(\.name), [
+            "first", "second"
+        ])
+    }
+
+    func testUserGrammarIsNotPrefilledAsTemplateGrammar() throws {
+        let templates = try Self.templates(named: "Qwen3.5-4B.jinja")
+        let grammar = #"root ::= \"yes\" | \"no\""#
+        let plan = try templates.render(
+            messages: [ChatTemplateMessage(role: "user", content: "Answer yes or no")],
+            tools: [],
+            options: GenerationOptions(grammar: grammar)
+        )
+
+        let mode = LlamaEngine.generationGrammarMode(
+            for: GenerationOptions(grammar: grammar),
+            profile: plan.metadata.outputProfile,
+            continuingOpenThinkingPairs: [],
+            commonChatMetadata: plan.metadata
+        )
+        XCTAssertEqual(mode, .eager(grammar: grammar))
+        XCTAssertFalse(plan.metadata.grammarNeedsPrefill)
     }
 
     func testReasoningControlsAndHistoryReachUpstreamRenderer() throws {

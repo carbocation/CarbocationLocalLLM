@@ -719,7 +719,7 @@ extension LlamaEngine {
         promptFormatting: PromptFormattingResult,
         options: GenerationOptions
     ) throws {
-        guard options.grammar != nil, let vocabulary else { return }
+        guard let vocabulary else { return }
 
         let activeOutputProfile = promptFormatting.outputProfile.merging(options.streamPhaseConfiguration)
         let continuingOpenThinkingPairs = Self.continuingOpenThinkingPairs(
@@ -729,8 +729,10 @@ extension LlamaEngine {
         let grammarMode = Self.generationGrammarMode(
             for: options,
             profile: activeOutputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            commonChatMetadata: promptFormatting.commonChatPlan?.metadata
         )
+        guard grammarMode != .none else { return }
         let reasoningBudgetPlan = Self.reasoningBudgetPlan(
             for: options,
             profile: activeOutputProfile,

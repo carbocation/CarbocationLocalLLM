@@ -1,12 +1,53 @@
 import CarbocationLocalLLM
 import Foundation
+import llama
 
 extension LlamaEngine {
     static func generationGrammarMode(
         for options: GenerationOptions,
         profile: OutputSanitizationProfile,
-        continuingOpenThinkingPairs: [OutputDelimiterPair]
+        continuingOpenThinkingPairs: [OutputDelimiterPair],
+        commonChatMetadata: LlamaCommonChatRenderMetadata? = nil
     ) -> GenerationGrammarMode {
+        if let metadata = commonChatMetadata,
+           !metadata.grammar.isEmpty {
+            if !metadata.grammarLazy {
+                return .upstreamEager(
+                    grammar: metadata.grammar,
+                    generationPrompt: metadata.grammarNeedsPrefill
+                        ? (metadata.generationPrompt.isEmpty ? nil : metadata.generationPrompt)
+                        : nil
+                )
+            }
+
+            var triggerPatterns: [String] = []
+            var triggerTokens: [llama_token] = []
+            for trigger in metadata.grammarTriggers {
+                switch trigger.type {
+                case .token:
+                    if let token = trigger.token {
+                        triggerTokens.append(llama_token(token))
+                    }
+                case .word:
+                    triggerPatterns.append(regexEscaped(trigger.value))
+                case .pattern:
+                    triggerPatterns.append(trigger.value)
+                case .patternFull:
+                    var anchored = trigger.value
+                    if !anchored.hasPrefix("^") { anchored = "^" + anchored }
+                    if !anchored.hasSuffix("$") { anchored += "$" }
+                    triggerPatterns.append(anchored)
+                case .unknown:
+                    continue
+                }
+            }
+            return .upstreamLazy(
+                grammar: metadata.grammar,
+                triggerPatterns: triggerPatterns,
+                triggerTokens: triggerTokens
+            )
+        }
+
         guard let grammar = options.grammar else { return .none }
 
         let canStageStructuredOutput = !profile.thinkingPairs.isEmpty
@@ -736,6 +777,43 @@ extension LlamaEngine {
     ) -> PhasedGenerationText {
         var parser = PhasedGenerationTextParser(text: text, plan: plan)
         return parser.parse()
+    }
+
+    static func phasedGeneratedText(
+        _ update: LlamaCommonChatParseUpdate,
+        rawGeneratedText: String
+    ) -> PhasedGenerationText {
+        var segments: [LLMGenerationPhaseSegment] = []
+        if !update.message.reasoningContent.isEmpty {
+            segments.append(LLMGenerationPhaseSegment(
+                phase: .thinking,
+                text: update.message.reasoningContent
+            ))
+        }
+        if !update.message.content.isEmpty {
+            segments.append(LLMGenerationPhaseSegment(
+                phase: .final,
+                text: update.message.content
+            ))
+        }
+        return PhasedGenerationText(
+            thinkingText: update.message.reasoningContent,
+            finalText: update.message.content,
+            phaseSegments: segments,
+            rawGeneratedText: rawGeneratedText
+        )
+    }
+
+    static func streamContentPhase(
+        for update: LlamaCommonChatParseUpdate
+    ) -> LLMStreamContentPhase {
+        if !update.message.content.isEmpty || !update.message.toolCalls.isEmpty {
+            return .final
+        }
+        if !update.message.reasoningContent.isEmpty {
+            return .thinking
+        }
+        return .unknown
     }
 
     private struct PhasedGenerationTextParser {

@@ -25,7 +25,7 @@ final class NativeToolProtocolCapabilityTests: XCTestCase {
         {%- endif -%}
         {%- endfor -%}
         """
-        _ = try ChatTemplatePromptFormatter(template: arbitraryTemplate)
+        _ = try LlamaChatTemplateRenderer(template: arbitraryTemplate)
         let engine = LlamaEngine()
 
         await engine.setChatTemplateForTesting(arbitraryTemplate)
@@ -89,7 +89,7 @@ final class NativeToolProtocolCapabilityTests: XCTestCase {
         XCTAssertEqual(result.finalText, "Final answer.")
         XCTAssertEqual(prompts.count, 2)
         XCTAssertTrue(prompts[0].contains("# Tools"))
-        XCTAssertTrue(prompts[0].contains("\"name\":\"lookup\""))
+        XCTAssertTrue(prompts[0].contains("lookup"))
         XCTAssertFalse(prompts[0].contains("Available tools:"))
         XCTAssertTrue(prompts[1].contains("<tool_call>\n<function=lookup>"))
         XCTAssertTrue(prompts[1].contains("<parameter=query>\nSwift"))

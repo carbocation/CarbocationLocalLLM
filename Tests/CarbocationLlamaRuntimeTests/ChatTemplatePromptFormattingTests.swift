@@ -6,7 +6,7 @@ final class ChatTemplatePromptFormattingTests: XCTestCase {
     func testQwenTemplateAcceptsWhitespaceThatItTrimsFromUserContent() throws {
         let template = try String(contentsOf: Self.qwen35TemplateURL, encoding: .utf8)
 
-        let prompt = try ChatTemplatePromptFormatter.format(
+        let prompt = try LlamaChatTemplateRenderer.format(
             template: template,
             system: "System",
             user: "  padded user  ",
@@ -20,7 +20,7 @@ final class ChatTemplatePromptFormattingTests: XCTestCase {
     }
 
     func testFormatterRejectsStructurallyEmptyPrompt() throws {
-        let formatter = try ChatTemplatePromptFormatter(
+        let formatter = try LlamaChatTemplateRenderer(
             template: "{% for message in messages %}{% set ignored = message.content %}{% endfor %}"
         )
 
@@ -30,7 +30,7 @@ final class ChatTemplatePromptFormattingTests: XCTestCase {
             bosToken: "",
             eosToken: ""
         )) { error in
-            XCTAssertEqual(error as? ChatTemplatePromptFormatter.Error, .emptyPrompt)
+            XCTAssertEqual(error as? LlamaChatTemplateRenderer.Error, .emptyPrompt)
         }
     }
 
@@ -53,9 +53,9 @@ final class ChatTemplatePromptFormattingTests: XCTestCase {
                 user: "User",
                 options: GenerationOptions(enableThinking: true)
             )
-            XCTFail("Expected the Swift Jinja semantic error to be reported.")
+            XCTFail("Expected the upstream template semantic error to be reported.")
         } catch LLMEngineError.chatTemplateUnavailable(let detail) {
-            XCTAssertTrue(detail.contains("Swift Jinja template failed while rendering"))
+            XCTAssertTrue(detail.contains("Embedded llama.cpp chat template failed while rendering"))
         } catch {
             XCTFail("Expected chatTemplateUnavailable, got \(error).")
         }

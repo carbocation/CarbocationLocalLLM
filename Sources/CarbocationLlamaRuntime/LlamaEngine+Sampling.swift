@@ -169,6 +169,21 @@ extension LlamaEngine {
             throw LLMEngineError.samplerInitFailed
         }
 
+        let generationPrompt: String? = switch grammarMode {
+        case .upstreamEager(_, let prompt): prompt
+        default: nil
+        }
+        let generationPromptTokens: [llama_token]
+        do {
+            generationPromptTokens = try commonChatGenerationPromptTokens(
+                generationPrompt,
+                vocab: vocab
+            )
+        } catch {
+            llama_sampler_free(chain)
+            throw error
+        }
+
         var activeReasoningBudgetSampler: UnsafeMutablePointer<llama_sampler>?
         if let reasoningBudgetPlan,
            let reasoningBudgetSampler = makeReasoningBudgetSampler(
@@ -205,10 +220,26 @@ extension LlamaEngine {
                 throw LLMEngineError.grammarParseFailed
             }
             llama_sampler_chain_add(chain, grammarSampler)
+        case .upstreamEager(let grammar, let generationPrompt):
+            let grammarSampler = Self.makeEagerGrammarSampler(
+                grammar: grammar,
+                vocab: vocab
+            )
+            guard let grammarSampler else {
+                llama_sampler_free(chain)
+                throw LLMEngineError.grammarParseFailed
+            }
+            if generationPrompt != nil {
+                for token in generationPromptTokens {
+                    llama_sampler_accept(grammarSampler, token)
+                }
+            }
+            llama_sampler_chain_add(chain, grammarSampler)
         case .lazy(let grammar, let triggerPatterns):
             let grammarSampler = Self.makeLazyGrammarSampler(
                 grammar: grammar,
                 triggerPatterns: triggerPatterns,
+                triggerTokens: [],
                 vocab: vocab
             )
             guard let grammarSampler else {
@@ -217,6 +248,21 @@ extension LlamaEngine {
             }
             llamaRuntimeLog.info(
                 "Lazy grammar sampler initialized: triggerPatterns=\(triggerPatterns.count, privacy: .public)"
+            )
+            llama_sampler_chain_add(chain, grammarSampler)
+        case .upstreamLazy(let grammar, let triggerPatterns, let triggerTokens):
+            let grammarSampler = Self.makeLazyGrammarSampler(
+                grammar: grammar,
+                triggerPatterns: triggerPatterns,
+                triggerTokens: triggerTokens,
+                vocab: vocab
+            )
+            guard let grammarSampler else {
+                llama_sampler_free(chain)
+                throw LLMEngineError.grammarParseFailed
+            }
+            llamaRuntimeLog.info(
+                "Upstream lazy grammar sampler initialized: triggerPatterns=\(triggerPatterns.count, privacy: .public) triggerTokens=\(triggerTokens.count, privacy: .public)"
             )
             llama_sampler_chain_add(chain, grammarSampler)
         }
@@ -400,9 +446,30 @@ extension LlamaEngine {
         }
     }
 
+    private func commonChatGenerationPromptTokens(
+        _ prompt: String?,
+        vocab: OpaquePointer
+    ) throws -> [llama_token] {
+        guard let prompt, !prompt.isEmpty else { return [] }
+        let tokens = try tokenize(vocab: vocab, text: prompt, addSpecial: false)
+        guard let first = tokens.first,
+              let promptFirst = prompt.first else {
+            return tokens
+        }
+        let firstPiece = String(
+            decoding: tokenToPiece(vocab: vocab, token: first, special: true),
+            as: UTF8.self
+        )
+        if firstPiece.first?.isWhitespace == true, !promptFirst.isWhitespace {
+            return Array(tokens.dropFirst())
+        }
+        return tokens
+    }
+
     private static func makeLazyGrammarSampler(
         grammar: String,
         triggerPatterns: [String],
+        triggerTokens: [llama_token],
         vocab: OpaquePointer
     ) -> UnsafeMutablePointer<llama_sampler>? {
         let allocatedPatternPointers: [UnsafeMutablePointer<CChar>?] = triggerPatterns.map { strdup($0) }
@@ -422,15 +489,17 @@ extension LlamaEngine {
         return grammar.withCString { grammarPointer in
             "root".withCString { rootPointer in
                 patternPointers.withUnsafeMutableBufferPointer { buffer in
-                    llama_sampler_init_grammar_lazy_patterns(
-                        vocab,
-                        grammarPointer,
-                        rootPointer,
-                        buffer.baseAddress,
-                        buffer.count,
-                        nil,
-                        0
-                    )
+                    triggerTokens.withUnsafeBufferPointer { tokenBuffer in
+                        llama_sampler_init_grammar_lazy_patterns(
+                            vocab,
+                            grammarPointer,
+                            rootPointer,
+                            buffer.baseAddress,
+                            buffer.count,
+                            tokenBuffer.baseAddress,
+                            tokenBuffer.count
+                        )
+                    }
                 }
             }
         }

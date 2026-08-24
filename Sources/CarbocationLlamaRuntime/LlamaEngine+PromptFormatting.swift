@@ -49,55 +49,49 @@ extension LlamaEngine {
             return cached
         }
 
-        if let chatTemplate {
-            switch preparedChatTemplate {
-            case .swiftJinja(let formatter):
-                do {
-                    let formatted = try formatMessagesViaSwiftJinja(
-                        formatter: formatter,
-                        system: system,
-                        user: user,
-                        options: options
-                    )
-                    Self.logChatTemplateSelection(
-                        mode: .embedded,
-                        descriptor: loadedDescriptor,
-                        hasEmbeddedTemplate: true,
-                        formatter: "swift-jinja"
-                    )
-                    return cachePromptFormatting(PromptFormattingResult(
-                        text: formatted,
-                        mode: .embedded,
-                        outputProfile: outputSanitizationProfile,
-                        checkpointUserContent: user
-                    ), for: cacheKey)
-                } catch {
-                    llamaRuntimeLog.error(
-                        "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
-                    )
-                    throw LLMEngineError.chatTemplateUnavailable(
-                        Self.swiftJinjaRenderFailureDescription(
-                            error: error,
-                            descriptor: loadedDescriptor
-                        )
-                    )
-                }
-            case .unavailable(let detail):
-                llamaRuntimeLog.info(
-                    "Swift Jinja chat template unavailable: \(detail, privacy: .public)"
-                )
-                guard Self.legacyFallbackPreservesTemplateSemantics(
-                    template: chatTemplate,
+        if let commonChatTemplates, commonChatTemplates.hasExplicitTemplate {
+            do {
+                let plan = try commonChatTemplates.render(
+                    messages: LlamaChatTemplateRenderer.defaultMessages(system: system, user: user),
+                    tools: [],
                     options: options
-                ) else {
-                    throw LLMEngineError.chatTemplateUnavailable(
-                        Self.legacyFallbackSemanticLossDescription(
-                            descriptor: loadedDescriptor
-                        )
+                )
+                Self.logChatTemplateSelection(
+                    mode: .embedded,
+                    descriptor: loadedDescriptor,
+                    hasEmbeddedTemplate: true,
+                    formatter: "llama-common-chat"
+                )
+                return cachePromptFormatting(PromptFormattingResult(
+                    text: plan.metadata.prompt,
+                    mode: .embedded,
+                    outputProfile: Self.mergedOutputProfile(
+                        outputSanitizationProfile,
+                        nativeMetadata: plan.metadata
+                    ),
+                    checkpointUserContent: user,
+                    commonChatPlan: plan
+                ), for: cacheKey)
+            } catch {
+                llamaRuntimeLog.error(
+                    "llama.cpp common-chat render failed: \(String(describing: error), privacy: .public)"
+                )
+                throw LLMEngineError.chatTemplateUnavailable(
+                    Self.commonChatRenderFailureDescription(error: error, descriptor: loadedDescriptor)
+                )
+            }
+        }
+
+        if let chatTemplate {
+            guard Self.legacyFallbackPreservesTemplateSemantics(
+                template: chatTemplate,
+                options: options
+            ) else {
+                throw LLMEngineError.chatTemplateUnavailable(
+                    Self.legacyFallbackSemanticLossDescription(
+                        descriptor: loadedDescriptor
                     )
-                }
-            case nil:
-                break
+                )
             }
 
             if let formatted = Self.formatMessagesWithLegacyTemplate(
@@ -169,6 +163,7 @@ extension LlamaEngine {
     func applyChatTemplate(
         messages: [ChatTemplateMessage],
         tools: [LLMToolDefinition],
+        toolChoice: LLMToolChoice = .auto,
         options: GenerationOptions
     ) throws -> PromptFormattingResult {
         guard vocabulary != nil else {
@@ -177,58 +172,66 @@ extension LlamaEngine {
         let cacheKey = PromptFormattingCacheKey.messages(
             messages: messages,
             tools: tools,
+            toolChoice: toolChoice,
             options: PromptTemplateOptions(options)
         )
         if let cached = cachedPromptFormatting(for: cacheKey) {
             return cached
         }
 
-        guard chatTemplate != nil else {
-            throw LLMEngineError.chatTemplateUnavailable(Self.templateUnavailableDescription(
-                embeddedTemplate: nil,
-                descriptor: loadedDescriptor
-            ))
-        }
-
-        switch preparedChatTemplate {
-        case .swiftJinja(let formatter):
+        if let commonChatTemplates, commonChatTemplates.hasExplicitTemplate {
             do {
-                let formatted = try formatMessagesViaSwiftJinja(
-                    formatter: formatter,
+                let plan = try commonChatTemplates.render(
                     messages: messages,
                     tools: tools,
+                    toolChoice: toolChoice,
                     options: options
                 )
                 Self.logChatTemplateSelection(
                     mode: .embedded,
                     descriptor: loadedDescriptor,
                     hasEmbeddedTemplate: true,
-                    formatter: "swift-jinja"
+                    formatter: "llama-common-chat"
                 )
                 return cachePromptFormatting(PromptFormattingResult(
-                    text: formatted,
+                    text: plan.metadata.prompt,
                     mode: .embedded,
-                    outputProfile: outputSanitizationProfile,
-                    checkpointUserContent: Self.promptCheckpointUserContent(messages: messages)
+                    outputProfile: Self.mergedOutputProfile(
+                        outputSanitizationProfile,
+                        nativeMetadata: plan.metadata
+                    ),
+                    checkpointUserContent: Self.promptCheckpointUserContent(messages: messages),
+                    commonChatPlan: plan
                 ), for: cacheKey)
             } catch {
                 llamaRuntimeLog.error(
-                    "Swift Jinja chat template render failed: \(String(describing: error), privacy: .public)"
+                    "llama.cpp common-chat structured render failed: \(String(describing: error), privacy: .public)"
                 )
                 throw LLMEngineError.chatTemplateUnavailable(
-                    Self.swiftJinjaRenderFailureDescription(
-                        error: error,
-                        descriptor: loadedDescriptor
-                    )
+                    Self.commonChatRenderFailureDescription(error: error, descriptor: loadedDescriptor)
                 )
             }
-        case .unavailable(let detail):
-            throw LLMEngineError.chatTemplateUnavailable("Swift Jinja chat template unavailable: \(detail)")
-        case nil:
+        }
+
+        if chatTemplate != nil {
             throw LLMEngineError.chatTemplateUnavailable(Self.embeddedTemplateFailureDescription(
                 descriptor: loadedDescriptor
             ))
         }
+
+        let fallback = try Self.fallbackPrompt(
+            messages: messages,
+            descriptor: loadedDescriptor
+        )
+        llamaRuntimeLog.info(
+            "No usable embedded chat template; compatibility prompt mode is active."
+        )
+        return cachePromptFormatting(PromptFormattingResult(
+            text: fallback.text,
+            mode: fallback.mode,
+            outputProfile: fallback.outputProfile,
+            checkpointUserContent: Self.promptCheckpointUserContent(messages: messages)
+        ), for: cacheKey)
     }
 
     static func promptCheckpointAnchorText(
@@ -243,6 +246,20 @@ extension LlamaEngine {
             }
         }
         return nil
+    }
+
+    private static func mergedOutputProfile(
+        _ profile: OutputSanitizationProfile,
+        nativeMetadata: LlamaCommonChatRenderMetadata
+    ) -> OutputSanitizationProfile {
+        var result = profile
+        for pair in nativeMetadata.outputProfile.thinkingPairs where !result.thinkingPairs.contains(pair) {
+            result.thinkingPairs.append(pair)
+        }
+        for stop in nativeMetadata.additionalStops where !stop.isEmpty && !result.extraStopStrings.contains(stop) {
+            result.extraStopStrings.append(stop)
+        }
+        return result
     }
 
     static func promptCheckpointAnchorText(
@@ -279,6 +296,26 @@ extension LlamaEngine {
 
         return (
             renderFallbackPrompt(system: system, user: user, family: family),
+            family.mode,
+            fallbackOutputProfile(for: family)
+        )
+    }
+
+    static func fallbackPrompt(
+        messages: [ChatTemplateMessage],
+        descriptor: LlamaModelDescriptor?
+    ) throws -> (text: String, mode: LLMChatTemplateMode, outputProfile: OutputSanitizationProfile) {
+        guard let family = inferredTemplateFamily(
+            embeddedTemplate: nil,
+            descriptor: descriptor
+        ) else {
+            throw LLMEngineError.chatTemplateUnavailable(templateUnavailableDescription(
+                embeddedTemplate: nil,
+                descriptor: descriptor
+            ))
+        }
+        return (
+            renderFallbackPrompt(messages: messages, family: family),
             family.mode,
             fallbackOutputProfile(for: family)
         )
@@ -327,15 +364,6 @@ extension LlamaEngine {
         return nil
     }
 
-    static func prepareChatTemplate(_ template: String?) -> PreparedChatTemplate? {
-        guard let template else { return nil }
-        do {
-            return .swiftJinja(try ChatTemplatePromptFormatter(template: template))
-        } catch {
-            return .unavailable(String(describing: error))
-        }
-    }
-
     static func legacyFallbackPreservesTemplateSemantics(
         template: String,
         options: GenerationOptions
@@ -353,46 +381,6 @@ extension LlamaEngine {
             return false
         }
         return true
-    }
-
-    private func formatMessagesViaSwiftJinja(
-        formatter: ChatTemplatePromptFormatter,
-        system: String,
-        user: String,
-        options: GenerationOptions
-    ) throws -> String {
-        guard let vocabulary else {
-            throw LLMEngineError.noModelLoaded
-        }
-        return try formatter.format(
-            system: system,
-            user: user,
-            bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
-            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
-            enableThinking: options.enableThinking,
-            reasoningEffort: options.reasoningEffort,
-            preserveThinking: options.preserveThinking
-        )
-    }
-
-    private func formatMessagesViaSwiftJinja(
-        formatter: ChatTemplatePromptFormatter,
-        messages: [ChatTemplateMessage],
-        tools: [LLMToolDefinition],
-        options: GenerationOptions
-    ) throws -> String {
-        guard let vocabulary else {
-            throw LLMEngineError.noModelLoaded
-        }
-        return try formatter.format(
-            messages: messages,
-            tools: tools,
-            bosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_bos(vocabulary)) ?? "",
-            eosToken: specialTokenString(vocab: vocabulary, token: llama_vocab_eos(vocabulary)) ?? "",
-            enableThinking: options.enableThinking,
-            reasoningEffort: options.reasoningEffort,
-            preserveThinking: options.preserveThinking
-        )
     }
 
     private static func templateUnavailableDescription(
@@ -420,15 +408,15 @@ extension LlamaEngine {
         return "Embedded template exists but could not be applied."
     }
 
-    private static func swiftJinjaRenderFailureDescription(
+    private static func commonChatRenderFailureDescription(
         error: Swift.Error,
         descriptor: LlamaModelDescriptor?
     ) -> String {
         let detail = String(describing: error)
         if let descriptor {
-            return "Embedded Swift Jinja template failed while rendering model \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename)): \(detail)"
+            return "Embedded llama.cpp chat template failed while rendering model \(descriptor.displayName ?? descriptor.filename) (\(descriptor.filename)): \(detail)"
         }
-        return "Embedded Swift Jinja template failed while rendering: \(detail)"
+        return "Embedded llama.cpp chat template failed while rendering: \(detail)"
     }
 
     private static func legacyFallbackSemanticLossDescription(
@@ -479,6 +467,34 @@ extension LlamaEngine {
             return "<|turn>system\n\(system.trimmingCharacters(in: .whitespacesAndNewlines))<turn|>\n<|turn>user\n\(user.trimmingCharacters(in: .whitespacesAndNewlines))<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         case .chatML:
             return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+        }
+    }
+
+    private static func renderFallbackPrompt(
+        messages: [ChatTemplateMessage],
+        family: KnownTemplateFamily
+    ) -> String {
+        func content(_ message: ChatTemplateMessage) -> String {
+            message.content.stringValue
+                ?? (try? message.content.jsonString(prettyPrinted: false))
+                ?? ""
+        }
+
+        switch family {
+        case .gemmaLegacy:
+            return messages.map { message in
+                let role = message.role == "assistant" ? "model" : message.role
+                return "<start_of_turn>\(role)\n\(content(message))<end_of_turn>\n"
+            }.joined() + "<start_of_turn>model\n"
+        case .gemma4:
+            return messages.map { message in
+                let role = message.role == "assistant" ? "model" : message.role
+                return "<|turn>\(role)\n\(content(message))<turn|>\n"
+            }.joined() + "<|turn>model\n<|channel>thought\n<channel|>"
+        case .chatML:
+            return messages.map { message in
+                "<|im_start|>\(message.role)\n\(content(message))<|im_end|>\n"
+            }.joined() + "<|im_start|>assistant\n"
         }
     }
 

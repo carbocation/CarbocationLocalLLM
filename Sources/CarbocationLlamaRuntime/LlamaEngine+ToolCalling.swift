@@ -509,15 +509,14 @@ extension LlamaEngine {
     }
 
     var nativeToolTemplateProtocol: LlamaNativeToolProtocol? {
-        guard case .swiftJinja = preparedChatTemplate,
-              let chatTemplate else {
+        guard let chatTemplate else {
             return nil
         }
         return LlamaNativeToolProtocol.declared(by: chatTemplate)
     }
 
     var supportsNativeToolTemplate: Bool {
-        nativeToolTemplateProtocol != nil
+        commonChatTemplates?.hasExplicitTemplate == true || nativeToolTemplateProtocol != nil
     }
 
     private func toolPromptFormatting(
@@ -537,16 +536,21 @@ extension LlamaEngine {
             ).messages
             if supportsNativeToolTemplate,
                let promptFormatting = try nativeToolPromptFormatting(
-                    baseMessages: Self.addingSystemInstruction(
-                        Self.nativeToolSystemPrompt(system: "", toolChoice: toolChoice),
-                        to: baseMessages
-                    ),
+                    baseMessages: commonChatTemplates?.hasExplicitTemplate == true
+                        ? baseMessages
+                        : Self.addingSystemInstruction(
+                            Self.nativeToolSystemPrompt(system: "", toolChoice: toolChoice),
+                            to: baseMessages
+                        ),
                     history: history,
                     tools: tools,
-                    finalUserInstruction: Self.nativeToolContinuationInstruction(
-                        assistantTextSoFar: assistantTextSoFar,
-                        hasToolHistory: !history.isEmpty
-                    ),
+                    toolChoice: toolChoice,
+                    finalUserInstruction: commonChatTemplates?.hasExplicitTemplate == true
+                        ? nil
+                        : Self.nativeToolContinuationInstruction(
+                            assistantTextSoFar: assistantTextSoFar,
+                            hasToolHistory: !history.isEmpty
+                        ),
                     continuationAssistantText: assistantTextSoFar,
                     options: options
                ) {
@@ -579,20 +583,22 @@ extension LlamaEngine {
         if supportsNativeToolTemplate,
            let promptFormatting = try nativeToolPromptFormatting(
                 baseMessages: Self.nativeToolMessages(
-                    system: Self.nativeToolSystemPrompt(
-                        system: system,
-                        toolChoice: toolChoice
-                    ),
+                    system: commonChatTemplates?.hasExplicitTemplate == true
+                        ? system
+                        : Self.nativeToolSystemPrompt(system: system, toolChoice: toolChoice),
                     originalPrompt: originalPrompt,
                     history: [],
                     finalUserInstruction: nil
                 ),
                 history: history,
                 tools: tools,
-                finalUserInstruction: Self.nativeToolContinuationInstruction(
-                    assistantTextSoFar: assistantTextSoFar,
-                    hasToolHistory: !history.isEmpty
-                ),
+                toolChoice: toolChoice,
+                finalUserInstruction: commonChatTemplates?.hasExplicitTemplate == true
+                    ? nil
+                    : Self.nativeToolContinuationInstruction(
+                        assistantTextSoFar: assistantTextSoFar,
+                        hasToolHistory: !history.isEmpty
+                    ),
                 continuationAssistantText: assistantTextSoFar,
                 options: options
            ) {
@@ -637,6 +643,7 @@ extension LlamaEngine {
                     ),
                     history: history,
                     tools: [],
+                    toolChoice: .none,
                     finalUserInstruction: Self.nativeToolFinalUserInstruction(
                         assistantTextSoFar: assistantTextSoFar,
                         unexecutedCalls: unexecutedCalls,
@@ -678,6 +685,7 @@ extension LlamaEngine {
                 ),
                 history: history,
                 tools: [],
+                toolChoice: .none,
                 finalUserInstruction: Self.nativeToolFinalUserInstruction(
                     assistantTextSoFar: assistantTextSoFar,
                     unexecutedCalls: unexecutedCalls,
@@ -705,14 +713,17 @@ extension LlamaEngine {
         baseMessages: [ChatTemplateMessage],
         history: [LLMToolInteractionRound],
         tools: [LLMToolDefinition],
+        toolChoice: LLMToolChoice,
         finalUserInstruction: String? = nil,
         continuationAssistantText: String? = nil,
         options: GenerationOptions
     ) throws -> PromptFormattingResult? {
         do {
-            let protocolKind = nativeToolTemplateProtocol
-            let usesTemplateNativeContinuation = protocolKind == .functionParameterXML
-                && !history.isEmpty
+            let usesCommonChat = commonChatTemplates?.hasExplicitTemplate == true
+            let protocolKind = usesCommonChat ? nil : nativeToolTemplateProtocol
+            let usesTemplateNativeContinuation = usesCommonChat || (
+                protocolKind == .functionParameterXML && !history.isEmpty
+            )
             return try applyChatTemplate(
                 messages: Self.nativeToolMessages(
                     baseMessages: baseMessages,
@@ -726,11 +737,15 @@ extension LlamaEngine {
                         : nil
                 ),
                 tools: tools,
+                toolChoice: toolChoice,
                 options: options
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if commonChatTemplates?.hasExplicitTemplate == true {
+                throw error
+            }
             let protocolName = nativeToolTemplateProtocol?.logName ?? "unknown"
             llamaRuntimeLog.info(
                 "Native \(protocolName, privacy: .public) tool template render failed; falling back to text tool prompt: \(String(describing: error), privacy: .public)"
@@ -1105,9 +1120,10 @@ private extension LlamaEngine {
         let grammarMode = Self.generationGrammarMode(
             for: options,
             profile: activeOutputProfile,
-            continuingOpenThinkingPairs: continuingOpenThinkingPairs
+            continuingOpenThinkingPairs: continuingOpenThinkingPairs,
+            commonChatMetadata: promptFormatting.commonChatPlan?.metadata
         )
-        let structuredOutputPlan = grammarMode.usesLazyGrammar
+        let structuredOutputPlan = options.grammar != nil && grammarMode.usesLazyGrammar
             ? StructuredOutputPlan(
                 profile: activeOutputProfile,
                 continuingOpenThinkingPairs: continuingOpenThinkingPairs,
@@ -1149,6 +1165,13 @@ private extension LlamaEngine {
         var accumulatedData = Data()
         var accumulatedText = ""
         var incrementalUTF8 = IncrementalUTF8Accumulator()
+        let commonChatStreamParser = try promptFormatting.commonChatPlan?.makeParser()
+        var commonChatStreamUpdate: LlamaCommonChatParseUpdate?
+        let usesCommonChatParser = commonChatStreamParser != nil
+        let preservedTokenIDs = commonChatPreservedTokenIDs(
+            metadata: promptFormatting.commonChatPlan?.metadata,
+            vocab: vocabulary
+        )
         var reasoningBudgetExhaustionLogged = false
         func logReasoningBudgetExhaustionIfNeeded(
             state: carbocation_llama_reasoning_budget_state,
@@ -1206,6 +1229,27 @@ private extension LlamaEngine {
         var hasEmittedFinalAnswerContent = false
 
         func emitVisibleProgress(raw: String, snapshotReason: LLMFinalAnswerSnapshotReason) {
+            if let commonChatStreamUpdate {
+                let phasedText = Self.phasedGeneratedText(
+                    commonChatStreamUpdate,
+                    rawGeneratedText: raw
+                )
+                streamState.emit(
+                    phasedText.finalText,
+                    snapshotReason: snapshotReason
+                )
+                phasedStreamState?.emit(
+                    phasedText: phasedText,
+                    snapshotReason: LLMGenerationContentSnapshotReason(snapshotReason)
+                )
+                if Self.hasVisibleStreamingContent(phasedText.thinkingText) {
+                    hasEmittedThinkingContent = true
+                }
+                if Self.hasVisibleStreamingContent(phasedText.finalText) {
+                    hasEmittedFinalAnswerContent = true
+                }
+                return
+            }
             let canEmitFinal = Self.shouldEmitFinalAnswerProgress(
                 currentPhase: currentPhase,
                 structuredPhase: structuredPhase
@@ -1275,7 +1319,7 @@ private extension LlamaEngine {
                 raw,
                 protecting: streamingControlLiterals
             )
-            return interceptTools
+            return interceptTools && !usesCommonChatParser
                 ? LlamaToolStreamInterpreter.visibleRawPrefix(in: stableRaw)
                 : stableRaw
         }
@@ -1324,9 +1368,9 @@ private extension LlamaEngine {
             _ token: llama_token,
             generatedTokensIncludingThisToken: Int,
             reasoningBudgetState: carbocation_llama_reasoning_budget_state?
-        ) -> Bool {
+        ) throws -> Bool {
             if llama_vocab_is_eog(vocabulary, token) {
-                if interceptTools, let pendingNativeToolInterception {
+                if interceptTools, !usesCommonChatParser, let pendingNativeToolInterception {
                     completeToolInterception(pendingNativeToolInterception)
                 } else {
                     if let reasoningBudgetState {
@@ -1340,16 +1384,23 @@ private extension LlamaEngine {
                 return false
             }
 
-            let rawPiece = tokenToPiece(vocab: vocabulary, token: token)
-            let piece = rawPiece.isEmpty
-                ? tokenToPiece(vocab: vocabulary, token: token, special: true)
-                : rawPiece
+            let piece = generatedTokenPiece(
+                vocab: vocabulary,
+                token: token,
+                preservedTokenIDs: preservedTokenIDs
+            )
             var appendedText = ""
             if !piece.isEmpty {
                 accumulatedData.append(piece)
                 appendedText = incrementalUTF8.append(piece)
                 if !appendedText.isEmpty {
                     accumulatedText.append(contentsOf: appendedText)
+                    if let commonChatStreamParser {
+                        commonChatStreamUpdate = try commonChatStreamParser.append(
+                            appendedText,
+                            isPartial: true
+                        )
+                    }
                 }
             }
 
@@ -1374,7 +1425,7 @@ private extension LlamaEngine {
                     }
                 }
 
-                let toolSnapshot = interceptTools
+                let toolSnapshot = interceptTools && !usesCommonChatParser
                     ? incrementalToolParser.append(
                         appendedText,
                         fullText: accumulatedText
@@ -1437,9 +1488,13 @@ private extension LlamaEngine {
                 }
 
                 let safeRaw = safeStreamingRaw()
-                updatePhase(appliedBoundary
+                let fallbackPhase = appliedBoundary
                     ? Self.streamContentPhase(in: safeRaw, plan: streamPhasePlan)
-                    : (activeToolCapturePhase ?? parserSnapshot.phase))
+                    : (activeToolCapturePhase ?? parserSnapshot.phase)
+                let parsedPhase = commonChatStreamUpdate.map(Self.streamContentPhase(for:))
+                updatePhase(parsedPhase == nil || parsedPhase == .unknown
+                    ? fallbackPhase
+                    : parsedPhase!)
 
                 if stopReason == "json-complete" || stopReason == "stop-sequence" || stopReason == "tool-call-complete" {
                     emitFirstByteIfNeeded()
@@ -1583,7 +1638,7 @@ private extension LlamaEngine {
             }
             var emittedNextTokenCount = 0
             if !nextAlreadyProcessed {
-                guard processGeneratedToolToken(
+                guard try processGeneratedToolToken(
                     next,
                     generatedTokensIncludingThisToken: generatedTokenCount + 1,
                     reasoningBudgetState: reasoningBudgetState
@@ -1668,7 +1723,7 @@ private extension LlamaEngine {
                         }
 
                         emittedAcceptedDraftCount += 1
-                        shouldContinue = processGeneratedToolToken(
+                        shouldContinue = try processGeneratedToolToken(
                             draftToken,
                             generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount,
                             reasoningBudgetState: acceptedReasoningBudgetState
@@ -1697,7 +1752,7 @@ private extension LlamaEngine {
 
                         if let correctionToken, shouldContinue {
                             emittedCorrectionToken = correctionToken
-                            shouldContinue = processGeneratedToolToken(
+                            shouldContinue = try processGeneratedToolToken(
                                 correctionToken,
                                 generatedTokensIncludingThisToken: generatedTokenCount + emittedNextTokenCount + emittedAcceptedDraftCount + 1,
                                 reasoningBudgetState: correctionReasoningBudgetState
@@ -1778,6 +1833,7 @@ private extension LlamaEngine {
 
         if interceptedToolCalls.isEmpty,
            interceptTools,
+           !usesCommonChatParser,
            let pendingNativeToolInterception {
             completeToolInterception(pendingNativeToolInterception)
         }
@@ -1790,8 +1846,37 @@ private extension LlamaEngine {
             accumulatedText = String(decoding: accumulatedData, as: UTF8.self)
         }
 
+        let finalCommonChatUpdate: LlamaCommonChatParseUpdate?
+        if let commonChatPlan = promptFormatting.commonChatPlan {
+            let finalParser = try commonChatPlan.makeParser()
+            finalCommonChatUpdate = try finalParser.append(accumulatedText, isPartial: false)
+        } else {
+            finalCommonChatUpdate = nil
+        }
+
+        var commonToolTriggerPhase: LLMStreamContentPhase?
+        if interceptTools, let finalCommonChatUpdate {
+            let triggerPhase: LLMStreamContentPhase = finalCommonChatUpdate.message.content.isEmpty
+                && !finalCommonChatUpdate.message.reasoningContent.isEmpty
+                ? .thinking
+                : .final
+            let parsedCalls = finalCommonChatUpdate.message.toolCalls.compactMap {
+                $0.materialized(triggerPhase: triggerPhase)
+            }
+            if !parsedCalls.isEmpty {
+                interceptedToolCalls = parsedCalls
+                commonToolTriggerPhase = triggerPhase
+                stopReason = "tool-call-complete"
+                activeToolCaptureRemainingBudget = samplerRuntime.reasoningBudgetSampler.map {
+                    Int(carbocation_llama_reasoning_budget_sampler_remaining($0))
+                }
+            }
+        }
+
         let rawForReturn: String
-        if !interceptedToolCalls.isEmpty,
+        if finalCommonChatUpdate != nil {
+            rawForReturn = accumulatedText
+        } else if !interceptedToolCalls.isEmpty,
            let interception = LlamaToolStreamInterpreter.completedToolCall(in: accumulatedText) {
             rawForReturn = String(accumulatedText[..<interception.range.lowerBound])
         } else {
@@ -1800,8 +1885,17 @@ private extension LlamaEngine {
                 : accumulatedText
         }
 
-        updatePhase(Self.streamContentPhase(in: rawForReturn, plan: streamPhasePlan))
-        if stopReason == "max-tokens", currentPhase == .thinking {
+        let fallbackFinalPhase = Self.streamContentPhase(in: rawForReturn, plan: streamPhasePlan)
+        let parsedFinalPhase = commonToolTriggerPhase
+            ?? finalCommonChatUpdate.map(Self.streamContentPhase(for:))
+        updatePhase(parsedFinalPhase == nil || parsedFinalPhase == .unknown
+            ? fallbackFinalPhase
+            : parsedFinalPhase!)
+        let endedInsideThinking = finalCommonChatUpdate.map {
+            !$0.message.reasoningContent.isEmpty && $0.message.content.isEmpty
+                && $0.message.toolCalls.isEmpty
+        } ?? (currentPhase == .thinking)
+        if stopReason == "max-tokens", endedInsideThinking {
             stopReason = "thinking-not-closed"
         }
         let shouldReturnIncompleteThinking = stopReason == "thinking-not-closed"
@@ -1823,9 +1917,13 @@ private extension LlamaEngine {
             }
         }
 
-        let phasedText = Self.phasedGeneratedText(rawForReturn, plan: streamPhasePlan)
+        let phasedText = finalCommonChatUpdate.map {
+            Self.phasedGeneratedText($0, rawGeneratedText: rawForReturn)
+        } ?? Self.phasedGeneratedText(rawForReturn, plan: streamPhasePlan)
         let returnedText: String
         if stopReason == "thinking-not-closed" {
+            returnedText = phasedText.finalText
+        } else if finalCommonChatUpdate != nil {
             returnedText = phasedText.finalText
         } else {
             do {
