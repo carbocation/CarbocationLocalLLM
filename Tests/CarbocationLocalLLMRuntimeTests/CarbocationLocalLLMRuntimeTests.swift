@@ -3,12 +3,80 @@ import CarbocationLocalLLM
 import XCTest
 
 final class CarbocationLocalLLMRuntimeTests: XCTestCase {
+    func testLifecycleOnlyNewestOperationCanPublishLoadedInfo() {
+        let originalID = UUID()
+        let newestID = UUID()
+        let original = Self.loadedInfo(selection: .installed(originalID), displayName: "Original")
+        let newest = Self.loadedInfo(selection: .installed(newestID), displayName: "Newest")
+        var lifecycle = LocalLLMEngineLifecycleState()
+        lifecycle.replacePublishedInfo(original)
+
+        let firstLoad = lifecycle.beginOperation()
+        XCTAssertEqual(firstLoad.previousInfo, original)
+        XCTAssertNil(lifecycle.loadedInfo, "A transition must not expose the previous selection as usable.")
+
+        let secondLoad = lifecycle.beginOperation()
+        XCTAssertTrue(lifecycle.publish(newest, for: secondLoad))
+        XCTAssertFalse(lifecycle.publish(original, for: firstLoad))
+        XCTAssertEqual(lifecycle.loadedInfo, newest)
+    }
+
+    func testLifecycleFailedReplacementCannotLeaveStaleLoadedInfo() {
+        let original = Self.loadedInfo(selection: .installed(UUID()), displayName: "Original")
+        var lifecycle = LocalLLMEngineLifecycleState()
+        lifecycle.replacePublishedInfo(original)
+
+        let replacement = lifecycle.beginOperation()
+        XCTAssertEqual(replacement.previousInfo, original)
+        XCTAssertNil(lifecycle.loadedInfo)
+
+        XCTAssertTrue(lifecycle.publish(nil, for: replacement))
+        XCTAssertNil(lifecycle.loadedInfo)
+    }
+
+    func testLifecycleCanRestorePreviousInfoWhenRuntimeIsKnownUnchanged() {
+        let original = Self.loadedInfo(selection: .installed(UUID()), displayName: "Original")
+        var lifecycle = LocalLLMEngineLifecycleState()
+        lifecycle.replacePublishedInfo(original)
+
+        let rejectedReplacement = lifecycle.beginOperation()
+
+        XCTAssertTrue(lifecycle.publish(rejectedReplacement.previousInfo, for: rejectedReplacement))
+        XCTAssertEqual(lifecycle.loadedInfo, original)
+    }
+
+    func testLifecycleUnloadInvalidatesAnOlderLoadCompletion() {
+        let loaded = Self.loadedInfo(selection: .installed(UUID()), displayName: "Loaded late")
+        var lifecycle = LocalLLMEngineLifecycleState()
+
+        let load = lifecycle.beginOperation()
+        let unload = lifecycle.beginOperation()
+
+        XCTAssertTrue(lifecycle.publish(nil, for: unload))
+        XCTAssertFalse(lifecycle.publish(loaded, for: load))
+        XCTAssertNil(lifecycle.loadedInfo)
+    }
+
     func testLocalLLMConfigurationDisablesMTPByDefault() {
         let configuration = LocalLLMEngineConfiguration()
 
         XCTAssertEqual(configuration.accelerationPolicy, .disabled)
         XCTAssertEqual(configuration.mtpMaxDraftTokens, 1)
         XCTAssertNil(configuration.llamaMicroBatchSizeLimit)
+    }
+
+    private static func loadedInfo(
+        selection: LLMModelSelection,
+        displayName: String
+    ) -> LocalLLMLoadedModelInfo {
+        LocalLLMLoadedModelInfo(
+            selection: selection,
+            displayName: displayName,
+            contextSize: 4_096,
+            trainingContextSize: 32_768,
+            supportsGrammar: true,
+            usesExactTokenCounts: true
+        )
     }
 
     func testInstalledModelInfoReconcilesLazyProjectorCapabilitiesForMatchingModel() {

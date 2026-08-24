@@ -10,6 +10,8 @@ extension LlamaEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
+        try acquireGenerationLease()
+        defer { endGenerationLease() }
         clearPromptCaches()
 
         let startedAt = Date()
@@ -94,6 +96,8 @@ extension LlamaEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
+        try acquireGenerationLease()
+        defer { endGenerationLease() }
         clearPromptCaches()
 
         let startedAt = Date()

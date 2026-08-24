@@ -177,6 +177,7 @@ public enum LocalLLMEngineError: Error, LocalizedError, Sendable {
     case installedModelNotFound(UUID)
     case noSelectionLoaded
     case unavailableSystemModel(LLMSystemModelID)
+    case lifecycleOperationSuperseded
     case systemModelGenerationFailed(String)
 
     public var errorDescription: String? {
@@ -189,9 +190,89 @@ public enum LocalLLMEngineError: Error, LocalizedError, Sendable {
             return "No model selection is loaded."
         case .unavailableSystemModel(let id):
             return "System model is unavailable: \(id.rawValue)"
+        case .lifecycleOperationSuperseded:
+            return "The model operation was superseded by a newer load or unload request."
         case .systemModelGenerationFailed(let detail):
             return "System model generation failed: \(detail)"
         }
+    }
+}
+
+struct LocalLLMEngineLifecycleState: Sendable {
+    struct Operation: Sendable {
+        let epoch: UInt64
+        let previousInfo: LocalLLMLoadedModelInfo?
+        let previousRuntimeIdentity: LlamaRuntimeIdentity?
+    }
+
+    struct RoutingSnapshot: Sendable {
+        let epoch: UInt64
+        let info: LocalLLMLoadedModelInfo
+        let runtimeIdentity: LlamaRuntimeIdentity?
+    }
+
+    private(set) var epoch: UInt64 = 0
+    private(set) var loadedInfo: LocalLLMLoadedModelInfo?
+    private(set) var runtimeIdentity: LlamaRuntimeIdentity?
+
+    mutating func beginOperation() -> Operation {
+        let next = epoch.addingReportingOverflow(1)
+        precondition(!next.overflow, "Local LLM lifecycle epoch exhausted.")
+        epoch = next.partialValue
+        let operation = Operation(
+            epoch: epoch,
+            previousInfo: loadedInfo,
+            previousRuntimeIdentity: runtimeIdentity
+        )
+        loadedInfo = nil
+        runtimeIdentity = nil
+        return operation
+    }
+
+    func isCurrent(_ operation: Operation) -> Bool {
+        operation.epoch == epoch
+    }
+
+    @discardableResult
+    mutating func publish(
+        _ info: LocalLLMLoadedModelInfo?,
+        runtimeIdentity: LlamaRuntimeIdentity? = nil,
+        for operation: Operation
+    ) -> Bool {
+        guard isCurrent(operation) else { return false }
+        loadedInfo = info
+        self.runtimeIdentity = runtimeIdentity
+        return true
+    }
+
+    mutating func replacePublishedInfo(_ info: LocalLLMLoadedModelInfo?) {
+        loadedInfo = info
+        if info == nil {
+            runtimeIdentity = nil
+        }
+    }
+
+    var routingSnapshot: RoutingSnapshot? {
+        guard let loadedInfo else { return nil }
+        return RoutingSnapshot(
+            epoch: epoch,
+            info: loadedInfo,
+            runtimeIdentity: runtimeIdentity
+        )
+    }
+
+    mutating func updatePublishedInfo(
+        _ info: LocalLLMLoadedModelInfo,
+        expectedEpoch: UInt64,
+        expectedRuntimeIdentity: LlamaRuntimeIdentity
+    ) -> Bool {
+        guard epoch == expectedEpoch,
+              runtimeIdentity == expectedRuntimeIdentity,
+              loadedInfo != nil else {
+            return false
+        }
+        loadedInfo = info
+        return true
     }
 }
 
@@ -200,7 +281,12 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
 
     private let llamaEngine: LlamaEngine
     private let appleIntelligenceEngine: AppleIntelligenceEngine
-    private var loadedInfo: LocalLLMLoadedModelInfo?
+    private var lifecycle = LocalLLMEngineLifecycleState()
+
+    private var loadedInfo: LocalLLMLoadedModelInfo? {
+        get { lifecycle.loadedInfo }
+        set { lifecycle.replacePublishedInfo(newValue) }
+    }
 
     public init(configuration: LocalLLMEngineConfiguration = LocalLLMEngineConfiguration()) {
         self.llamaEngine = LlamaEngine(configuration: configuration.makeLlamaConfiguration())
@@ -334,38 +420,65 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         from library: ModelLibrary,
         requestedContext: Int
     ) async throws -> LocalLLMLoadedModelInfo {
+        let operation = lifecycle.beginOperation()
+
         switch selection {
         case .installed(let id):
-            let model = await MainActor.run {
-                library.model(id: id)
+            let (model, root) = await MainActor.run {
+                (library.model(id: id), library.root)
             }
-            let root = await MainActor.run {
-                library.root
+            guard lifecycle.isCurrent(operation) else {
+                throw LocalLLMEngineError.lifecycleOperationSuperseded
             }
             guard let model else {
+                guard await restoreAfterValidationFailure(for: operation) else {
+                    throw LocalLLMEngineError.lifecycleOperationSuperseded
+                }
                 throw LocalLLMEngineError.installedModelNotFound(id)
             }
-            let loaded = try await llamaEngine.load(
-                model: model,
-                from: root,
-                requestedContext: requestedContext
-            )
+            let loaded: LlamaManagedRuntimeSnapshot
+            do {
+                loaded = try await llamaEngine.load(
+                    model: model,
+                    from: root,
+                    requestedContext: requestedContext,
+                    managedLifecycleEpoch: operation.epoch
+                )
+            } catch {
+                await restorePreviousInfoIfRuntimeUnchanged(for: operation)
+                guard lifecycle.isCurrent(operation) else {
+                    throw LocalLLMEngineError.lifecycleOperationSuperseded
+                }
+                if error is LlamaManagedRuntimeError {
+                    throw LocalLLMEngineError.lifecycleOperationSuperseded
+                }
+                throw error
+            }
             let info = LocalLLMLoadedModelInfo(
                 selection: selection,
-                displayName: loaded.displayName ?? loaded.filename,
-                contextSize: loaded.contextSize,
-                trainingContextSize: loaded.trainingContextSize,
+                displayName: loaded.info.displayName ?? loaded.info.filename,
+                contextSize: loaded.info.contextSize,
+                trainingContextSize: loaded.info.trainingContextSize,
                 supportsGrammar: true,
                 usesExactTokenCounts: true,
-                supportsMTPAcceleration: loaded.supportsMTPAcceleration,
-                supportedInputModalities: loaded.supportedInputModalities,
-                thinkingCapabilities: loaded.thinkingCapabilities
+                supportsMTPAcceleration: loaded.info.supportsMTPAcceleration,
+                supportedInputModalities: loaded.info.supportedInputModalities,
+                thinkingCapabilities: loaded.info.thinkingCapabilities
             )
-            loadedInfo = info
+            guard lifecycle.publish(
+                info,
+                runtimeIdentity: loaded.identity,
+                for: operation
+            ) else {
+                throw LocalLLMEngineError.lifecycleOperationSuperseded
+            }
             return info
         case .system(.appleIntelligence):
             let availability = AppleIntelligenceEngine.availability()
             guard availability.isAvailable else {
+                guard await restoreAfterValidationFailure(for: operation) else {
+                    throw LocalLLMEngineError.lifecycleOperationSuperseded
+                }
                 throw LocalLLMEngineError.unavailableSystemModel(.appleIntelligence)
             }
             let info = LocalLLMLoadedModelInfo(
@@ -378,8 +491,13 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
                 supportsMTPAcceleration: false,
                 supportedInputModalities: [.text]
             )
-            loadedInfo = info
-            await llamaEngine.unload()
+            let accepted = await llamaEngine.unload(
+                managedLifecycleEpoch: operation.epoch
+            )
+            guard accepted,
+                  lifecycle.publish(info, for: operation) else {
+                throw LocalLLMEngineError.lifecycleOperationSuperseded
+            }
             return info
         }
     }
@@ -402,8 +520,74 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
     }
 
     public func unload() async {
-        loadedInfo = nil
-        await llamaEngine.unload()
+        let operation = lifecycle.beginOperation()
+        let accepted = await llamaEngine.unload(
+            managedLifecycleEpoch: operation.epoch
+        )
+        guard accepted else { return }
+        _ = lifecycle.publish(nil, for: operation)
+    }
+
+    private func restorePreviousInfoIfRuntimeUnchanged(
+        for operation: LocalLLMEngineLifecycleState.Operation
+    ) async {
+        guard lifecycle.isCurrent(operation),
+              let previousInfo = operation.previousInfo else {
+            return
+        }
+
+        switch previousInfo.selection {
+        case .system:
+            _ = lifecycle.publish(
+                previousInfo,
+                runtimeIdentity: operation.previousRuntimeIdentity,
+                for: operation
+            )
+        case .installed:
+            guard let previousRuntimeIdentity = operation.previousRuntimeIdentity,
+                  let runtime = await llamaEngine.currentManagedRuntimeSnapshot(),
+                  lifecycle.isCurrent(operation),
+                  runtime.identity == previousRuntimeIdentity else {
+                return
+            }
+            var restoredInfo = previousInfo
+            restoredInfo.contextSize = runtime.info.contextSize
+            restoredInfo.trainingContextSize = runtime.info.trainingContextSize
+            restoredInfo.supportsMTPAcceleration = runtime.info.supportsMTPAcceleration
+            restoredInfo.supportedInputModalities = runtime.info.supportedInputModalities
+            restoredInfo.thinkingCapabilities = runtime.info.thinkingCapabilities
+            _ = lifecycle.publish(
+                restoredInfo,
+                runtimeIdentity: runtime.identity,
+                for: operation
+            )
+        }
+    }
+
+    private func restoreAfterValidationFailure(
+        for operation: LocalLLMEngineLifecycleState.Operation
+    ) async -> Bool {
+        guard lifecycle.isCurrent(operation) else { return false }
+        if let previousInfo = operation.previousInfo {
+            let accepted = await llamaEngine.supersedeManagedLifecycleOperations(
+                epoch: operation.epoch
+            )
+            guard accepted, lifecycle.isCurrent(operation) else { return false }
+            return lifecycle.publish(
+                previousInfo,
+                runtimeIdentity: operation.previousRuntimeIdentity,
+                for: operation
+            )
+        }
+
+        // A prior operation may already be loading the lower runtime even though
+        // it never published a selection. A tagged unload either runs after that
+        // load or advances the child watermark so the stale load cannot run.
+        let accepted = await llamaEngine.unload(
+            managedLifecycleEpoch: operation.epoch
+        )
+        guard accepted, lifecycle.isCurrent(operation) else { return false }
+        return lifecycle.publish(nil, for: operation)
     }
 
     public func currentSelection() -> LLMModelSelection? {
@@ -439,20 +623,46 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         return result
     }
 
-    private func refreshInstalledInputModalities() async {
-        guard let expectedSelection = loadedInfo?.selection,
-              case .installed = expectedSelection,
-              let llamaInfo = await llamaEngine.currentLoadedModelInfo(),
-              let currentInfo = loadedInfo,
+    private func withInstalledLlamaRuntime<Result: Sendable>(
+        _ route: LocalLLMEngineLifecycleState.RoutingSnapshot,
+        operation: @Sendable () async throws -> Result
+    ) async throws -> Result {
+        guard case .installed = route.info.selection,
+              let expectedIdentity = route.runtimeIdentity else {
+            throw LocalLLMEngineError.lifecycleOperationSuperseded
+        }
+        do {
+            return try await LlamaManagedRuntimeContext.$expectedIdentity.withValue(
+                expectedIdentity
+            ) {
+                try await operation()
+            }
+        } catch is LlamaManagedRuntimeError {
+            throw LocalLLMEngineError.lifecycleOperationSuperseded
+        }
+    }
+
+    private func refreshInstalledInputModalities(
+        for route: LocalLLMEngineLifecycleState.RoutingSnapshot
+    ) async {
+        let expectedSelection = route.info.selection
+        guard case .installed = expectedSelection,
+              let expectedIdentity = route.runtimeIdentity,
+              let runtime = await llamaEngine.currentManagedRuntimeSnapshot(),
+              runtime.identity == expectedIdentity,
               let reconciledInfo = Self.reconciledInstalledModelInfo(
-                  currentInfo: currentInfo,
+                  currentInfo: route.info,
                   expectedSelection: expectedSelection,
-                  runtimeModelID: llamaInfo.modelID,
-                  runtimeInputModalities: llamaInfo.supportedInputModalities
+                  runtimeModelID: runtime.info.modelID,
+                  runtimeInputModalities: runtime.info.supportedInputModalities
               ) else {
             return
         }
-        loadedInfo = reconciledInfo
+        _ = lifecycle.updatePublishedInfo(
+            reconciledInfo,
+            expectedEpoch: route.epoch,
+            expectedRuntimeIdentity: expectedIdentity
+        )
     }
 
     public func preflight(
@@ -460,17 +670,19 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         prompt: String,
         options: GenerationOptions
     ) async throws -> LLMGenerationPreflight {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
-            return try await llamaEngine.preflight(
-                system: system,
-                prompt: prompt,
-                options: options
-            )
+            return try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                try await llamaEngine.preflight(
+                    system: system,
+                    prompt: prompt,
+                    options: options
+                )
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.preflight(
@@ -488,22 +700,24 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         messages: [LLMChatMessage],
         options: GenerationOptions
     ) async throws -> LLMGenerationPreflight {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
             let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
             do {
-                let result = try await llamaEngine.preflight(messages: messages, options: options)
+                let result = try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                    try await llamaEngine.preflight(messages: messages, options: options)
+                }
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 return result
             } catch {
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 throw error
             }
@@ -540,19 +754,21 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl? = nil,
         onEvent: @Sendable (LLMStreamEvent) -> Void
     ) async throws -> String {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
-            return try await llamaEngine.generate(
-                system: system,
-                prompt: prompt,
-                options: options,
-                control: control,
-                onEvent: onEvent
-            )
+            return try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                try await llamaEngine.generate(
+                    system: system,
+                    prompt: prompt,
+                    options: options,
+                    control: control,
+                    onEvent: onEvent
+                )
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generate(
@@ -635,27 +851,29 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl?,
         onPhaseAwareEvent: @escaping @Sendable (LLMPhaseAwareStreamEvent) -> Void
     ) async throws -> String {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
             let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
             do {
-                let result = try await llamaEngine.generate(
-                    messages: messages,
-                    options: options,
-                    control: control,
-                    onPhaseAwareEvent: onPhaseAwareEvent
-                )
+                let result = try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                    try await llamaEngine.generate(
+                        messages: messages,
+                        options: options,
+                        control: control,
+                        onPhaseAwareEvent: onPhaseAwareEvent
+                    )
+                }
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 return result
             } catch {
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 throw error
             }
@@ -700,19 +918,21 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         onPhaseAwareEvent: @Sendable (LLMPhaseAwareStreamEvent) -> Void,
         _ phaseAwareOverload: Void = ()
     ) async throws -> String {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
-            return try await llamaEngine.generate(
-                system: system,
-                prompt: prompt,
-                options: options,
-                control: control,
-                onPhaseAwareEvent: onPhaseAwareEvent
-            )
+            return try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                try await llamaEngine.generate(
+                    system: system,
+                    prompt: prompt,
+                    options: options,
+                    control: control,
+                    onPhaseAwareEvent: onPhaseAwareEvent
+                )
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generate(
@@ -735,19 +955,21 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl? = nil,
         onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
     ) async throws -> LLMGenerationResult {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
-            return try await llamaEngine.generatePhased(
-                system: system,
-                prompt: prompt,
-                options: options,
-                control: control,
-                onEvent: onEvent
-            )
+            return try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                try await llamaEngine.generatePhased(
+                    system: system,
+                    prompt: prompt,
+                    options: options,
+                    control: control,
+                    onEvent: onEvent
+                )
+            }
         case .system(.appleIntelligence):
             do {
                 return try await appleIntelligenceEngine.generatePhased(
@@ -769,27 +991,29 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl? = nil,
         onEvent: @escaping @Sendable (LLMGenerationStreamEvent) -> Void = { _ in }
     ) async throws -> LLMGenerationResult {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
             let shouldRefreshInputModalities = LLMChatMessage.containsMultimodalInput(in: messages)
             do {
-                let result = try await llamaEngine.generatePhased(
-                    messages: messages,
-                    options: options,
-                    control: control,
-                    onEvent: onEvent
-                )
+                let result = try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                    try await llamaEngine.generatePhased(
+                        messages: messages,
+                        options: options,
+                        control: control,
+                        onEvent: onEvent
+                    )
+                }
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 return result
             } catch {
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 throw error
             }
@@ -825,28 +1049,30 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl? = nil,
         onPhaseAwareEvent: @escaping @Sendable (LLMToolPhaseAwareStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolGenerationResult {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
             let shouldRefreshInputModalities = request.messages.map {
                 LLMChatMessage.containsMultimodalInput(in: $0)
             } ?? false
             do {
-                let result = try await llamaEngine.generateWithTools(
-                    request,
-                    control: control,
-                    onPhaseAwareEvent: onPhaseAwareEvent
-                )
+                let result = try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                    try await llamaEngine.generateWithTools(
+                        request,
+                        control: control,
+                        onPhaseAwareEvent: onPhaseAwareEvent
+                    )
+                }
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 return result
             } catch {
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 throw error
             }
@@ -868,28 +1094,30 @@ public actor LocalLLMEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimod
         control: LLMGenerationControl? = nil,
         onEvent: @escaping @Sendable (LLMToolPhasedStreamEvent) -> Void = { _ in }
     ) async throws -> LLMToolPhasedGenerationResult {
-        guard let loadedInfo else {
+        guard let route = lifecycle.routingSnapshot else {
             throw LocalLLMEngineError.noSelectionLoaded
         }
 
-        switch loadedInfo.selection {
+        switch route.info.selection {
         case .installed:
             let shouldRefreshInputModalities = request.messages.map {
                 LLMChatMessage.containsMultimodalInput(in: $0)
             } ?? false
             do {
-                let result = try await llamaEngine.generateWithToolsPhased(
-                    request,
-                    control: control,
-                    onEvent: onEvent
-                )
+                let result = try await withInstalledLlamaRuntime(route) { [llamaEngine] in
+                    try await llamaEngine.generateWithToolsPhased(
+                        request,
+                        control: control,
+                        onEvent: onEvent
+                    )
+                }
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 return result
             } catch {
                 if shouldRefreshInputModalities {
-                    await refreshInstalledInputModalities()
+                    await refreshInstalledInputModalities(for: route)
                 }
                 throw error
             }

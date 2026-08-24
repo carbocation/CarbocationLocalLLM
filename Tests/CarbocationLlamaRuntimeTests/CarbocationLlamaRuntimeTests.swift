@@ -561,14 +561,15 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             return ["answer": "tool output"]
         }
         let control = LLMGenerationControl()
+        let request = LLMToolGenerationRequest(
+            system: "System",
+            prompt: "Use lookup.",
+            tools: [lookupTool],
+            maxToolRounds: 1
+        )
 
         let generationTask = Task {
-            try await engine.generateWithTools(LLMToolGenerationRequest(
-                system: "System",
-                prompt: "Use lookup.",
-                tools: [lookupTool],
-                maxToolRounds: 1
-            ), control: control)
+            try await engine.generateWithTools(request, control: control)
         }
 
         try await withTimeout(seconds: 5) {
@@ -583,6 +584,35 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             loadedInfoAfterUnloadRequest,
             "unload() should be deferred while a tool generation is active."
         )
+        let lifecycleStateAfterUnloadRequest = await engine.modelLifecycleState
+        XCTAssertEqual(lifecycleStateAfterUnloadRequest, .unloadPending)
+
+        do {
+            _ = try await engine.generateWithTools(request)
+            XCTFail("A pending unload must reject a new public tool-generation request.")
+        } catch let error as LLMEngineError {
+            guard case .noModelLoaded = error else {
+                return XCTFail("Unexpected public tool-generation error: \(error)")
+            }
+        }
+
+        do {
+            try await engine.acquireGenerationLease()
+            XCTFail("A pending unload must reject new generation work.")
+        } catch let error as LLMEngineError {
+            guard case .noModelLoaded = error else {
+                return XCTFail("Unexpected generation lease error: \(error)")
+            }
+        }
+
+        do {
+            try await engine.requireModelLoadAvailable()
+            XCTFail("A pending unload must reject even a same-model load before reuse is considered.")
+        } catch let error as LLMEngineError {
+            guard case .modelLoadFailed = error else {
+                return XCTFail("Unexpected model load error: \(error)")
+            }
+        }
 
         await toolGate.release()
         let result = try await withTimeout(seconds: 5) {
@@ -600,6 +630,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             loadedInfoAfterGeneration,
             "Deferred unload should run after the active generation completes."
         )
+        let lifecycleStateAfterGeneration = await engine.modelLifecycleState
+        XCTAssertEqual(lifecycleStateAfterGeneration, .unloaded)
 
         let snapshot = await segmentScript.snapshot()
         XCTAssertEqual(snapshot.count, 2)
@@ -611,6 +643,63 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(snapshot.prompts[1].contains("Use the tool outputs above to continue the answer."))
         XCTAssertEqual(snapshot.templateModes, [.embedded, .embedded])
         XCTAssertEqual(snapshot.isInternalContinuationFlags, [false, true])
+    }
+
+    func testManagedLifecycleWatermarkRejectsAnOlderUnload() async throws {
+        let engine = LlamaEngine()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "Managed lifecycle vocabulary",
+            requestedContext: 1_024
+        )
+
+        let advanced = await engine.supersedeManagedLifecycleOperations(epoch: 2)
+        let staleUnloadAccepted = await engine.unload(managedLifecycleEpoch: 1)
+        let loadedInfo = await engine.currentLoadedModelInfo()
+        let lifecycleState = await engine.modelLifecycleState
+
+        XCTAssertTrue(advanced)
+        XCTAssertFalse(staleUnloadAccepted)
+        XCTAssertNotNil(loadedInfo)
+        XCTAssertEqual(lifecycleState, .ready)
+    }
+
+    func testManagedGenerationAdmissionRejectsAReplacedRuntimeIdentity() async throws {
+        let engine = LlamaEngine()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "First managed runtime",
+            requestedContext: 1_024
+        )
+        let firstSnapshot = await engine.currentManagedRuntimeSnapshot()
+        let first = try XCTUnwrap(firstSnapshot)
+
+        await engine.unload()
+        try await engine.loadVocabularyOnlyForTesting(
+            modelAt: Self.gemma4VocabModelURL,
+            displayName: "Replacement managed runtime",
+            requestedContext: 1_024
+        )
+        let replacementSnapshot = await engine.currentManagedRuntimeSnapshot()
+        let replacement = try XCTUnwrap(replacementSnapshot)
+        XCTAssertNotEqual(first.identity, replacement.identity)
+
+        do {
+            try await LlamaManagedRuntimeContext.$expectedIdentity.withValue(first.identity) {
+                try await engine.acquireGenerationLease()
+                await engine.endGenerationLease()
+            }
+            XCTFail("A request routed to the replaced runtime must not be admitted.")
+        } catch let error as LlamaManagedRuntimeError {
+            guard case .lifecycleOperationSuperseded = error else {
+                return XCTFail("Unexpected managed runtime error: \(error)")
+            }
+        }
+
+        try await LlamaManagedRuntimeContext.$expectedIdentity.withValue(replacement.identity) {
+            try await engine.acquireGenerationLease()
+            await engine.endGenerationLease()
+        }
     }
 
     func testPrefillRangesSplitByBatchSize() {

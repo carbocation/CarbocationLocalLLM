@@ -25,9 +25,7 @@ extension LlamaEngine {
             throw LLMEngineError.noModelLoaded
         }
 
-        beginGenerationLease()
-        defer { endGenerationLease() }
-
+        try request.options.validateForLlamaBackend()
         try LLMToolRuntime.validate(request)
         let stats = LlamaToolGenerationStatsAccumulator()
 
@@ -71,6 +69,9 @@ extension LlamaEngine {
             emitAggregateStats(stopReason: snapshot.stopReason)
             return LLMToolGenerationResult(finalText: text, stopReason: snapshot.stopReason)
         }
+
+        try acquireGenerationLease()
+        defer { endGenerationLease() }
 
         if let messages = request.messages,
            LLMChatMessage.containsMultimodalInput(in: messages) {
@@ -214,9 +215,7 @@ extension LlamaEngine {
             throw LLMEngineError.noModelLoaded
         }
 
-        beginGenerationLease()
-        defer { endGenerationLease() }
-
+        try request.options.validateForLlamaBackend()
         try LLMToolRuntime.validate(request)
         let stats = LlamaToolGenerationStatsAccumulator()
 
@@ -267,6 +266,9 @@ extension LlamaEngine {
                 stopReason: generation.stopReason
             )
         }
+
+        try acquireGenerationLease()
+        defer { endGenerationLease() }
 
         if let messages = request.messages,
            LLMChatMessage.containsMultimodalInput(in: messages) {

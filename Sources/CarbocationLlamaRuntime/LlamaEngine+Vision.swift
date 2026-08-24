@@ -229,9 +229,12 @@ extension LlamaEngine {
         messages: [LLMChatMessage],
         options: GenerationOptions
     ) async throws -> LLMGenerationPreflight {
-        guard context != nil, let loadedInfo else {
+        try requireReadyRuntime()
+        guard context != nil,
+              let loadedInfo else {
             throw LLMEngineError.noModelLoaded
         }
+        try options.validateForLlamaBackend()
 
         if LLMChatMessage.containsMultimodalInput(in: messages) {
             let prepared = try prepareMultimodalPrompt(messages: messages, options: options)
@@ -315,7 +318,8 @@ extension LlamaEngine {
             throw LLMEngineError.noModelLoaded
         }
 
-        beginGenerationLease()
+        try options.validateForLlamaBackend()
+        try acquireGenerationLease()
         defer { endGenerationLease() }
         let controlGenerationID = control?.beginGeneration()
         defer {

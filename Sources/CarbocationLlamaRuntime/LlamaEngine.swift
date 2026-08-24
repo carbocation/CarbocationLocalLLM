@@ -10,6 +10,31 @@ let llamaRuntimeLog = Logger(
     category: "LlamaRuntime"
 )
 
+/// Opaque identity for one physical model/runtime instance. It changes only
+/// when the lower llama.cpp runtime is actually replaced.
+package struct LlamaRuntimeIdentity: Hashable, Sendable {
+    fileprivate let value: UUID
+
+    fileprivate init() {
+        self.value = UUID()
+    }
+}
+
+package struct LlamaManagedRuntimeSnapshot: Sendable {
+    package var info: LlamaLoadedModelInfo
+    package var identity: LlamaRuntimeIdentity
+}
+
+package enum LlamaManagedRuntimeError: Error, Sendable {
+    case lifecycleOperationSuperseded
+}
+
+/// Binds wrapper-routed work to the physical runtime selected before the
+/// cross-actor hop. Child tasks inherit this value automatically.
+package enum LlamaManagedRuntimeContext {
+    @TaskLocal package static var expectedIdentity: LlamaRuntimeIdentity?
+}
+
 #if os(iOS)
 private let platformDefaultGPULayerCount: Int32 = 0
 // Large mobile GGUFs can fit model + KV memory but fail llama.cpp's 512-token graph reservation.
@@ -335,6 +360,12 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         }
     }
 
+    enum ModelLifecycleState: Equatable {
+        case unloaded
+        case ready
+        case unloadPending
+    }
+
     let configuration: LlamaEngineConfiguration
 
     var model: OpaquePointer?
@@ -354,8 +385,10 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     var promptFormattingCache: (key: PromptFormattingCacheKey, result: PromptFormattingResult)?
     var promptTokenizationCache: PromptTokenizationCache?
     var toolAwareGenerationSegmentOverride: ToolAwareGenerationSegmentOverride?
+    private(set) var modelLifecycleState: ModelLifecycleState = .unloaded
+    private var runtimeIdentity: LlamaRuntimeIdentity?
+    private var newestManagedLifecycleEpoch: UInt64 = 0
     private var activeGenerationCount = 0
-    private var unloadAfterActiveGeneration = false
 
     public init(configuration: LlamaEngineConfiguration = LlamaEngineConfiguration()) {
         self.configuration = configuration
@@ -465,7 +498,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
     }
 
     static func clampedMTPMaxDraftTokens(_ requested: Int) -> Int {
-        max(1, min(32, requested))
+        max(1, min(maximumRecurrentStateSnapshots, requested))
     }
 
     static func effectiveMTPMaxDraftTokens(
@@ -484,7 +517,9 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         prompt: String,
         options: GenerationOptions
     ) async throws -> LLMGenerationPreflight {
-        guard context != nil, loadedInfo != nil else {
+        try requireReadyRuntime()
+        guard context != nil,
+              loadedInfo != nil else {
             throw LLMEngineError.noModelLoaded
         }
 
@@ -496,9 +531,13 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         promptFormatting: PromptFormattingResult,
         options: GenerationOptions
     ) throws -> LLMGenerationPreflight {
-        guard context != nil, let vocabulary, let loadedInfo else {
+        try requireReadyRuntime()
+        guard context != nil,
+              let vocabulary,
+              let loadedInfo else {
             throw LLMEngineError.noModelLoaded
         }
+        try options.validateForLlamaBackend()
 
         let renderedPrompt = promptFormatting.text
         let promptTokens = try tokenizePrompt(renderedPrompt, vocab: vocabulary)
@@ -582,6 +621,26 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         try load(descriptor: LlamaModelDescriptor(model: installed, root: root), requestedContext: requestedContext)
     }
 
+    package func load(
+        model installed: InstalledModel,
+        from root: URL,
+        requestedContext: Int,
+        managedLifecycleEpoch: UInt64
+    ) throws -> LlamaManagedRuntimeSnapshot {
+        guard acceptManagedLifecycleEpoch(managedLifecycleEpoch) else {
+            throw LlamaManagedRuntimeError.lifecycleOperationSuperseded
+        }
+        let info = try load(
+            model: installed,
+            from: root,
+            requestedContext: requestedContext
+        )
+        guard let runtimeIdentity else {
+            throw LLMEngineError.modelLoadFailed("Loaded runtime has no identity.")
+        }
+        return LlamaManagedRuntimeSnapshot(info: info, identity: runtimeIdentity)
+    }
+
     @discardableResult
     public func load(
         modelAt url: URL,
@@ -610,10 +669,17 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         descriptor: LlamaModelDescriptor,
         requestedContext: Int
     ) throws -> LlamaLoadedModelInfo {
-        let path = descriptor.url.path
-        let ggufMetadata = GGUFMetadata.modelMetadata(at: descriptor.url)
+        try Self.validateContextConfiguration(
+            requestedContext: requestedContext,
+            batchSizeLimit: configuration.batchSizeLimit,
+            microBatchSizeLimit: configuration.microBatchSizeLimit
+        )
+        try requireModelLoadAvailable()
 
-        if let loadedInfo,
+        let path = descriptor.url.path
+
+        if modelLifecycleState == .ready,
+           var loadedInfo,
            loadedInfo.modelPath == path,
            loadedDescriptor?.mmprojURL?.standardizedFileURL == descriptor.mmprojURL?.standardizedFileURL,
            context != nil {
@@ -622,15 +688,17 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
                 trainingContext: loadedInfo.trainingContextSize
             )
             if desiredContext == loadedInfo.contextSize {
+                loadedInfo.modelID = descriptor.id
+                loadedInfo.displayName = descriptor.displayName ?? loadedInfo.displayName
+                loadedInfo.filename = descriptor.filename
+                self.loadedDescriptor = descriptor
+                self.loadedInfo = loadedInfo
                 return loadedInfo
             }
         }
 
-        guard activeGenerationCount == 0 else {
-            throw LLMEngineError.modelLoadFailed("Cannot load a new model while generation is active.")
-        }
-
         performUnload()
+        let ggufMetadata = GGUFMetadata.modelMetadata(at: descriptor.url)
 
         let supportsMTPAcceleration = ggufMetadata.supportsMTPAcceleration
         let shouldPrepareMTPAcceleration = supportsMTPAcceleration &&
@@ -752,6 +820,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
+        self.modelLifecycleState = .ready
+        self.runtimeIdentity = LlamaRuntimeIdentity()
         self.chatTemplate = template
         self.preparedChatTemplate = preparedTemplate
         self.outputSanitizationProfile = outputProfile
@@ -769,16 +839,14 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         filename: String? = nil,
         requestedContext: Int
     ) throws -> LlamaLoadedModelInfo {
+        try requireModelLoadAvailable()
+
         let descriptor = LlamaModelDescriptor(
             url: url,
             displayName: displayName,
             filename: filename
         )
         let path = descriptor.url.path
-
-        guard activeGenerationCount == 0 else {
-            throw LLMEngineError.modelLoadFailed("Cannot load a new model while generation is active.")
-        }
 
         performUnload()
 
@@ -826,6 +894,8 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.vocabulary = loadedVocabulary
         self.loadedDescriptor = descriptor
         self.loadedInfo = info
+        self.modelLifecycleState = .ready
+        self.runtimeIdentity = LlamaRuntimeIdentity()
         self.chatTemplate = template
         self.preparedChatTemplate = preparedTemplate
         self.outputSanitizationProfile = outputProfile
@@ -852,20 +922,70 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
 
     public func unload() {
         guard activeGenerationCount == 0 else {
-            unloadAfterActiveGeneration = true
+            modelLifecycleState = .unloadPending
             return
         }
         performUnload()
     }
 
-    func beginGenerationLease() {
+    @discardableResult
+    package func unload(managedLifecycleEpoch: UInt64) -> Bool {
+        guard acceptManagedLifecycleEpoch(managedLifecycleEpoch) else { return false }
+        unload()
+        return true
+    }
+
+    @discardableResult
+    package func supersedeManagedLifecycleOperations(epoch: UInt64) -> Bool {
+        acceptManagedLifecycleEpoch(epoch)
+    }
+
+    package func currentManagedRuntimeSnapshot() -> LlamaManagedRuntimeSnapshot? {
+        guard modelLifecycleState == .ready,
+              let loadedInfo,
+              let runtimeIdentity else {
+            return nil
+        }
+        return LlamaManagedRuntimeSnapshot(info: loadedInfo, identity: runtimeIdentity)
+    }
+
+    private func acceptManagedLifecycleEpoch(_ epoch: UInt64) -> Bool {
+        guard epoch > newestManagedLifecycleEpoch else { return false }
+        newestManagedLifecycleEpoch = epoch
+        return true
+    }
+
+    func requireReadyRuntime() throws {
+        if let expectedIdentity = LlamaManagedRuntimeContext.expectedIdentity {
+            guard modelLifecycleState == .ready,
+                  expectedIdentity == runtimeIdentity else {
+                throw LlamaManagedRuntimeError.lifecycleOperationSuperseded
+            }
+            return
+        }
+        guard modelLifecycleState == .ready else {
+            throw LLMEngineError.noModelLoaded
+        }
+    }
+
+    func acquireGenerationLease() throws {
+        try requireReadyRuntime()
         activeGenerationCount += 1
     }
 
     func endGenerationLease() {
         activeGenerationCount = max(0, activeGenerationCount - 1)
-        if activeGenerationCount == 0, unloadAfterActiveGeneration {
+        if activeGenerationCount == 0, modelLifecycleState == .unloadPending {
             performUnload()
+        }
+    }
+
+    func requireModelLoadAvailable() throws {
+        guard activeGenerationCount == 0,
+              modelLifecycleState != .unloadPending else {
+            throw LLMEngineError.modelLoadFailed(
+                "Cannot load a model while generation or a deferred unload is active."
+            )
         }
     }
 
@@ -880,7 +1000,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
 
-        unloadAfterActiveGeneration = false
+        modelLifecycleState = .unloaded
         self.model = nil
         self.context = nil
         self.mtpContext = nil
@@ -889,6 +1009,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         self.vocabulary = nil
         self.loadedDescriptor = nil
         self.loadedInfo = nil
+        self.runtimeIdentity = nil
         self.chatTemplate = nil
         self.preparedChatTemplate = nil
         self.outputSanitizationProfile = .empty
@@ -958,7 +1079,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             throw LLMEngineError.noModelLoaded
         }
 
-        beginGenerationLease()
+        try acquireGenerationLease()
         defer { endGenerationLease() }
         let controlGenerationID = control?.beginGeneration()
         defer {
@@ -1003,7 +1124,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
             throw LLMEngineError.noModelLoaded
         }
 
-        beginGenerationLease()
+        try acquireGenerationLease()
         defer { endGenerationLease() }
         let controlGenerationID = control?.beginGeneration()
         defer {
@@ -1069,6 +1190,7 @@ public actor LlamaEngine: LLMEngine, LLMPhasedGenerationProvider, LLMMultimodalG
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
+        try options.validateForLlamaBackend()
 
         func onPhaseAwareEvent(_ event: LLMPhaseAwareStreamEvent) {
             onEvent(LLMGenerationStreamEvent(adapting: event))
