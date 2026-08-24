@@ -618,6 +618,11 @@ public enum LLMToolCallParser {
     }
 
     static func parsedToolCalls(in text: String) -> [ParsedToolCall] {
+        if text.contains("<tool_call>"), text.contains("<function=") {
+            // Once this protocol is recognizable, never reinterpret JSON inside
+            // a malformed parameter as a standalone generic tool call.
+            return functionParameterToolCalls(in: text)
+        }
         for candidate in jsonCandidates(in: text) {
             guard let value = try? LLMJSONValue(jsonString: candidate),
                   let calls = parsedToolCalls(from: value),
@@ -626,7 +631,7 @@ public enum LLMToolCallParser {
             }
             return calls
         }
-        let nativeCalls = gemmaToolCalls(in: text)
+        let nativeCalls = delimitedToolCalls(in: text)
         if !nativeCalls.isEmpty {
             return nativeCalls
         }
@@ -664,7 +669,9 @@ public enum LLMToolCallParser {
                 rawID: rawID,
                 fallbackIndex: fallbackIndex,
                 name: name,
-                arguments: normalizedArguments(function["arguments"])
+                arguments: normalizedArguments(
+                    function["arguments"] ?? function["args"] ?? function["parameters"]
+                )
             )
         }
 
@@ -675,12 +682,16 @@ public enum LLMToolCallParser {
             rawID: rawID,
             fallbackIndex: fallbackIndex,
             name: name,
-            arguments: normalizedArguments(object["arguments"] ?? object["args"])
+            arguments: normalizedArguments(
+                object["arguments"] ?? object["args"] ?? object["parameters"]
+            )
         )
     }
 
     private static func nonEmptyRawID(from object: [String: LLMJSONValue]) -> String? {
-        guard let id = object["id"]?.stringValue,
+        guard let id = object["id"]?.stringValue
+                ?? object["tool_call_id"]?.stringValue
+                ?? object["call_id"]?.stringValue,
               !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -708,12 +719,22 @@ public enum LLMToolCallParser {
     private static func jsonCandidates(in text: String) -> [String] {
         let stripped = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidates = fencedJSONBlocks(in: stripped)
-        if let object = firstBalancedJSON(in: stripped, opening: "{", closing: "}") {
-            candidates.append(object)
-        }
-        if let array = firstBalancedJSON(in: stripped, opening: "[", closing: "]") {
-            candidates.append(array)
-        }
+        let delimiters: [(opening: Character, closing: Character)] = [
+            ("{", "}"),
+            ("[", "]")
+        ]
+        let balancedValues: [(index: String.Index, value: String)] = delimiters.compactMap { delimiter in
+            guard let index = stripped.firstIndex(of: delimiter.opening),
+                  let value = firstBalancedJSON(
+                    in: stripped,
+                    opening: delimiter.opening,
+                    closing: delimiter.closing
+                  ) else {
+                return nil
+            }
+            return (index, value)
+        }.sorted { $0.index < $1.index }
+        candidates.append(contentsOf: balancedValues.map(\.value))
         if candidates.isEmpty {
             candidates.append(stripped)
         }
@@ -768,13 +789,122 @@ public enum LLMToolCallParser {
         return nil
     }
 
-    private static func gemmaToolCalls(in text: String) -> [ParsedToolCall] {
+    /// Parses the function/parameter XML-like protocol used by tool-aware templates
+    /// that render calls in this form:
+    ///
+    /// ```
+    /// <tool_call>
+    /// <function=lookup>
+    /// <parameter=query>
+    /// Swift concurrency
+    /// </parameter>
+    /// </function>
+    /// </tool_call>
+    /// ```
+    ///
+    /// This is intentionally capability-shaped rather than model-shaped. Any embedded
+    /// template that declares the same grammar can use the protocol.
+    private static func functionParameterToolCalls(in text: String) -> [ParsedToolCall] {
+        let callStartMarker = "<tool_call>"
+        let callEndMarker = "</tool_call>"
+        let functionStartMarker = "<function="
+        let functionEndMarker = "</function>"
+        let parameterStartMarker = "<parameter="
+        let parameterEndMarker = "</parameter>"
+
+        var searchStart = text.startIndex
+        var calls: [ParsedToolCall] = []
+
+        while let callStart = text.range(
+            of: callStartMarker,
+            range: searchStart..<text.endIndex
+        ) {
+            guard let callEnd = text.range(
+                of: callEndMarker,
+                range: callStart.upperBound..<text.endIndex
+            ) else {
+                break
+            }
+            defer { searchStart = callEnd.upperBound }
+
+            guard let functionStart = text.range(
+                of: functionStartMarker,
+                range: callStart.upperBound..<callEnd.lowerBound
+            ),
+            let functionOpeningEnd = text.range(
+                of: ">",
+                range: functionStart.upperBound..<callEnd.lowerBound
+            ),
+            let functionEnd = text.range(
+                of: functionEndMarker,
+                range: functionOpeningEnd.upperBound..<callEnd.lowerBound
+            ) else {
+                continue
+            }
+
+            let rawName = String(text[functionStart.upperBound..<functionOpeningEnd.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawName.isEmpty else { continue }
+
+            var arguments: [String: LLMJSONValue] = [:]
+            var parameterSearchStart = functionOpeningEnd.upperBound
+            var isMalformed = false
+            while let parameterStart = text.range(
+                of: parameterStartMarker,
+                range: parameterSearchStart..<functionEnd.lowerBound
+            ) {
+                guard let parameterOpeningEnd = text.range(
+                    of: ">",
+                    range: parameterStart.upperBound..<functionEnd.lowerBound
+                ),
+                let parameterEnd = text.range(
+                    of: parameterEndMarker,
+                    range: parameterOpeningEnd.upperBound..<functionEnd.lowerBound
+                ) else {
+                    isMalformed = true
+                    break
+                }
+
+                let name = String(text[parameterStart.upperBound..<parameterOpeningEnd.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else {
+                    isMalformed = true
+                    break
+                }
+
+                let rawValue = String(text[parameterOpeningEnd.upperBound..<parameterEnd.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                arguments[name] = functionParameterValue(rawValue)
+                parameterSearchStart = parameterEnd.upperBound
+            }
+            guard !isMalformed else { continue }
+
+            let name = rawName.hasPrefix("functions.")
+                ? String(rawName.dropFirst("functions.".count))
+                : rawName
+            calls.append(ParsedToolCall(
+                rawID: nil,
+                fallbackIndex: calls.count,
+                name: name,
+                arguments: .object(arguments)
+            ))
+        }
+
+        return calls
+    }
+
+    private static func functionParameterValue(_ text: String) -> LLMJSONValue {
+        guard !text.isEmpty else { return .string("") }
+        return (try? LLMJSONValue(jsonString: text)) ?? .string(text)
+    }
+
+    private static func delimitedToolCalls(in text: String) -> [ParsedToolCall] {
         let startMarker = "<|tool_call>call:"
         var searchStart = text.startIndex
         var calls: [ParsedToolCall] = []
 
         while let markerRange = text.range(of: startMarker, range: searchStart..<text.endIndex) {
-            var scanner = GemmaToolCallScanner(text: text, index: markerRange.upperBound)
+            var scanner = DelimitedToolCallScanner(text: text, index: markerRange.upperBound)
             if let call = scanner.parseCall(fallbackIndex: calls.count) {
                 calls.append(call)
                 searchStart = scanner.index
@@ -786,7 +916,7 @@ public enum LLMToolCallParser {
         return calls
     }
 
-    private struct GemmaToolCallScanner {
+    private struct DelimitedToolCallScanner {
         private static let endMarker = "<tool_call|>"
         private static let stringMarker = #"<|"|>"#
 

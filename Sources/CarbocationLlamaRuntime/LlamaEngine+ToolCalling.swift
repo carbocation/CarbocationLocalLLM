@@ -3,6 +3,74 @@ import CarbocationLocalLLM
 import Foundation
 import llama
 
+/// Native tool grammars that Carbocation can both render through an embedded
+/// template and incrementally parse on output. This list is capability-based
+/// and intentionally non-exhaustive; templates without a verified grammar keep
+/// using the generic JSON prompt/parser path. Additional protocol families
+/// should come from llama.cpp's template-derived common-chat parser rather than
+/// model-name checks or an indefinitely growing Swift switch.
+enum LlamaNativeToolProtocol: CaseIterable, Equatable {
+    case delimitedCall
+    case functionParameterXML
+
+    var startMarker: String {
+        switch self {
+        case .delimitedCall:
+            return "<|tool_call>call:"
+        case .functionParameterXML:
+            return "<tool_call>"
+        }
+    }
+
+    var endMarker: String {
+        switch self {
+        case .delimitedCall:
+            return "<tool_call|>"
+        case .functionParameterXML:
+            return "</tool_call>"
+        }
+    }
+
+    var logName: String {
+        switch self {
+        case .delimitedCall:
+            return "delimited-call"
+        case .functionParameterXML:
+            return "function-parameter-xml"
+        }
+    }
+
+    func isDeclared(by template: String) -> Bool {
+        switch self {
+        case .delimitedCall:
+            return template.contains("<|tool>")
+                && template.contains(startMarker)
+                && template.contains("<|tool_response>")
+                && template.contains("<tool_response|>")
+        case .functionParameterXML:
+            return template.contains(startMarker)
+                && template.contains(endMarker)
+                && template.contains("<function=")
+                && template.contains("</function>")
+                && template.contains("<parameter=")
+                && template.contains("</parameter>")
+                && template.contains("<tool_response>")
+                && template.contains("</tool_response>")
+                && template.contains("tools")
+                && template.contains("tool_calls")
+                && template.contains("arguments")
+        }
+    }
+
+    static func declared(by template: String) -> Self? {
+        allCases.first { $0.isDeclared(by: template) }
+    }
+
+    static func matchingStart(of text: Substring) -> Self? {
+        allCases.first { text.hasPrefix($0.startMarker) }
+    }
+}
+
 extension LlamaEngine {
     public func generateWithTools(
         _ request: LLMToolGenerationRequest,
@@ -440,15 +508,16 @@ extension LlamaEngine {
         }
     }
 
-    var supportsGemmaNativeToolTemplate: Bool {
+    var nativeToolTemplateProtocol: LlamaNativeToolProtocol? {
         guard case .swiftJinja = preparedChatTemplate,
               let chatTemplate else {
-            return false
+            return nil
         }
-        return chatTemplate.contains("<|tool>")
-            && chatTemplate.contains("<|tool_call>call:")
-            && chatTemplate.contains("<|tool_response>")
-            && chatTemplate.contains("<tool_response|>")
+        return LlamaNativeToolProtocol.declared(by: chatTemplate)
+    }
+
+    var supportsNativeToolTemplate: Bool {
+        nativeToolTemplateProtocol != nil
     }
 
     private func toolPromptFormatting(
@@ -466,7 +535,7 @@ extension LlamaEngine {
                 from: messages,
                 mediaMarker: nil
             ).messages
-            if supportsGemmaNativeToolTemplate,
+            if supportsNativeToolTemplate,
                let promptFormatting = try nativeToolPromptFormatting(
                     baseMessages: Self.addingSystemInstruction(
                         Self.nativeToolSystemPrompt(system: "", toolChoice: toolChoice),
@@ -478,6 +547,7 @@ extension LlamaEngine {
                         assistantTextSoFar: assistantTextSoFar,
                         hasToolHistory: !history.isEmpty
                     ),
+                    continuationAssistantText: assistantTextSoFar,
                     options: options
                ) {
                 return promptFormatting
@@ -506,7 +576,7 @@ extension LlamaEngine {
             )
         }
 
-        if supportsGemmaNativeToolTemplate,
+        if supportsNativeToolTemplate,
            let promptFormatting = try nativeToolPromptFormatting(
                 baseMessages: Self.nativeToolMessages(
                     system: Self.nativeToolSystemPrompt(
@@ -523,6 +593,7 @@ extension LlamaEngine {
                     assistantTextSoFar: assistantTextSoFar,
                     hasToolHistory: !history.isEmpty
                 ),
+                continuationAssistantText: assistantTextSoFar,
                 options: options
            ) {
             return promptFormatting
@@ -558,7 +629,7 @@ extension LlamaEngine {
                 from: messages,
                 mediaMarker: nil
             ).messages
-            if supportsGemmaNativeToolTemplate,
+            if supportsNativeToolTemplate,
                let promptFormatting = try nativeToolPromptFormatting(
                     baseMessages: Self.addingSystemInstruction(
                         Self.nativeToolFinalSystemPrompt(system: ""),
@@ -597,7 +668,7 @@ extension LlamaEngine {
             )
         }
 
-        if supportsGemmaNativeToolTemplate,
+        if supportsNativeToolTemplate,
            let promptFormatting = try nativeToolPromptFormatting(
                 baseMessages: Self.nativeToolMessages(
                     system: Self.nativeToolFinalSystemPrompt(system: system),
@@ -635,14 +706,24 @@ extension LlamaEngine {
         history: [LLMToolInteractionRound],
         tools: [LLMToolDefinition],
         finalUserInstruction: String? = nil,
+        continuationAssistantText: String? = nil,
         options: GenerationOptions
     ) throws -> PromptFormattingResult? {
         do {
+            let protocolKind = nativeToolTemplateProtocol
+            let usesTemplateNativeContinuation = protocolKind == .functionParameterXML
+                && !history.isEmpty
             return try applyChatTemplate(
                 messages: Self.nativeToolMessages(
                     baseMessages: baseMessages,
                     history: history,
-                    finalUserInstruction: finalUserInstruction
+                    finalUserInstruction: usesTemplateNativeContinuation
+                        ? nil
+                        : finalUserInstruction,
+                    protocolKind: protocolKind,
+                    assistantContentForLastRound: usesTemplateNativeContinuation
+                        ? continuationAssistantText
+                        : nil
                 ),
                 tools: tools,
                 options: options
@@ -650,8 +731,9 @@ extension LlamaEngine {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            let protocolName = nativeToolTemplateProtocol?.logName ?? "unknown"
             llamaRuntimeLog.info(
-                "Native Gemma tool template render failed; falling back to text tool prompt: \(String(describing: error), privacy: .public)"
+                "Native \(protocolName, privacy: .public) tool template render failed; falling back to text tool prompt: \(String(describing: error), privacy: .public)"
             )
             return nil
         }
@@ -661,7 +743,9 @@ extension LlamaEngine {
         system: String,
         originalPrompt: String,
         history: [LLMToolInteractionRound],
-        finalUserInstruction: String?
+        finalUserInstruction: String?,
+        protocolKind: LlamaNativeToolProtocol? = nil,
+        assistantContentForLastRound: String? = nil
     ) -> [ChatTemplateMessage] {
         var baseMessages: [ChatTemplateMessage] = []
         let trimmedSystem = system.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -672,28 +756,39 @@ extension LlamaEngine {
         return nativeToolMessages(
             baseMessages: baseMessages,
             history: history,
-            finalUserInstruction: finalUserInstruction
+            finalUserInstruction: finalUserInstruction,
+            protocolKind: protocolKind,
+            assistantContentForLastRound: assistantContentForLastRound
         )
     }
 
     static func nativeToolMessages(
         baseMessages: [ChatTemplateMessage],
         history: [LLMToolInteractionRound],
-        finalUserInstruction: String?
+        finalUserInstruction: String?,
+        protocolKind: LlamaNativeToolProtocol? = nil,
+        assistantContentForLastRound: String? = nil
     ) -> [ChatTemplateMessage] {
-        var messages = baseMessages
+        var messages = baseMessages.map {
+            normalizedNativeToolMessage($0, protocolKind: protocolKind)
+        }
 
-        for round in history {
+        for (index, round) in history.enumerated() {
             messages.append(ChatTemplateMessage(
                 role: "assistant",
-                content: "",
+                content: index == history.count - 1
+                    ? assistantContentForLastRound ?? ""
+                    : "",
                 reasoningContent: round.reasoningContent,
                 toolCalls: round.calls
             ))
             for output in round.outputs {
                 messages.append(ChatTemplateMessage(
                     role: "tool",
-                    content: output.content,
+                    content: nativeToolResponseContent(
+                        output.content,
+                        protocolKind: protocolKind
+                    ),
                     toolCallID: output.callID,
                     name: output.name
                 ))
@@ -705,6 +800,33 @@ extension LlamaEngine {
             messages.append(ChatTemplateMessage(role: "user", content: finalUserInstruction))
         }
         return messages
+    }
+
+    private static func normalizedNativeToolMessage(
+        _ message: ChatTemplateMessage,
+        protocolKind: LlamaNativeToolProtocol?
+    ) -> ChatTemplateMessage {
+        guard message.role == "tool" else { return message }
+        var normalized = message
+        normalized.content = nativeToolResponseContent(
+            message.content,
+            protocolKind: protocolKind
+        )
+        return normalized
+    }
+
+    private static func nativeToolResponseContent(
+        _ content: LLMJSONValue,
+        protocolKind: LlamaNativeToolProtocol?
+    ) -> LLMJSONValue {
+        guard protocolKind == .functionParameterXML else { return content }
+        if case .string = content {
+            return content
+        }
+        guard let serialized = try? content.jsonString(prettyPrinted: false) else {
+            return content
+        }
+        return .string(serialized)
     }
 
     static func addingSystemInstruction(
@@ -2162,13 +2284,15 @@ struct LlamaToolStreamInterpreter {
         var calls: [LLMToolCall]
     }
 
-    private static let nativeStartMarker = "<|tool_call>call:"
-    private static let nativeEndMarker = "<tool_call|>"
     private static let jsonToolObjectKeys = [
         #""tool_calls""#,
         #""function""#,
         #""name""#,
-        #""tool_name""#
+        #""tool_name""#,
+        #""parameters""#,
+        #""arguments""#,
+        #""args""#,
+        #""tool_call_id""#
     ]
 
     static func completedToolCall(in text: String) -> Interception? {
@@ -2232,6 +2356,11 @@ struct LlamaToolStreamInterpreter {
         in text: String,
         range: Range<String.Index>
     ) -> Bool {
+        guard let protocolKind = LlamaNativeToolProtocol.matchingStart(
+            of: text[range.lowerBound...]
+        ) else {
+            return false
+        }
         var index = range.upperBound
         while index < text.endIndex, text[index].isWhitespace {
             index = text.index(after: index)
@@ -2241,7 +2370,8 @@ struct LlamaToolStreamInterpreter {
         }
 
         let suffix = String(text[index...])
-        return nativeStartMarker.hasPrefix(suffix) || suffix.hasPrefix(nativeStartMarker)
+        return protocolKind.startMarker.hasPrefix(suffix)
+            || suffix.hasPrefix(protocolKind.startMarker)
     }
 
     static func completedToolCall(
@@ -2277,6 +2407,9 @@ struct LlamaToolStreamInterpreter {
         if let possibleJSONStart = possibleIncompleteToolJSONStart(in: text) {
             start = minIndex(start, possibleJSONStart, in: text)
         }
+        if let possibleJSONArrayStart = possibleIncompleteToolJSONArrayStart(in: text) {
+            start = minIndex(start, possibleJSONArrayStart, in: text)
+        }
         if let suffixStart = possibleToolMarkerSuffixStart(in: text) {
             start = minIndex(start, suffixStart, in: text)
         }
@@ -2285,7 +2418,9 @@ struct LlamaToolStreamInterpreter {
 
     static func isPotentialStartedToolCall(in text: String) -> Bool {
         guard !text.isEmpty else { return false }
-        if nativeStartMarker.hasPrefix(text) || text.hasPrefix(nativeStartMarker) {
+        if LlamaNativeToolProtocol.allCases.contains(where: {
+            $0.startMarker.hasPrefix(text) || text.hasPrefix($0.startMarker)
+        }) {
             return true
         }
         if let complete = completedToolCall(in: text),
@@ -2297,6 +2432,9 @@ struct LlamaToolStreamInterpreter {
                 return true
             }
             return isPotentialToolJSONObjectPrefix(text)
+        }
+        if text.first == "[" {
+            return isPotentialToolJSONArrayPrefix(text)
         }
         return false
     }
@@ -2317,6 +2455,10 @@ struct LlamaToolStreamInterpreter {
             safeEnd = minIndex(safeEnd, possibleJSONStart, in: text)
         }
 
+        if let possibleJSONArrayStart = possibleIncompleteToolJSONArrayStart(in: text) {
+            safeEnd = minIndex(safeEnd, possibleJSONArrayStart, in: text)
+        }
+
         if let suffixStart = possibleToolMarkerSuffixStart(in: text) {
             safeEnd = minIndex(safeEnd, suffixStart, in: text)
         }
@@ -2325,13 +2467,19 @@ struct LlamaToolStreamInterpreter {
     }
 
     private static func unclosedNativeToolCallStart(in text: String) -> String.Index? {
-        guard let lastStart = text.range(of: nativeStartMarker, options: .backwards) else {
-            return nil
-        }
-        if text.range(of: nativeEndMarker, range: lastStart.upperBound..<text.endIndex) == nil {
+        LlamaNativeToolProtocol.allCases.compactMap { protocolKind -> String.Index? in
+            guard let lastStart = text.range(
+                of: protocolKind.startMarker,
+                options: .backwards
+            ),
+            text.range(
+                of: protocolKind.endMarker,
+                range: lastStart.upperBound..<text.endIndex
+            ) == nil else {
+                return nil
+            }
             return lastStart.lowerBound
-        }
-        return nil
+        }.min()
     }
 
     private static func possibleIncompleteToolJSONStart(in text: String) -> String.Index? {
@@ -2360,8 +2508,38 @@ struct LlamaToolStreamInterpreter {
         }
     }
 
+    private static func possibleIncompleteToolJSONArrayStart(in text: String) -> String.Index? {
+        var index = text.startIndex
+        var earliest: String.Index?
+        while index < text.endIndex {
+            guard let bracket = text[index..<text.endIndex].firstIndex(of: "[") else {
+                break
+            }
+            let range = bracket..<text.endIndex
+            if LlamaEngine.balancedJSONValueRange(in: text, searchRange: range) == nil,
+               isPotentialToolJSONArrayPrefix(String(text[range])) {
+                earliest = earliest.map { minIndex($0, bracket, in: text) } ?? bracket
+            }
+            index = text.index(after: bracket)
+        }
+        return earliest
+    }
+
+    private static func isPotentialToolJSONArrayPrefix(_ text: String) -> Bool {
+        guard text.first == "[" else { return false }
+        let afterBracket = text.dropFirst().drop(while: \.isWhitespace)
+        guard afterBracket.first == "{" else { return false }
+        let afterBrace = afterBracket.dropFirst()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !afterBrace.isEmpty else { return true }
+        return jsonToolObjectKeys.contains { key in
+            key.hasPrefix(afterBrace) || afterBrace.hasPrefix(key)
+        }
+    }
+
     private static func possibleToolMarkerSuffixStart(in text: String) -> String.Index? {
-        let markers = [nativeStartMarker] + jsonToolObjectStartMarkers
+        let markers = LlamaNativeToolProtocol.allCases.map(\.startMarker)
+            + jsonToolObjectStartMarkers
         for marker in markers {
             let maxCount = min(marker.count - 1, text.count)
             guard maxCount > 0 else { continue }

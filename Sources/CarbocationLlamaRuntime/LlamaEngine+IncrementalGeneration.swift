@@ -322,7 +322,9 @@ struct IncrementalGenerationParser {
     private var thinkingCloseDetector: IncrementalLiteralCompletionDetector
     private var structuredLiteralDetector: IncrementalLiteralCompletionDetector
     private var stopLiteralDetector: IncrementalLiteralCompletionDetector
-    private var nativeEndDetector = IncrementalLiteralCompletionDetector(["<tool_call|>"])
+    private var nativeEndDetector = IncrementalLiteralCompletionDetector(
+        LlamaNativeToolProtocol.allCases.map(\.endMarker)
+    )
     private var jsonDetector = IncrementalBalancedJSONDetector()
     private var structuredJSONDetector = IncrementalBalancedJSONDetector()
     private var isStructuredJSONActive = false
@@ -494,13 +496,17 @@ struct IncrementalToolStreamParser {
         var text: String
     }
 
-    private static let nativeStartMarker = "<|tool_call>call:"
-    private static let nativeEndMarker = "<tool_call|>"
+    private static let nativeStartMarkers = LlamaNativeToolProtocol.allCases.map(\.startMarker)
+    private static let nativeEndMarkers = LlamaNativeToolProtocol.allCases.map(\.endMarker)
     private static let jsonKeys = [
         #""tool_calls""#,
         #""function""#,
         #""name""#,
-        #""tool_name""#
+        #""tool_name""#,
+        #""parameters""#,
+        #""arguments""#,
+        #""args""#,
+        #""tool_call_id""#
     ]
     private static let probeCharacterLimit = 64
 
@@ -511,19 +517,21 @@ struct IncrementalToolStreamParser {
     private var candidateStartUTF8Offset: Int?
     private var candidateText = ""
     private var candidateKind: CandidateKind = .undecided
+    private var candidateNativeProtocol: LlamaNativeToolProtocol?
     private var candidateJSONDetector = IncrementalBalancedJSONDetector()
     private var allJSONCaptureDetector = IncrementalBalancedJSONCaptureDetector()
-    private var candidateNativeEndDetector = IncrementalLiteralCompletionDetector([
-        IncrementalToolStreamParser.nativeEndMarker
-    ])
-    private var nestedNativeStartDetector = IncrementalLiteralCompletionDetector([
-        IncrementalToolStreamParser.nativeStartMarker
-    ])
-    private var nestedNativeEndDetector = IncrementalLiteralCompletionDetector([
-        IncrementalToolStreamParser.nativeEndMarker
-    ])
+    private var candidateNativeEndDetector = IncrementalLiteralCompletionDetector(
+        IncrementalToolStreamParser.nativeEndMarkers
+    )
+    private var nestedNativeStartDetector = IncrementalLiteralCompletionDetector(
+        IncrementalToolStreamParser.nativeStartMarkers
+    )
+    private var nestedNativeEndDetector = IncrementalLiteralCompletionDetector(
+        IncrementalToolStreamParser.nativeEndMarkers
+    )
     private var nestedNativeStartUTF8Offset: Int?
     private var nestedNativeText = ""
+    private var nestedNativeProtocol: LlamaNativeToolProtocol?
     private var nestedNativeSearchInvalidated = false
     private var pendingNative: Interception?
     private var pendingNativeSuffix = ""
@@ -612,6 +620,7 @@ struct IncrementalToolStreamParser {
             candidateStartUTF8Offset = nil
             candidateText = ""
             candidateKind = .undecided
+            candidateNativeProtocol = nil
             pendingNative = nil
             pendingNativeSuffix = ""
             rememberWhitespaceBraceAnchor(in: source, baseUTF8Offset: baseUTF8Offset)
@@ -626,6 +635,7 @@ struct IncrementalToolStreamParser {
         candidateStartUTF8Offset = baseUTF8Offset + localStart
         candidateText = String(source[capture.range.lowerBound...])
         candidateKind = .undecided
+        candidateNativeProtocol = nil
         pendingNative = nil
         pendingNativeSuffix = ""
         whitespaceBraceAnchor = nil
@@ -660,20 +670,32 @@ struct IncrementalToolStreamParser {
             return
         }
 
-        if candidateText.hasPrefix(Self.nativeStartMarker) {
+        if let protocolKind = LlamaNativeToolProtocol.allCases.first(where: {
+            candidateText.hasPrefix($0.startMarker)
+        }) {
             candidateKind = .native
-            candidateNativeEndDetector = IncrementalLiteralCompletionDetector([
-                Self.nativeEndMarker
-            ])
+            candidateNativeProtocol = protocolKind
+            candidateNativeEndDetector = IncrementalLiteralCompletionDetector(
+                [protocolKind.endMarker]
+            )
             if candidateNativeEndDetector.append(candidateText) {
                 evaluateNativeCandidate()
             }
             return
         }
 
-        guard candidateText.first == "{" else { return }
-        let afterBrace = candidateText.dropFirst()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let afterBrace: String
+        if candidateText.first == "{" {
+            afterBrace = candidateText.dropFirst()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if candidateText.first == "[" {
+            let afterBracket = candidateText.dropFirst().drop(while: \.isWhitespace)
+            guard afterBracket.first == "{" else { return }
+            afterBrace = afterBracket.dropFirst()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            return
+        }
         guard Self.jsonKeys.contains(where: { afterBrace.hasPrefix($0) }) else { return }
 
         candidateKind = .json
@@ -755,18 +777,19 @@ struct IncrementalToolStreamParser {
             guard nestedNativeStartDetector.append(appendedText) else {
                 return
             }
-            guard let range = candidateText.range(
-                of: Self.nativeStartMarker
-            ) else { return }
+            guard let range = Self.firstNativeStartRange(in: candidateText) else { return }
             let localStart = candidateText.utf8.distance(
                 from: candidateText.utf8.startIndex,
                 to: range.lowerBound.samePosition(in: candidateText.utf8)!
             )
             nestedNativeStartUTF8Offset = (candidateStartUTF8Offset ?? 0) + localStart
             nestedNativeText = String(candidateText[range.lowerBound...])
-            nestedNativeEndDetector = IncrementalLiteralCompletionDetector([
-                Self.nativeEndMarker
-            ])
+            nestedNativeProtocol = LlamaNativeToolProtocol.matchingStart(
+                of: candidateText[range.lowerBound...]
+            )
+            nestedNativeEndDetector = IncrementalLiteralCompletionDetector(
+                nestedNativeProtocol.map { [$0.endMarker] } ?? Self.nativeEndMarkers
+            )
             if nestedNativeEndDetector.append(nestedNativeText) {
                 evaluateNestedNative()
             }
@@ -823,14 +846,15 @@ struct IncrementalToolStreamParser {
     }
 
     private mutating func resetNestedNativeTracking(invalidated: Bool = false) {
-        nestedNativeStartDetector = IncrementalLiteralCompletionDetector([
-            Self.nativeStartMarker
-        ])
-        nestedNativeEndDetector = IncrementalLiteralCompletionDetector([
-            Self.nativeEndMarker
-        ])
+        nestedNativeStartDetector = IncrementalLiteralCompletionDetector(
+            Self.nativeStartMarkers
+        )
+        nestedNativeEndDetector = IncrementalLiteralCompletionDetector(
+            Self.nativeEndMarkers
+        )
         nestedNativeStartUTF8Offset = nil
         nestedNativeText = ""
+        nestedNativeProtocol = nil
         nestedNativeSearchInvalidated = invalidated
     }
 
@@ -850,10 +874,11 @@ struct IncrementalToolStreamParser {
         candidateStartUTF8Offset = nil
         candidateText = ""
         candidateKind = .undecided
+        candidateNativeProtocol = nil
         candidateJSONDetector = IncrementalBalancedJSONDetector()
-        candidateNativeEndDetector = IncrementalLiteralCompletionDetector([
-            Self.nativeEndMarker
-        ])
+        candidateNativeEndDetector = IncrementalLiteralCompletionDetector(
+            Self.nativeEndMarkers
+        )
         whitespaceBraceAnchor = nil
         pendingNative = nil
         pendingNativeSuffix = ""
@@ -927,6 +952,7 @@ struct IncrementalToolStreamParser {
         candidateStartUTF8Offset = nil
         candidateText = ""
         candidateKind = .undecided
+        candidateNativeProtocol = nil
         pendingNative = nil
         pendingNativeSuffix = ""
         resetNestedNativeTracking()
@@ -948,6 +974,7 @@ struct IncrementalToolStreamParser {
         candidateStartUTF8Offset = nil
         candidateText = ""
         candidateKind = .undecided
+        candidateNativeProtocol = nil
         candidateJSONDetector = IncrementalBalancedJSONDetector()
         pendingNative = nil
         pendingNativeSuffix = ""
@@ -969,26 +996,47 @@ struct IncrementalToolStreamParser {
 
     private func isPotentialNativeSiblingSuffix(_ suffix: String) -> Bool {
         guard !suffix.isEmpty else { return true }
-        return Self.nativeStartMarker.hasPrefix(suffix)
-            || suffix.hasPrefix(Self.nativeStartMarker)
+        return activeNativeStartMarkers.contains {
+            $0.hasPrefix(suffix) || suffix.hasPrefix($0)
+        }
     }
 
     private mutating func appendPendingNativeSuffix(_ appendedText: String) {
-        guard pendingNativeSuffix != Self.nativeStartMarker else { return }
+        let markers = activeNativeStartMarkers
+        guard !markers.contains(pendingNativeSuffix) else { return }
 
         let source = pendingNativeSuffix.isEmpty
             ? appendedText.drop(while: \.isWhitespace)
             : appendedText[...]
-        let capacity = max(0, Self.nativeStartMarker.count + 1 - pendingNativeSuffix.count)
+        let maximumMarkerLength = markers.map(\.count).max() ?? 0
+        let capacity = max(0, maximumMarkerLength + 1 - pendingNativeSuffix.count)
         pendingNativeSuffix.append(contentsOf: source.prefix(capacity))
     }
 
     private func boundedPendingNativeSuffix(from text: String) -> String {
+        let markers = activeNativeStartMarkers
         let trimmed = text.drop(while: \.isWhitespace)
-        if trimmed.hasPrefix(Self.nativeStartMarker) {
-            return Self.nativeStartMarker
+        if let marker = markers.first(where: { trimmed.hasPrefix($0) }) {
+            return marker
         }
-        return String(trimmed.prefix(Self.nativeStartMarker.count + 1))
+        let maximumMarkerLength = markers.map(\.count).max() ?? 0
+        return String(trimmed.prefix(maximumMarkerLength + 1))
+    }
+
+    private var activeNativeStartMarkers: [String] {
+        switch candidateKind {
+        case .native:
+            return candidateNativeProtocol.map { [$0.startMarker] } ?? Self.nativeStartMarkers
+        case .json:
+            return nestedNativeProtocol.map { [$0.startMarker] } ?? Self.nativeStartMarkers
+        case .undecided:
+            return Self.nativeStartMarkers
+        }
+    }
+
+    private static func firstNativeStartRange(in text: String) -> Range<String.Index>? {
+        nativeStartMarkers.compactMap { text.range(of: $0) }
+            .min { $0.lowerBound < $1.lowerBound }
     }
 
     private mutating func rememberWhitespaceBraceAnchor(

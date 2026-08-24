@@ -1050,12 +1050,18 @@ extension LlamaEngine {
     }
 
     static func nativeToolCallEnvelopeRange(in text: String) -> Range<String.Index>? {
-        let startMarker = "<|tool_call>call:"
-        let endMarker = "<tool_call|>"
-        guard let firstStart = text.range(of: startMarker)?.lowerBound else {
+        let firstMatch = LlamaNativeToolProtocol.allCases.compactMap { protocolKind in
+            text.range(of: protocolKind.startMarker).map { (protocolKind, $0) }
+        }.min { lhs, rhs in
+            lhs.1.lowerBound < rhs.1.lowerBound
+        }
+        guard let (protocolKind, firstRange) = firstMatch else {
             return nil
         }
 
+        let startMarker = protocolKind.startMarker
+        let endMarker = protocolKind.endMarker
+        let firstStart = firstRange.lowerBound
         var searchStart = firstStart
         var lastCompleteEnd: String.Index?
         while let startRange = text.range(of: startMarker, range: searchStart..<text.endIndex) {
@@ -1077,12 +1083,20 @@ extension LlamaEngine {
     }
 
     static func hasUnclosedNativeToolCallEnvelope(in text: String) -> Bool {
-        let startMarker = "<|tool_call>call:"
-        let endMarker = "<tool_call|>"
-        guard let lastStart = text.range(of: startMarker, options: .backwards) else {
+        let lastMatch = LlamaNativeToolProtocol.allCases.compactMap { protocolKind in
+            text.range(of: protocolKind.startMarker, options: .backwards).map {
+                (protocolKind, $0)
+            }
+        }.max { lhs, rhs in
+            lhs.1.lowerBound < rhs.1.lowerBound
+        }
+        guard let (protocolKind, lastStart) = lastMatch else {
             return false
         }
-        return text.range(of: endMarker, range: lastStart.upperBound..<text.endIndex) == nil
+        return text.range(
+            of: protocolKind.endMarker,
+            range: lastStart.upperBound..<text.endIndex
+        ) == nil
     }
 
 }
