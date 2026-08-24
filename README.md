@@ -879,9 +879,10 @@ Scripts/set-llama-binary-artifact.sh \
 ### Publish a binary release locally
 
 Use the local release script when you want to avoid waiting for a fresh GitHub
-Actions runner. It uses an ignored reusable worktree at
-`.build/llama-release-worktree`, so repeated local release attempts can reuse
-the llama build cache.
+Actions runner. By default it creates a detached worktree in the system temporary
+directory and removes it on exit, keeping both the main checkout and `.build`
+disposable. Pass `--worktree <path>` only when you deliberately want to manage
+and reuse a persistent release worktree and its llama build cache.
 
 First run a dry run:
 

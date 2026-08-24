@@ -3,13 +3,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_WORKTREE="$ROOT_DIR/.build/llama-release-worktree"
 
 TAG=""
 PUBLISH=0
 PRERELEASE=1
 SOURCE_REF="HEAD"
-WORKTREE="$DEFAULT_WORKTREE"
+WORKTREE=""
+WORKTREE_IS_EPHEMERAL=0
+WORKTREE_DESCRIPTION=""
 REPOSITORY=""
 REMOTE_NAME="origin"
 KEEP_PACKAGE_SWIFT_DIRTY=0
@@ -33,11 +34,11 @@ Options:
   --prerelease                   Mark the GitHub release as a prerelease. Default.
   --no-prerelease                Publish as a stable GitHub release.
   --source-ref <ref>             Source commit/ref to release. Default: HEAD.
-  --worktree <path>              Reusable isolated worktree. Default: .build/llama-release-worktree.
+  --worktree <path>              Use a caller-managed reusable worktree instead of temporary staging.
   --remote <name>                Git remote to check and push tags to. Default: origin.
   --repo <owner/name>            GitHub repository. Default: parsed from origin.
   --skip-published-validation    Skip post-upload clean consumer/app validation.
-  --keep-package-swift-dirty     Leave stamped Package.swift after a dry run.
+  --keep-package-swift-dirty     Leave stamped Package.swift in a caller-managed worktree after a dry run.
   -h, --help                     Show this help.
 USAGE
 }
@@ -266,20 +267,23 @@ if [[ -z "$SOURCE_REF" ]]; then
   exit 2
 fi
 
-if [[ -z "$WORKTREE" ]]; then
-  echo "error: --worktree cannot be empty" >&2
-  exit 2
-fi
-
 if [[ -z "$REMOTE_NAME" ]]; then
   echo "error: --remote cannot be empty" >&2
   exit 2
 fi
 
-case "$WORKTREE" in
-  /*) ;;
-  *) WORKTREE="$ROOT_DIR/$WORKTREE" ;;
-esac
+if [[ -z "$WORKTREE" ]]; then
+  WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/carbocation-llama-release.XXXXXX")"
+  rmdir "$WORKTREE"
+  WORKTREE_IS_EPHEMERAL=1
+  WORKTREE_DESCRIPTION="$WORKTREE (temporary; removed on exit)"
+else
+  case "$WORKTREE" in
+    /*) ;;
+    *) WORKTREE="$ROOT_DIR/$WORKTREE" ;;
+  esac
+  WORKTREE_DESCRIPTION="$WORKTREE (caller-managed)"
+fi
 
 if ! SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify "$SOURCE_REF^{commit}" 2>/dev/null)"; then
   echo "error: source ref does not resolve to a commit: $SOURCE_REF" >&2
@@ -326,21 +330,36 @@ prepare_worktree() {
   fi
 }
 
-prepare_worktree
+cleanup_release_staging() {
+  local exit_status="$?"
+  set +e
 
-cd "$WORKTREE"
-git submodule update --init --recursive
-
-cleanup_dry_run_package_swift() {
   if [[ "$PUBLISH" == "0" && "$KEEP_PACKAGE_SWIFT_DIRTY" == "0" ]]; then
-    git checkout -- Package.swift >/dev/null 2>&1 || true
+    git -C "$WORKTREE" checkout -- Package.swift >/dev/null 2>&1 || true
   fi
   if [[ -n "$RELEASE_NOTES" ]]; then
     rm -f "$RELEASE_NOTES"
   fi
+
+  if [[ "$WORKTREE_IS_EPHEMERAL" == "1" ]]; then
+    cd "$ROOT_DIR" || true
+    if git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if ! git -C "$ROOT_DIR" worktree remove --force "$WORKTREE"; then
+        echo "warning: failed to remove temporary release worktree: $WORKTREE" >&2
+      fi
+    fi
+    git -C "$ROOT_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  return "$exit_status"
 }
 
-trap cleanup_dry_run_package_swift EXIT
+trap cleanup_release_staging EXIT
+
+prepare_worktree
+
+cd "$WORKTREE"
+git submodule update --init --recursive
 
 Scripts/build-llama-xcframework.sh
 
@@ -361,7 +380,7 @@ Source: $SOURCE_COMMIT
 Asset: $WORKTREE/$ZIP_PATH
 URL: $ARTIFACT_URL
 Checksum: $CHECKSUM
-Worktree: $WORKTREE
+Staging worktree: $WORKTREE_DESCRIPTION
 EOF
   exit 0
 fi
@@ -413,5 +432,5 @@ Source: $SOURCE_COMMIT
 Asset: $WORKTREE/$ZIP_PATH
 URL: $ARTIFACT_URL
 Checksum: $CHECKSUM
-Worktree: $WORKTREE
+Staging worktree: $WORKTREE_DESCRIPTION
 EOF
