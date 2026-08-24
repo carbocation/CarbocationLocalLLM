@@ -115,7 +115,7 @@ ARCHS_SUFFIX="${ARCHS_CMAKE//;/_}"
 DEPLOYMENT_SUFFIX="${DEPLOYMENT_TARGET//./_}"
 LLAMA_CONFIGURATION="${LLAMA_CONFIGURATION:-Release}"
 BUILD_JOBS="${LLAMA_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
-SCRIPT_REV="7"
+SCRIPT_REV="8"
 
 BUILD_KEY="$ARCHS_SUFFIX-$PLATFORM_KEY$DEPLOYMENT_SUFFIX-$LLAMA_CONFIGURATION"
 STAGE_DIR="$ARTIFACTS_DIR/stage-$BUILD_KEY"
@@ -274,12 +274,16 @@ build_arch() {
     -DCMAKE_OSX_SYSROOT="$SDK_PATH"
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
     -DBUILD_SHARED_LIBS=OFF
-    -DLLAMA_BUILD_COMMON=OFF
+    -DLLAMA_BUILD_COMMON=ON
+    -DLLAMA_BUILD_MTMD=ON
     -DLLAMA_BUILD_EXAMPLES=OFF
     -DLLAMA_BUILD_TOOLS=OFF
     -DLLAMA_BUILD_TESTS=OFF
     -DLLAMA_BUILD_SERVER=OFF
     -DLLAMA_BUILD_APP=OFF
+    -DLLAMA_LLGUIDANCE=OFF
+    -DLLAMA_SUBPROCESS=OFF
+    -DMTMD_VIDEO=OFF
     -DLLAMA_OPENSSL=OFF
     -DGGML_NATIVE=OFF
     -DGGML_OPENMP=OFF
@@ -304,6 +308,10 @@ build_arch() {
     "$(find_static_lib "$build_dir" libggml-cpu.a)"
     "$(find_static_lib "$build_dir" libggml-metal.a)"
     "$(find_static_lib "$build_dir" libggml-blas.a)"
+    "$(find_static_lib "$build_dir" libllama-common-base.a)"
+    "$(find_static_lib "$build_dir" libllama-common.a)"
+    "$(find_static_lib "$build_dir" libcpp-httplib.a)"
+    "$(find_static_lib "$build_dir" libmtmd.a)"
   )
 
   rm -f "$combined_library"
@@ -311,6 +319,15 @@ build_arch() {
 
   if ! archive_has_exact_archs "$combined_library" "$arch"; then
     echo "error: expected a thin $arch archive: $combined_library" >&2
+    exit 1
+  fi
+
+  if ! xcrun nm -gU "$combined_library" | grep -F "common_chat_templates_init" >/dev/null; then
+    echo "error: combined archive is missing llama-common chat symbols: $combined_library" >&2
+    exit 1
+  fi
+  if ! xcrun nm -gU "$combined_library" | grep -F "_mtmd_init_from_file" >/dev/null; then
+    echo "error: combined archive is missing MTMD symbols: $combined_library" >&2
     exit 1
   fi
 

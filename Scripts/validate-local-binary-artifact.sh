@@ -16,6 +16,24 @@ if [[ ! -d "$ARTIFACT_FS_PATH" ]]; then
   exit 1
 fi
 
+archive_count=0
+while IFS= read -r archive; do
+  archive_count=$((archive_count + 1))
+  if ! xcrun nm -gU "$archive" | grep -F "common_chat_templates_init" >/dev/null; then
+    echo "error: artifact slice is missing llama-common chat symbols: $archive" >&2
+    exit 1
+  fi
+  if ! xcrun nm -gU "$archive" | grep -F "_mtmd_init_from_file" >/dev/null; then
+    echo "error: artifact slice is missing MTMD symbols: $archive" >&2
+    exit 1
+  fi
+done < <(find "$ARTIFACT_FS_PATH" -type f -name '*.a' | sort)
+
+if [[ "$archive_count" -ne 3 ]]; then
+  echo "error: expected exactly three static-library slices, found $archive_count" >&2
+  exit 1
+fi
+
 cd "$ROOT_DIR"
 
 export CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH="$ARTIFACT_PATH"

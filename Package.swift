@@ -3,8 +3,8 @@
 import PackageDescription
 import Foundation
 
-private let llamaBuildScriptRevision = "7"
-private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v1"
+private let llamaBuildScriptRevision = "8"
+private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v2"
 
 private func fileContents(atPath path: String) -> String? {
     try? String(contentsOfFile: path, encoding: .utf8)
@@ -349,108 +349,18 @@ let package = Package(
         ),
         llamaTarget,
         .target(
-            name: "LlamaCppCommon",
+            name: "CarbocationLlamaCommonBridge",
             dependencies: [
                 "llama"
             ],
-            path: "Vendor/llama.cpp/common",
-            sources: [
-                "common.cpp",
-                "fit.cpp",
-                "log.cpp",
-                "ngram-cache.cpp",
-                "ngram-map.cpp",
-                "ngram-mod.cpp",
-                "sampling.cpp",
-                "speculative.cpp",
-                "trie.cpp",
-                "unicode.cpp"
-            ],
-            publicHeadersPath: ".",
-            cxxSettings: [
-                .headerSearchPath("."),
-                .headerSearchPath("../ggml/src"),
-                .headerSearchPath("../src"),
-                .headerSearchPath("../vendor")
-            ]
-        ),
-        .target(
-            name: "LlamaCppMTMD",
-            dependencies: [
-                "LlamaCppMTMDAudio"
-            ],
-            path: "Vendor/llama.cpp/tools/mtmd",
-            sources: [
-                "mtmd.cpp",
-                "mtmd-image.cpp",
-                "mtmd-helper.cpp",
-                "clip.cpp",
-                "models/cogvlm.cpp",
-                "models/conformer.cpp",
-                "models/dotsocr.cpp",
-                "models/deepseekocr2.cpp",
-                "models/exaone4_5.cpp",
-                "models/gemma4a.cpp",
-                "models/gemma4v.cpp",
-                "models/gemma4ua.cpp",
-                "models/gemma4uv.cpp",
-                "models/glm4v.cpp",
-                "models/granite-speech.cpp",
-                "models/granite4-vision.cpp",
-                "models/hunyuanvl.cpp",
-                "models/internvl.cpp",
-                "models/kimivl.cpp",
-                "models/kimik25.cpp",
-                "models/nemotron-v2-vl.cpp",
-                "models/muse-glimmer.cpp",
-                "models/llama4.cpp",
-                "models/llava.cpp",
-                "models/minicpmv.cpp",
-                "models/paddleocr.cpp",
-                "models/pixtral.cpp",
-                "models/qwen2vl.cpp",
-                "models/minimax-m3.cpp",
-                "models/qwen3vl.cpp",
-                "models/mimovl.cpp",
-                "models/qwen3a.cpp",
-                "models/mimo-audio.cpp",
-                "models/qwen3tts-spkenc.cpp",
-                "models/qwen3tts-gen.cpp",
-                "models/pockettts-seanet.cpp",
-                "models/pockettts-spkenc.cpp",
-                "models/pockettts-gen.cpp",
-                "models/step3vl.cpp",
-                "models/siglip.cpp",
-                "models/whisper-enc.cpp",
-                "models/deepseekocr.cpp",
-                "models/mobilenetv5.cpp",
-                "models/youtuvl.cpp",
-                "models/yasa2.cpp",
-                "models/parakeet.cpp"
-            ],
-            publicHeadersPath: ".",
-            cxxSettings: [
-                .headerSearchPath("."),
-                .headerSearchPath("../.."),
-                .headerSearchPath("../../include"),
-                .headerSearchPath("../../ggml/include"),
-                .headerSearchPath("../../ggml/src"),
-                .headerSearchPath("../../src"),
-                .headerSearchPath("../../vendor")
-            ]
-        ),
-        .target(
-            name: "LlamaCppMTMDAudio",
-            dependencies: [],
-            path: "Sources/LlamaCppMTMD",
-            sources: [
-                "mtmd-audio.cpp"
-            ],
             publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../Vendor/llama.cpp/common"),
+                .headerSearchPath("../../Vendor/llama.cpp/include"),
+                .headerSearchPath("../../Vendor/llama.cpp/ggml/include")
+            ],
             cxxSettings: [
-                .headerSearchPath("include"),
-                .headerSearchPath("../../Vendor/llama.cpp/tools/mtmd"),
-                .headerSearchPath("../../Vendor/llama.cpp"),
+                .headerSearchPath("../../Vendor/llama.cpp/common"),
                 .headerSearchPath("../../Vendor/llama.cpp/include"),
                 .headerSearchPath("../../Vendor/llama.cpp/ggml/include"),
                 .headerSearchPath("../../Vendor/llama.cpp/ggml/src"),
@@ -459,25 +369,8 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CarbocationLlamaCommonBridge",
-            dependencies: [
-                "llama",
-                "LlamaCppCommon"
-            ],
-            publicHeadersPath: "include",
-            cSettings: [
-                .headerSearchPath("../../Vendor/llama.cpp/common")
-            ],
-            cxxSettings: [
-                .headerSearchPath("../../Vendor/llama.cpp/common"),
-                .headerSearchPath("../../Vendor/llama.cpp/ggml/src"),
-                .headerSearchPath("../../Vendor/llama.cpp/src"),
-                .headerSearchPath("../../Vendor/llama.cpp/vendor")
-            ]
-        ),
-        .target(
             name: "CarbocationLlamaMTMDBridge",
-            dependencies: [],
+            dependencies: ["llama"],
             publicHeadersPath: "include",
             cSettings: [
                 .headerSearchPath("../../Vendor/llama.cpp/tools/mtmd"),
@@ -491,7 +384,6 @@ let package = Package(
                 "CarbocationLocalLLM",
                 "CarbocationLlamaCommonBridge",
                 "CarbocationLlamaMTMDBridge",
-                "LlamaCppMTMD",
                 "llama",
                 .product(name: "Jinja", package: "swift-jinja")
             ],
