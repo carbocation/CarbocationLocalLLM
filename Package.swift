@@ -3,7 +3,7 @@
 import PackageDescription
 import Foundation
 
-private let llamaBuildScriptRevision = "8"
+private let llamaBuildScriptRevision = "9"
 private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v2"
 
 private func fileContents(atPath path: String) -> String? {

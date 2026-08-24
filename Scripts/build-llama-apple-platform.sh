@@ -115,7 +115,7 @@ ARCHS_SUFFIX="${ARCHS_CMAKE//;/_}"
 DEPLOYMENT_SUFFIX="${DEPLOYMENT_TARGET//./_}"
 LLAMA_CONFIGURATION="${LLAMA_CONFIGURATION:-Release}"
 BUILD_JOBS="${LLAMA_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
-SCRIPT_REV="8"
+SCRIPT_REV="9"
 
 BUILD_KEY="$ARCHS_SUFFIX-$PLATFORM_KEY$DEPLOYMENT_SUFFIX-$LLAMA_CONFIGURATION"
 STAGE_DIR="$ARTIFACTS_DIR/stage-$BUILD_KEY"
@@ -311,6 +311,7 @@ build_arch() {
     "$(find_static_lib "$build_dir" libllama-common-base.a)"
     "$(find_static_lib "$build_dir" libllama-common.a)"
     "$(find_static_lib "$build_dir" libcpp-httplib.a)"
+    "$(find_static_lib "$build_dir" libvendor-hash.a)"
     "$(find_static_lib "$build_dir" libmtmd.a)"
   )
 
@@ -328,6 +329,10 @@ build_arch() {
   fi
   if ! xcrun nm -gU "$combined_library" | grep -F "_mtmd_init_from_file" >/dev/null; then
     echo "error: combined archive is missing MTMD symbols: $combined_library" >&2
+    exit 1
+  fi
+  if ! xcrun nm -gU "$combined_library" | grep -F "hash_sha256_hex" >/dev/null; then
+    echo "error: combined archive is missing vendor hash symbols: $combined_library" >&2
     exit 1
   fi
 

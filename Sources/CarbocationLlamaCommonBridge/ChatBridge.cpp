@@ -38,6 +38,13 @@ std::string string_or_empty(const char * value) {
     return value == nullptr ? std::string() : std::string(value);
 }
 
+common_json upstream_json(const bridge_json & value) {
+    // Keep nlohmann::ordered_json private to Carbocation's stable C bridge.
+    // llama.cpp's common/chat input type is intentionally allowed to evolve;
+    // UTF-8 JSON is the compatibility boundary between the two representations.
+    return common_json::parse(value.dump());
+}
+
 bool copy_string(const std::string & value, char ** output) {
     if (output == nullptr) {
         return false;
@@ -224,9 +231,9 @@ common_chat_templates_inputs parse_render_inputs(const bridge_json & request) {
     common_chat_templates_inputs inputs;
     const bridge_json messages = request.value("messages", bridge_json::array());
     bridge_json tools = request.value("tools", bridge_json::array());
-    inputs.messages = common_chat_msgs_parse_oaicompat(messages);
+    inputs.messages = common_chat_msgs_parse_oaicompat(upstream_json(messages));
     inputs.tool_choice = parse_tool_choice(tools, request.value("tool_choice", bridge_json("auto")));
-    inputs.tools = common_chat_tools_parse_oaicompat(tools);
+    inputs.tools = common_chat_tools_parse_oaicompat(upstream_json(tools));
     inputs.parallel_tool_calls = request.value("parallel_tool_calls", !inputs.tools.empty());
     inputs.add_generation_prompt = request.value("add_generation_prompt", true);
     inputs.use_jinja = request.value("use_jinja", true);
@@ -237,7 +244,9 @@ common_chat_templates_inputs parse_render_inputs(const bridge_json & request) {
     inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
 
     if (request.contains("continue_final_message")) {
-        inputs.continue_final_message = common_chat_continuation_parse(request.at("continue_final_message"));
+        inputs.continue_final_message = common_chat_continuation_parse(
+            upstream_json(request.at("continue_final_message"))
+        );
     }
     if (request.contains("reasoning_effort") && !request.at("reasoning_effort").is_null()) {
         const std::string effort = request.at("reasoning_effort").get<std::string>();
