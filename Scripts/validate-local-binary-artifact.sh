@@ -70,7 +70,6 @@ build_ios_target() {
 for target in CarbocationLocalLLMRuntime CarbocationLocalLLMUI; do
   build_ios_target "$target" iphoneos arm64-apple-ios17.0
   build_ios_target "$target" iphonesimulator arm64-apple-ios17.0-simulator
-  build_ios_target "$target" iphonesimulator x86_64-apple-ios17.0-simulator
 done
 
 build_macos_app() {
@@ -83,7 +82,9 @@ build_macos_app() {
     -scheme "$scheme" \
     -destination "generic/platform=macOS" \
     -derivedDataPath "$derived_data_path" \
-    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_ALLOWED=NO \
+    ONLY_ACTIVE_ARCH=NO \
+    ARCHS=arm64
 }
 
 build_ios_app() {
@@ -107,7 +108,6 @@ build_ios_app() {
 build_macos_app CLLMSmokeMac ".build/XcodeDerivedData-CLLMSmokeMac-macOS"
 build_ios_app CLLMSmokeIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOS-arm64"
 build_ios_app CLLMSmokeIOS "iOS simulator arm64" "generic/platform=iOS Simulator" arm64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOSSimulator-arm64"
-build_ios_app CLLMSmokeIOS "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOSSimulator-x86_64"
 build_macos_app CLLMDemoMac ".build/XcodeDerivedData-CLLMDemoMac-macOS"
 build_ios_app CLLMDemoIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-CLLMDemoIOS-iOS-arm64"
 

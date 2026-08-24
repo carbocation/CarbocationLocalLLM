@@ -55,7 +55,7 @@ case "$APPLE_PLATFORM" in
   macos)
     SDK_NAME="macosx"
     PLATFORM_KEY="macos"
-    DEFAULT_ARCHS="arm64 x86_64"
+    DEFAULT_ARCHS="arm64"
     DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     CMAKE_SYSTEM_NAME=""
     ;;
@@ -69,7 +69,7 @@ case "$APPLE_PLATFORM" in
   ios-simulator)
     SDK_NAME="iphonesimulator"
     PLATFORM_KEY="iossimulator"
-    DEFAULT_ARCHS="arm64 x86_64"
+    DEFAULT_ARCHS="arm64"
     DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
     CMAKE_SYSTEM_NAME="iOS"
     ;;
@@ -86,7 +86,7 @@ REQUESTED_ARCHS=()
 
 for arch in $ARCHS_NORMALIZED; do
   case "$arch" in
-    arm64|x86_64) ;;
+    arm64) ;;
     *)
       echo "error: unsupported architecture for $APPLE_PLATFORM: $arch" >&2
       exit 2
@@ -115,7 +115,7 @@ ARCHS_SUFFIX="${ARCHS_CMAKE//;/_}"
 DEPLOYMENT_SUFFIX="${DEPLOYMENT_TARGET//./_}"
 LLAMA_CONFIGURATION="${LLAMA_CONFIGURATION:-Release}"
 BUILD_JOBS="${LLAMA_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
-SCRIPT_REV="9"
+SCRIPT_REV="10"
 
 BUILD_KEY="$ARCHS_SUFFIX-$PLATFORM_KEY$DEPLOYMENT_SUFFIX-$LLAMA_CONFIGURATION"
 STAGE_DIR="$ARTIFACTS_DIR/stage-$BUILD_KEY"
@@ -239,10 +239,7 @@ validate_single_arch_configure() {
     exit 1
   fi
 
-  case "$arch" in
-    arm64) expected_source_dir="/ggml-cpu/arch/arm/" ;;
-    x86_64) expected_source_dir="/ggml-cpu/arch/x86/" ;;
-  esac
+  expected_source_dir="/ggml-cpu/arch/arm/"
 
   if ! grep -Fq "$expected_source_dir" "$build_dir/compile_commands.json"; then
     echo "error: llama.cpp did not select its architecture-specific CPU sources for $arch" >&2
@@ -252,9 +249,8 @@ validate_single_arch_configure() {
 
 PER_ARCH_LIBRARIES=()
 
-# llama.cpp selects its ARM/x86 CPU sources while configuring. A universal
-# CMAKE_OSX_ARCHITECTURES value is classified as UNKNOWN and falls back to
-# GGML_CPU_GENERIC, so configure and compile every requested slice separately.
+# Validate each requested slice independently so llama.cpp cannot silently
+# select its generic CPU backend.
 build_arch() {
   local arch="$1"
   local arch_build_key="$arch-$PLATFORM_KEY$DEPLOYMENT_SUFFIX-$LLAMA_CONFIGURATION"

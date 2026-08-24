@@ -8,14 +8,14 @@ ARTIFACTS_DIR="$ROOT_DIR/Vendor/llama-artifacts"
 OUTPUT_DIR="${LLAMA_XCFRAMEWORK_OUTPUT_DIR:-$ARTIFACTS_DIR/release}"
 XCFRAMEWORK_NAME="${LLAMA_XCFRAMEWORK_NAME:-llama.xcframework}"
 ZIP_NAME="${LLAMA_XCFRAMEWORK_ZIP_NAME:-llama.xcframework.zip}"
-MACOS_ARCHS="${MACOS_ARCHS:-${ARCHS:-arm64 x86_64}}"
+MACOS_ARCHS="${MACOS_ARCHS:-${ARCHS:-arm64}}"
 IOS_ARCHS="${IOS_ARCHS:-arm64}"
-IOS_SIMULATOR_ARCHS="${IOS_SIMULATOR_ARCHS:-arm64 x86_64}"
+IOS_SIMULATOR_ARCHS="${IOS_SIMULATOR_ARCHS:-arm64}"
 LLAMA_CONFIGURATION="${LLAMA_CONFIGURATION:-Release}"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 IOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
-SCRIPT_REV="9"
-XCFRAMEWORK_STAMP_SCHEMA="carbocation.llama.xcframework.v2"
+SCRIPT_REV="10"
+XCFRAMEWORK_STAMP_SCHEMA="carbocation.llama.xcframework.v3"
 
 BUILD_SCRIPT="$ROOT_DIR/Scripts/build-llama-apple-platform.sh"
 MACOS_STAGE="$ARTIFACTS_DIR/current-macos"
@@ -49,16 +49,16 @@ require_release_defaults() {
     echo "error: release XCFramework requires LLAMA_CONFIGURATION=Release." >&2
     exit 2
   fi
-  if [[ "$(normalize_archs "$MACOS_ARCHS")" != "arm64;x86_64" ]]; then
-    echo "error: release XCFramework requires MACOS_ARCHS='arm64 x86_64'." >&2
+  if [[ "$(normalize_archs "$MACOS_ARCHS")" != "arm64" ]]; then
+    echo "error: release XCFramework requires MACOS_ARCHS=arm64." >&2
     exit 2
   fi
   if [[ "$(normalize_archs "$IOS_ARCHS")" != "arm64" ]]; then
     echo "error: release XCFramework requires IOS_ARCHS=arm64." >&2
     exit 2
   fi
-  if [[ "$(normalize_archs "$IOS_SIMULATOR_ARCHS")" != "arm64;x86_64" ]]; then
-    echo "error: release XCFramework requires IOS_SIMULATOR_ARCHS='arm64 x86_64'." >&2
+  if [[ "$(normalize_archs "$IOS_SIMULATOR_ARCHS")" != "arm64" ]]; then
+    echo "error: release XCFramework requires IOS_SIMULATOR_ARCHS=arm64." >&2
     exit 2
   fi
   if [[ "$MACOS_DEPLOYMENT_TARGET" != "14.0" ]]; then
@@ -166,9 +166,9 @@ validated_stage_stamp() {
   printf '%s' "$stamp"
 }
 
-MACOS_STAMP="$(validated_stage_stamp "$MACOS_STAGE" macos 'arm64;x86_64' 14.0)"
+MACOS_STAMP="$(validated_stage_stamp "$MACOS_STAGE" macos arm64 14.0)"
 IOS_STAMP="$(validated_stage_stamp "$IOS_STAGE" ios arm64 17.0)"
-IOS_SIMULATOR_STAMP="$(validated_stage_stamp "$IOS_SIMULATOR_STAGE" ios-simulator 'arm64;x86_64' 17.0)"
+IOS_SIMULATOR_STAMP="$(validated_stage_stamp "$IOS_SIMULATOR_STAGE" ios-simulator arm64 17.0)"
 
 rm -rf "$XCFRAMEWORK_PATH" "$ZIP_PATH" "$CHECKSUM_PATH"
 

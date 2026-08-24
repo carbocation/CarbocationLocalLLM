@@ -3,8 +3,8 @@
 import PackageDescription
 import Foundation
 
-private let llamaBuildScriptRevision = "9"
-private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v2"
+private let llamaBuildScriptRevision = "10"
+private let llamaXCFrameworkStampSchema = "carbocation.llama.xcframework.v3"
 
 private func fileContents(atPath path: String) -> String? {
     try? String(contentsOfFile: path, encoding: .utf8)
@@ -189,7 +189,7 @@ private func compositeXCFrameworkStampIsCurrent(
     return macOS.certifies(
         commit: checkedOutCommit,
         platform: "macos",
-        architectures: "arm64;x86_64",
+        architectures: "arm64",
         deploymentTarget: "14.0"
     ) && iOS.certifies(
         commit: checkedOutCommit,
@@ -199,7 +199,7 @@ private func compositeXCFrameworkStampIsCurrent(
     ) && iOSSimulator.certifies(
         commit: checkedOutCommit,
         platform: "ios-simulator",
-        architectures: "arm64;x86_64",
+        architectures: "arm64",
         deploymentTarget: "17.0"
     )
 }
@@ -219,7 +219,7 @@ private func sourceArchiveIsCurrent(
     return stamp.certifies(
         commit: checkedOutCommit,
         platform: "macos",
-        architectures: "arm64;x86_64",
+        architectures: "arm64",
         deploymentTarget: "14.0"
     )
 }
@@ -256,7 +256,7 @@ let llamaUnsafeLinkerSettings: [LinkerSetting]
 if forceSourceLlama {
     guard localLlamaSourceArtifactIsCurrent else {
         fatalError(
-            "CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA requires a current universal Release archive. "
+            "CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA requires a current arm64 Release archive. "
                 + "Run Scripts/build-llama-macos.sh and retry."
         )
     }

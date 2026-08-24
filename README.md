@@ -717,9 +717,9 @@ For a published release tag such as `v0.3.0`, Xcode resolves the package from Gi
 
 The binary artifact is a static XCFramework containing:
 
-- macOS `arm64` and `x86_64`
+- macOS `arm64`
 - iOS device `arm64`
-- iOS simulator `arm64` and `x86_64`
+- iOS simulator `arm64`
 
 Every slice contains llama, ggml, llama.cpp `common`/`common-base`, and MTMD plus their required static dependencies, all built from the exact pinned submodule revision. SwiftPM consumers compile only Carbocation's small C/C++ bridges; they do not compile llama.cpp's `common` or MTMD source trees.
 
@@ -827,7 +827,7 @@ Vendor/llama-artifacts/current/include/
 
 Both paths are gitignored. The script uses a build lock so concurrent app builds do not corrupt shared artifacts.
 
-For CI or a universal local build, omit `ARCHS=arm64`; the script defaults to `arm64 x86_64`.
+The script defaults to `arm64`. Intel macOS and Intel simulator builds are not supported.
 
 ### Benchmark local llama inference
 

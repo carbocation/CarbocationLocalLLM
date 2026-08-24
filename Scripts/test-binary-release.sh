@@ -145,4 +145,3 @@ build_ios_import_check() {
 
 build_ios_import_check "iOS device" iphoneos arm64-apple-ios17.0
 build_ios_import_check "iOS simulator arm64" iphonesimulator arm64-apple-ios17.0-simulator
-build_ios_import_check "iOS simulator x86_64" iphonesimulator x86_64-apple-ios17.0-simulator
