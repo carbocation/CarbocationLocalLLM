@@ -284,6 +284,7 @@ public enum GenerationOptionParameter: String, Hashable, Sendable {
     case minP
     case presencePenalty
     case repetitionPenalty
+    case thinkingBudgetTokens
 }
 
 /// Describes an invalid generation option without relying on a native backend
@@ -293,6 +294,7 @@ public enum GenerationOptionsValidationError: Error, LocalizedError, Hashable, S
     case mustBeWithinUnitInterval(GenerationOptionParameter)
     case mustNotExceedOne(GenerationOptionParameter)
     case mustBePositive(GenerationOptionParameter)
+    case mustBeNonnegative(GenerationOptionParameter)
     case exceedsBackendIntegerLimit(GenerationOptionParameter, maximum: Int)
     case unsafeForBackendFloatingPoint(GenerationOptionParameter)
 
@@ -306,6 +308,8 @@ public enum GenerationOptionsValidationError: Error, LocalizedError, Hashable, S
             return "Generation option '\(parameter.rawValue)' must not exceed 1."
         case .mustBePositive(let parameter):
             return "Generation option '\(parameter.rawValue)' must be greater than 0."
+        case .mustBeNonnegative(let parameter):
+            return "Generation option '\(parameter.rawValue)' must be nonnegative."
         case .exceedsBackendIntegerLimit(let parameter, let maximum):
             return "Generation option '\(parameter.rawValue)' must not exceed \(maximum)."
         case .unsafeForBackendFloatingPoint(let parameter):
@@ -334,14 +338,7 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
     /// Controls whether compatible templates include historical assistant reasoning. nil preserves the template default.
     public var preserveThinking: Bool?
     /// Optional token budget for generated thinking/reasoning content.
-    public var thinkingBudgetTokens: Int? {
-        didSet {
-            precondition(
-                thinkingBudgetTokens.map { $0 >= 0 } ?? true,
-                "thinkingBudgetTokens must be nil or nonnegative."
-            )
-        }
-    }
+    public var thinkingBudgetTokens: Int?
     /// Optional text inserted before the model-native end-of-thinking tag when the thinking budget is exhausted.
     public var thinkingBudgetMessage: String
     /// Optional per-request hints for phase-aware streaming when prompt markers are not discoverable from the model template.
@@ -366,10 +363,6 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         thinkingBudgetMessage: String = "",
         streamPhaseConfiguration: LLMStreamPhaseConfiguration = .automatic
     ) {
-        precondition(
-            thinkingBudgetTokens.map { $0 >= 0 } ?? true,
-            "thinkingBudgetTokens must be nil or nonnegative."
-        )
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -571,6 +564,10 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
             guard repetitionPenalty > 0 else {
                 throw GenerationOptionsValidationError.mustBePositive(.repetitionPenalty)
             }
+        }
+
+        if let thinkingBudgetTokens, thinkingBudgetTokens < 0 {
+            throw GenerationOptionsValidationError.mustBeNonnegative(.thinkingBudgetTokens)
         }
     }
 

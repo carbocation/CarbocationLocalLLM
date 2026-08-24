@@ -77,6 +77,25 @@ final class GenerationOptionsValidationTests: XCTestCase {
         )
     }
 
+    func testNegativeThinkingBudgetIsRejectedWithoutTrapping() {
+        let constructed = GenerationOptions(thinkingBudgetTokens: -1)
+        assertValidationError(
+            constructed,
+            equals: .mustBeNonnegative(.thinkingBudgetTokens)
+        )
+        assertBackendValidationError(
+            constructed,
+            equals: .mustBeNonnegative(.thinkingBudgetTokens)
+        )
+
+        var mutated = GenerationOptions()
+        mutated.thinkingBudgetTokens = -2
+        assertValidationError(
+            mutated,
+            equals: .mustBeNonnegative(.thinkingBudgetTokens)
+        )
+    }
+
     func testValuesOutsideNativeNumericRangesAreRejected() {
         assertBackendValidationError(
             GenerationOptions(topK: Int(Int32.max) + 1),
