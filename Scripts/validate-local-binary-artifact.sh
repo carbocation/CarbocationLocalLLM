@@ -97,3 +97,5 @@ build_ios_app CLLMSmokeIOS "iOS simulator arm64" "generic/platform=iOS Simulator
 build_ios_app CLLMSmokeIOS "iOS simulator x86_64" "generic/platform=iOS Simulator" x86_64 ".build/XcodeDerivedData-CLLMSmokeIOS-iOSSimulator-x86_64"
 build_macos_app CLLMDemoMac ".build/XcodeDerivedData-CLLMDemoMac-macOS"
 build_ios_app CLLMDemoIOS "iOS device arm64" "generic/platform=iOS" arm64 ".build/XcodeDerivedData-CLLMDemoIOS-iOS-arm64"
+
+Scripts/validate-external-local-binary-consumer.sh "$ARTIFACT_FS_PATH"

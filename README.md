@@ -908,7 +908,7 @@ First run with:
 - `prerelease`: `true` for shakedown releases
 - `dry_run`: `true`
 
-The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing. Validation includes macOS tests, iOS package imports, and iOS app-style links for device and simulator.
+The dry run builds the artifact, stamps `Package.swift`, and validates the package against the local XCFramework without pushing. Validation includes macOS tests, iOS package imports, iOS app-style links for device and simulator, and a clean external SwiftPM consumer that rejects any compile command sourcing files from llama.cpp's `common` or `tools/mtmd` trees.
 
 Then run the workflow again with the same tag and `dry_run=false`. The release run creates a tag-only release commit with the binary URL/checksum, creates the tag, uploads the release asset, and validates the published release from a clean temporary consumer package.
 
