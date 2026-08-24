@@ -3,6 +3,12 @@ import CarbocationLlamaCommonBridge
 import Foundation
 import llama
 
+extension GenerationOptions {
+    func validateForLlamaBackend() throws {
+        try validateForFloat32Backend(maximumTopK: Int(Int32.max))
+    }
+}
+
 package struct LlamaResolvedSamplerDiagnostics: Hashable, Sendable {
     package var requestTemperature: Double?
     package var requestTopK: Int?
@@ -58,8 +64,10 @@ package struct LlamaResolvedSamplerDiagnostics: Hashable, Sendable {
     }
 
     private static func format(_ value: Double) -> String {
-        if value.rounded(.towardZero) == value {
-            return String(Int(value))
+        guard value.isFinite else { return String(describing: value) }
+        if value.rounded(.towardZero) == value,
+           let integer = Int(exactly: value) {
+            return String(integer)
         }
         return String(value)
     }
@@ -154,6 +162,8 @@ extension LlamaEngine {
         vocab: OpaquePointer,
         reasoningBudgetPlan: ReasoningBudgetPlan? = nil
     ) throws -> SamplerRuntime {
+        try options.validateForLlamaBackend()
+
         let params = llama_sampler_chain_default_params()
         guard let chain = llama_sampler_chain_init(params) else {
             throw LLMEngineError.samplerInitFailed
@@ -211,12 +221,19 @@ extension LlamaEngine {
             llama_sampler_chain_add(chain, grammarSampler)
         }
 
-        let temperature = Float(options.temperature ?? 0)
+        let temperature = options.temperature ?? 0
         if temperature <= 0 {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy())
         } else {
             if let topK = options.topK, topK > 0 {
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(Int32(topK)))
+                guard let backendTopK = Int32(exactly: topK) else {
+                    llama_sampler_free(chain)
+                    throw GenerationOptionsValidationError.exceedsBackendIntegerLimit(
+                        .topK,
+                        maximum: Int(Int32.max)
+                    )
+                }
+                llama_sampler_chain_add(chain, llama_sampler_init_top_k(backendTopK))
             }
             if let topP = options.topP {
                 llama_sampler_chain_add(chain, llama_sampler_init_top_p(Float(topP), 1))
@@ -224,7 +241,7 @@ extension LlamaEngine {
             if let minP = options.minP, minP > 0 {
                 llama_sampler_chain_add(chain, llama_sampler_init_min_p(Float(minP), 1))
             }
-            llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(chain, llama_sampler_init_temp(Float(temperature)))
             let seed = options.seed ?? UInt32.random(in: 1...UInt32.max)
             llama_sampler_chain_add(chain, llama_sampler_init_dist(seed))
         }

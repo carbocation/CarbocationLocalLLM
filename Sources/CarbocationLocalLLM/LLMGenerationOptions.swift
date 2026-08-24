@@ -275,6 +275,45 @@ public struct LLMSamplingDefaults: Codable, Hashable, Sendable {
     }
 }
 
+/// A sampling parameter accepted by ``GenerationOptions`` and validated before
+/// a provider forwards it to a native inference backend.
+public enum GenerationOptionParameter: String, Hashable, Sendable {
+    case temperature
+    case topP
+    case topK
+    case minP
+    case presencePenalty
+    case repetitionPenalty
+}
+
+/// Describes an invalid generation option without relying on a native backend
+/// assertion or a trapping Swift numeric conversion.
+public enum GenerationOptionsValidationError: Error, LocalizedError, Hashable, Sendable {
+    case mustBeFinite(GenerationOptionParameter)
+    case mustBeWithinUnitInterval(GenerationOptionParameter)
+    case mustNotExceedOne(GenerationOptionParameter)
+    case mustBePositive(GenerationOptionParameter)
+    case exceedsBackendIntegerLimit(GenerationOptionParameter, maximum: Int)
+    case unsafeForBackendFloatingPoint(GenerationOptionParameter)
+
+    public var errorDescription: String? {
+        switch self {
+        case .mustBeFinite(let parameter):
+            return "Generation option '\(parameter.rawValue)' must be finite."
+        case .mustBeWithinUnitInterval(let parameter):
+            return "Generation option '\(parameter.rawValue)' must be between 0 and 1."
+        case .mustNotExceedOne(let parameter):
+            return "Generation option '\(parameter.rawValue)' must not exceed 1."
+        case .mustBePositive(let parameter):
+            return "Generation option '\(parameter.rawValue)' must be greater than 0."
+        case .exceedsBackendIntegerLimit(let parameter, let maximum):
+            return "Generation option '\(parameter.rawValue)' must not exceed \(maximum)."
+        case .unsafeForBackendFloatingPoint(let parameter):
+            return "Generation option '\(parameter.rawValue)' cannot be represented or used safely by the native floating-point backend."
+        }
+    }
+}
+
 public struct GenerationOptions: Codable, Hashable, Sendable {
     public var temperature: Double?
     public var topP: Double?
@@ -496,6 +535,105 @@ public struct GenerationOptions: Codable, Hashable, Sendable {
         var copy = self
         copy.grammar = grammar
         return copy
+    }
+
+    /// Validates provider-independent sampling semantics.
+    ///
+    /// Nonpositive temperatures continue to select greedy decoding, nonpositive
+    /// `topK` values continue to disable top-k sampling, and nonpositive `minP`
+    /// values continue to disable min-p sampling. Those established sentinel
+    /// values are therefore accepted as long as they are finite.
+    public func validate() throws {
+        if let temperature {
+            try Self.requireFinite(temperature, parameter: .temperature)
+        }
+
+        if let topP {
+            try Self.requireFinite(topP, parameter: .topP)
+            guard (0...1).contains(topP) else {
+                throw GenerationOptionsValidationError.mustBeWithinUnitInterval(.topP)
+            }
+        }
+
+        if let minP {
+            try Self.requireFinite(minP, parameter: .minP)
+            if minP > 1 {
+                throw GenerationOptionsValidationError.mustNotExceedOne(.minP)
+            }
+        }
+
+        if let presencePenalty {
+            try Self.requireFinite(presencePenalty, parameter: .presencePenalty)
+        }
+
+        if let repetitionPenalty {
+            try Self.requireFinite(repetitionPenalty, parameter: .repetitionPenalty)
+            guard repetitionPenalty > 0 else {
+                throw GenerationOptionsValidationError.mustBePositive(.repetitionPenalty)
+            }
+        }
+    }
+
+    /// Adds bounds required by native Float32 sampler APIs. Providers with a
+    /// different numeric ABI keep using ``validate()`` alone.
+    package func validateForFloat32Backend(maximumTopK: Int) throws {
+        try validate()
+
+        if let temperature, temperature > 0 {
+            try Self.requireBackendFloat(temperature, parameter: .temperature)
+            try Self.requireFiniteBackendReciprocal(temperature, parameter: .temperature)
+        }
+        if let topP, topP > 0 {
+            try Self.requireBackendFloat(topP, parameter: .topP)
+        }
+        if let topK, topK > 0, topK > maximumTopK {
+            throw GenerationOptionsValidationError.exceedsBackendIntegerLimit(
+                .topK,
+                maximum: maximumTopK
+            )
+        }
+        if let minP, minP > 0 {
+            try Self.requireBackendFloat(minP, parameter: .minP)
+        }
+        if let presencePenalty {
+            try Self.requireBackendFloat(presencePenalty, parameter: .presencePenalty)
+        }
+        if let repetitionPenalty {
+            try Self.requireBackendFloat(repetitionPenalty, parameter: .repetitionPenalty)
+            try Self.requireFiniteBackendReciprocal(
+                repetitionPenalty,
+                parameter: .repetitionPenalty
+            )
+        }
+    }
+
+    private static func requireFinite(
+        _ value: Double,
+        parameter: GenerationOptionParameter
+    ) throws {
+        guard value.isFinite else {
+            throw GenerationOptionsValidationError.mustBeFinite(parameter)
+        }
+    }
+
+    private static func requireBackendFloat(
+        _ value: Double,
+        parameter: GenerationOptionParameter
+    ) throws {
+        let backendValue = Float(value)
+        guard backendValue.isFinite,
+              value == 0 || backendValue != 0 else {
+            throw GenerationOptionsValidationError.unsafeForBackendFloatingPoint(parameter)
+        }
+    }
+
+    private static func requireFiniteBackendReciprocal(
+        _ value: Double,
+        parameter: GenerationOptionParameter
+    ) throws {
+        guard (1 / Float(value)).isFinite else {
+            throw GenerationOptionsValidationError.unsafeForBackendFloatingPoint(parameter)
+        }
     }
 
     private enum CodingKeys: String, CodingKey {

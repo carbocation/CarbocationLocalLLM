@@ -209,7 +209,12 @@ public extension LlamaEngine {
         store: LlamaContextCalibrationStore = .shared,
         onProgress: @escaping @Sendable (LlamaContextCalibrationProgress) async -> Void = { _ in }
     ) async throws -> LlamaContextCalibrationRecord {
-        try await LlamaContextCalibrator.calibrate(
+        try Self.validateContextConfiguration(
+            requestedContext: 0,
+            batchSizeLimit: configuration.batchSizeLimit,
+            microBatchSizeLimit: configuration.microBatchSizeLimit
+        )
+        return try await LlamaContextCalibrator.calibrate(
             model: installed,
             root: root,
             configuration: configuration,
@@ -315,9 +320,10 @@ private enum LlamaContextCalibrator {
         let knownTrainingContext = installed.contextLength > 0
             ? installed.contextLength
             : max(0, probedTrainingContext)
-        let upperBound = knownTrainingContext > 0
+        let modelUpperBound = knownTrainingContext > 0
             ? knownTrainingContext
             : LlamaContextPolicy.unknownTrainingFallback
+        let upperBound = min(modelUpperBound, LlamaEngine.maximumBackendContextParameter)
         let candidates = LlamaContextCalibrationAlgorithm.powerOfTwoTiers(upTo: upperBound)
         let totalProbeCount = LlamaContextCalibrationAlgorithm.maximumProbeCount(
             candidateCount: candidates.count
