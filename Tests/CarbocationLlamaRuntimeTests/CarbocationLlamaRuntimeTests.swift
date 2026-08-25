@@ -2607,6 +2607,29 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(likelihood.probability, 0.25, accuracy: 0.000_001)
     }
 
+    func testLlamaTokenLikelihoodProgressProvidesFraction() {
+        let progress = LlamaTokenLikelihoodProgress(
+            completedTokenCount: 3,
+            totalTokenCount: 8
+        )
+
+        XCTAssertEqual(progress.fractionCompleted, 0.375, accuracy: 0.000_001)
+        XCTAssertEqual(
+            LlamaTokenLikelihoodProgress(
+                completedTokenCount: 0,
+                totalTokenCount: 0
+            ).fractionCompleted,
+            1
+        )
+        XCTAssertEqual(
+            LlamaTokenLikelihoodProgress(
+                completedTokenCount: 9,
+                totalTokenCount: 8
+            ).fractionCompleted,
+            1
+        )
+    }
+
     func testCalgacusStatsSummarizeTrace() {
         let trace = [
             CalgacusTraceEntry(index: 0, tokenID: 10, tokenText: "a", rank: 1, negativeLogProbability: 0.1),

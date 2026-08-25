@@ -6,7 +6,10 @@ extension LlamaEngine {
     /// Scores each model token in `text` against the raw next-token logits
     /// conditioned on every preceding token. The text must fit in the loaded
     /// context; no truncation or sliding window is applied.
-    public func tokenLogLikelihoods(for text: String) async throws -> [LlamaTokenLikelihood] {
+    public func tokenLogLikelihoods(
+        for text: String,
+        onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
+    ) async throws -> [LlamaTokenLikelihood] {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
@@ -15,6 +18,10 @@ extension LlamaEngine {
         clearPromptCaches()
 
         let tokens = try tokenize(vocab: vocabulary, text: text, addSpecial: false)
+        await onProgress(LlamaTokenLikelihoodProgress(
+            completedTokenCount: 0,
+            totalTokenCount: tokens.count
+        ))
         guard !tokens.isEmpty else { return [] }
 
         let initialContextTokens: [llama_token]
@@ -81,6 +88,11 @@ extension LlamaEngine {
             if index < tokens.count - 1 {
                 try decodeCalgacusToken(token, context: context)
             }
+
+            await onProgress(LlamaTokenLikelihoodProgress(
+                completedTokenCount: index + 1,
+                totalTokenCount: tokens.count
+            ))
         }
 
         guard renderedText == Data(text.utf8) else {

@@ -719,14 +719,16 @@ Apps that need raw, provider-specific likelihoods can add the `CarbocationLlamaR
 import CarbocationLlamaRuntime
 import Foundation
 
-let tokens = try await engine.tokenLogLikelihoods(for: text)
+let tokens = try await engine.tokenLogLikelihoods(for: text) { progress in
+    print("Scored \(progress.completedTokenCount) of \(progress.totalTokenCount) tokens")
+}
 let meanNegativeLogProbability = tokens.isEmpty
     ? 0
     : tokens.map(\.negativeLogProbability).reduce(0, +) / Double(tokens.count)
 let perplexity = exp(meanNegativeLogProbability)
 ```
 
-Each result contains the token id, exact rendered bytes, its range in the input's UTF-8 bytes, raw log-probability, and one-based vocabulary rank. Scores use the model logits before sampling transforms and condition each token on every preceding token. The entire text must fit in the loaded context; this API does not truncate or use a sliding window. Word segmentation, aggregation, calibration, and classification remain app-owned. Apple Intelligence does not expose logits through this package.
+Each result contains the token id, exact rendered bytes, its range in the input's UTF-8 bytes, raw log-probability, and one-based vocabulary rank. The progress callback reports completed and total observed-token counts, plus a derived fraction. Scores use the model logits before sampling transforms and condition each token on every preceding token. The entire text must fit in the loaded context; this API does not truncate or use a sliding window. Word segmentation, aggregation, calibration, and classification remain app-owned. Apple Intelligence does not expose logits through this package.
 
 ### How the binary release works
 

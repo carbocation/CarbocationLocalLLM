@@ -46,6 +46,24 @@ public struct LlamaTokenLikelihood: Hashable, Sendable, Identifiable {
     }
 }
 
+/// Progress through a bounded token-likelihood scoring operation.
+public struct LlamaTokenLikelihoodProgress: Hashable, Sendable {
+    /// Tokens whose likelihoods have been computed.
+    public var completedTokenCount: Int
+    /// Total observed tokens in the tokenized input.
+    public var totalTokenCount: Int
+
+    public var fractionCompleted: Double {
+        guard totalTokenCount > 0 else { return 1 }
+        return min(1, max(0, Double(completedTokenCount) / Double(totalTokenCount)))
+    }
+
+    public init(completedTokenCount: Int, totalTokenCount: Int) {
+        self.completedTokenCount = completedTokenCount
+        self.totalTokenCount = totalTokenCount
+    }
+}
+
 public enum LlamaTokenLikelihoodError: Error, LocalizedError, Hashable, Sendable {
     case noInitialContext
     case contextBudgetExceeded(contextSize: Int, requiredTokens: Int)
