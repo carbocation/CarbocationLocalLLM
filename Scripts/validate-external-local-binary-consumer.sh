@@ -44,7 +44,8 @@ let package = Package(
             name: "LocalBinaryConsumer",
             dependencies: [
                 .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM"),
+                .product(name: "CarbocationLlamaRuntime", package: "CarbocationLocalLLM")
             ]
         )
     ]
@@ -54,6 +55,11 @@ EOF
 cat > "$WORK_DIR/Sources/LocalBinaryConsumer/main.swift" <<'EOF'
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMRuntimeUI
+import CarbocationLlamaRuntime
+
+func scoreText(_ text: String, using engine: LlamaEngine) async throws -> [LlamaTokenLikelihood] {
+    try await engine.tokenLogLikelihoods(for: text)
+}
 
 print(LocalLLMRuntimeSmoke.defaultModelParameterSummary())
 EOF

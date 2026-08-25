@@ -711,6 +711,23 @@ Model weights are not distributed by this package. Downloaded or imported GGUF f
 
 Carbocation is the stable Swift application layer: it owns the public APIs, unified provider selection, model management, streaming events, cancellation, lifecycle safety, and Apple Intelligence integration. For GGUF models, the pinned llama.cpp revision owns model-specific embedded-template rendering and response protocols through `common/chat`, including reasoning channels, tool syntax, generated grammars, lazy grammar triggers, preserved tokens, and stop sequences. A model with no usable embedded template may use the logged legacy compatibility renderer; a model that has an embedded template but fails upstream rendering returns an explicit error and never silently changes prompt semantics.
 
+### Score text with GGUF logits
+
+Apps that need raw, provider-specific likelihoods can add the `CarbocationLlamaRuntime` product and score text after loading a `LlamaEngine`:
+
+```swift
+import CarbocationLlamaRuntime
+import Foundation
+
+let tokens = try await engine.tokenLogLikelihoods(for: text)
+let meanNegativeLogProbability = tokens.isEmpty
+    ? 0
+    : tokens.map(\.negativeLogProbability).reduce(0, +) / Double(tokens.count)
+let perplexity = exp(meanNegativeLogProbability)
+```
+
+Each result contains the token id, exact rendered bytes, its range in the input's UTF-8 bytes, raw log-probability, and one-based vocabulary rank. Scores use the model logits before sampling transforms and condition each token on every preceding token. The entire text must fit in the loaded context; this API does not truncate or use a sliding window. Word segmentation, aggregation, calibration, and classification remain app-owned. Apple Intelligence does not expose logits through this package.
+
 ### How the binary release works
 
 For a published release tag such as `v0.3.0`, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`, links the products you chose, and builds your app.

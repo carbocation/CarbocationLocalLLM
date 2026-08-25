@@ -2591,6 +2591,22 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testLlamaTokenLikelihoodProvidesDerivedValues() {
+        let likelihood = LlamaTokenLikelihood(
+            index: 2,
+            tokenID: 42,
+            tokenBytes: Data("word".utf8),
+            byteRange: 5..<9,
+            logProbability: log(0.25),
+            rank: 3
+        )
+
+        XCTAssertEqual(likelihood.id, 2)
+        XCTAssertEqual(likelihood.tokenText, "word")
+        XCTAssertEqual(likelihood.negativeLogProbability, -log(0.25), accuracy: 0.000_001)
+        XCTAssertEqual(likelihood.probability, 0.25, accuracy: 0.000_001)
+    }
+
     func testCalgacusStatsSummarizeTrace() {
         let trace = [
             CalgacusTraceEntry(index: 0, tokenID: 10, tokenText: "a", rank: 1, negativeLogProbability: 0.1),
@@ -2812,6 +2828,15 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         let secret = "The recipe is simple."
+        let likelihoods = try await engine.tokenLogLikelihoods(for: secret)
+        XCTAssertFalse(likelihoods.isEmpty)
+        XCTAssertEqual(
+            likelihoods.reduce(into: Data()) { $0.append($1.tokenBytes) },
+            Data(secret.utf8)
+        )
+        XCTAssertTrue(likelihoods.allSatisfy { $0.logProbability.isFinite })
+        XCTAssertTrue(likelihoods.allSatisfy { $0.rank > 0 })
+
         let encoded = try await engine.encodeCalgacus(
             CalgacusEncodeRequest(
                 secretText: secret,

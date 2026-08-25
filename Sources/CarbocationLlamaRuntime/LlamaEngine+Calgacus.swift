@@ -3,6 +3,92 @@ import Foundation
 import llama
 
 extension LlamaEngine {
+    /// Scores each model token in `text` against the raw next-token logits
+    /// conditioned on every preceding token. The text must fit in the loaded
+    /// context; no truncation or sliding window is applied.
+    public func tokenLogLikelihoods(for text: String) async throws -> [LlamaTokenLikelihood] {
+        guard let context, let vocabulary else {
+            throw LLMEngineError.noModelLoaded
+        }
+        try acquireGenerationLease()
+        defer { endGenerationLease() }
+        clearPromptCaches()
+
+        let tokens = try tokenize(vocab: vocabulary, text: text, addSpecial: false)
+        guard !tokens.isEmpty else { return [] }
+
+        let initialContextTokens: [llama_token]
+        do {
+            initialContextTokens = try calgacusInitialTokens(vocab: vocabulary)
+        } catch CalgacusError.noInitialContext {
+            throw LlamaTokenLikelihoodError.noInitialContext
+        }
+
+        // The final observed token does not need to be decoded: the preceding
+        // context already provides the logits used to score it.
+        let requiredTokens = initialContextTokens.count + max(0, tokens.count - 1)
+        let contextSize = currentContextSize()
+        guard requiredTokens <= contextSize else {
+            throw LlamaTokenLikelihoodError.contextBudgetExceeded(
+                contextSize: contextSize,
+                requiredTokens: requiredTokens
+            )
+        }
+
+        try prefillCalgacusContext(initialContextTokens, context: context)
+
+        var results: [LlamaTokenLikelihood] = []
+        results.reserveCapacity(tokens.count)
+        var renderedText = Data()
+
+        for (index, token) in tokens.enumerated() {
+            try Task.checkCancellation()
+
+            let logits: [Float]
+            do {
+                logits = try calgacusLogits(context: context, vocabulary: vocabulary)
+            } catch CalgacusError.logitsUnavailable {
+                throw LlamaTokenLikelihoodError.logitsUnavailable
+            }
+
+            let rank: Int
+            let negativeLogProbability: Double
+            do {
+                rank = try Self.calgacusRank(of: token, in: logits)
+                negativeLogProbability = try Self.calgacusNegativeLogProbability(
+                    of: token,
+                    in: logits
+                )
+            } catch CalgacusError.invalidTokenID(let tokenID, let vocabularySize) {
+                throw LlamaTokenLikelihoodError.invalidTokenID(
+                    tokenID,
+                    vocabularySize: vocabularySize
+                )
+            }
+
+            let tokenBytes = tokenToPiece(vocab: vocabulary, token: token)
+            let byteRange = renderedText.count..<(renderedText.count + tokenBytes.count)
+            renderedText.append(tokenBytes)
+            results.append(LlamaTokenLikelihood(
+                index: index,
+                tokenID: token,
+                tokenBytes: tokenBytes,
+                byteRange: byteRange,
+                logProbability: -negativeLogProbability,
+                rank: rank
+            ))
+
+            if index < tokens.count - 1 {
+                try decodeCalgacusToken(token, context: context)
+            }
+        }
+
+        guard renderedText == Data(text.utf8) else {
+            throw LlamaTokenLikelihoodError.tokenRenderingMismatch
+        }
+        return results
+    }
+
     public func encodeCalgacus(
         _ request: CalgacusEncodeRequest,
         onEvent: @Sendable (CalgacusEvent) -> Void

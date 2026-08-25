@@ -57,7 +57,8 @@ let package = Package(
                 .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM"),
+                .product(name: "CarbocationLlamaRuntime", package: "CarbocationLocalLLM")
             ]
         ),
         .target(
@@ -66,7 +67,8 @@ let package = Package(
                 .product(name: "CarbocationLocalLLM", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMUI", package: "CarbocationLocalLLM"),
                 .product(name: "CarbocationLocalLLMRuntime", package: "CarbocationLocalLLM"),
-                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM")
+                .product(name: "CarbocationLocalLLMRuntimeUI", package: "CarbocationLocalLLM"),
+                .product(name: "CarbocationLlamaRuntime", package: "CarbocationLocalLLM")
             ]
         )
     ]
@@ -78,7 +80,12 @@ import CarbocationLocalLLM
 import CarbocationLocalLLMUI
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMRuntimeUI
+import CarbocationLlamaRuntime
 import Foundation
+
+func scoreText(_ text: String, using engine: LlamaEngine) async throws -> [LlamaTokenLikelihood] {
+    try await engine.tokenLogLikelihoods(for: text)
+}
 
 let curatedCount = CuratedModelCatalog.all.count
 let summary = LocalLLMRuntimeSmoke.defaultModelParameterSummary()
@@ -107,6 +114,7 @@ import CarbocationLocalLLM
 import CarbocationLocalLLMRuntime
 import CarbocationLocalLLMRuntimeUI
 import CarbocationLocalLLMUI
+import CarbocationLlamaRuntime
 import Foundation
 
 public enum ReleaseIOSImportCheck {
@@ -120,6 +128,13 @@ public enum ReleaseIOSImportCheck {
 
     public static func availableSystemModelIDs() -> [String] {
         LocalLLMEngine.availableSystemModels().map(\.id)
+    }
+
+    public static func scoreText(
+        _ text: String,
+        using engine: LlamaEngine
+    ) async throws -> [LlamaTokenLikelihood] {
+        try await engine.tokenLogLikelihoods(for: text)
     }
 }
 EOF
