@@ -245,8 +245,8 @@ let localLlamaSourceArtifactIsCurrent = llamaCheckedOutCommit.map { commit in
         checkedOutCommit: commit
     )
 } ?? false
-let llamaBinaryArtifactURL = ""
-let llamaBinaryArtifactChecksum = ""
+let llamaBinaryArtifactURL = "https://github.com/carbocation/CarbocationLocalLLM/releases/download/v0.54.0/llama.xcframework.zip"
+let llamaBinaryArtifactChecksum = "8c9c79d67cc2f2ef3d7d025f0ab99c9e120406a09f85dd4bd3d69692f09f0c23"
 let llamaBinaryArtifactPath = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_BINARY_ARTIFACT_PATH"] ?? ""
 let forceSourceLlama = ProcessInfo.processInfo.environment["CARBOCATION_LOCAL_LLM_FORCE_SOURCE_LLAMA"] == "1"
 
