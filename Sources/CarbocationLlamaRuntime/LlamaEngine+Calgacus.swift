@@ -521,6 +521,9 @@ extension LlamaEngine {
         let probabilityMassRank = includesProbabilityMassRank
             ? min(1, max(0, (moreLikelyWeight + tiedWeight / 2) / normalizer))
             : nil
+        let probabilityMassRankTieProbability = includesProbabilityMassRank
+            ? min(1, max(0, tiedWeight / normalizer))
+            : nil
         let temperatureNormalizations = zip(
             vocabularyTemperatures,
             temperatureNormalizers
@@ -546,6 +549,7 @@ extension LlamaEngine {
                 expectedLogProbability: expectedLogProbability,
                 logProbabilityVariance: logProbabilityVariance,
                 probabilityMassRank: probabilityMassRank,
+                probabilityMassRankTieProbability: probabilityMassRankTieProbability,
                 temperatureNormalizations: temperatureNormalizations
             )
         )

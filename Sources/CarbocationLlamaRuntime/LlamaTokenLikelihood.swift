@@ -65,6 +65,10 @@ public struct LlamaTokenVocabularyStatistics: Hashable, Sendable {
     /// Probability mass assigned to tokens more likely than the observed
     /// token, plus half the mass tied with it. Values are in `[0, 1]`.
     public var probabilityMassRank: Double?
+    /// Total probability assigned to tokens tied with the observed token,
+    /// including the observed token itself. Combine this with the midpoint
+    /// rank to reconstruct the tie interval for seeded uniformization.
+    public var probabilityMassRankTieProbability: Double?
     /// Requested temperature-normalization terms, sorted by temperature.
     public var temperatureNormalizations: [LlamaTemperatureNormalization]
 
@@ -80,11 +84,13 @@ public struct LlamaTokenVocabularyStatistics: Hashable, Sendable {
         expectedLogProbability: Double,
         logProbabilityVariance: Double,
         probabilityMassRank: Double? = nil,
+        probabilityMassRankTieProbability: Double? = nil,
         temperatureNormalizations: [LlamaTemperatureNormalization] = []
     ) {
         self.expectedLogProbability = expectedLogProbability
         self.logProbabilityVariance = logProbabilityVariance
         self.probabilityMassRank = probabilityMassRank
+        self.probabilityMassRankTieProbability = probabilityMassRankTieProbability
         self.temperatureNormalizations = temperatureNormalizations
     }
 

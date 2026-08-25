@@ -2670,6 +2670,11 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             accuracy: 0.000_000_000_001
         )
         XCTAssertEqual(
+            try XCTUnwrap(statistics.probabilityMassRankTieProbability),
+            targetProbability,
+            accuracy: 0.000_000_000_001
+        )
+        XCTAssertEqual(
             statistics.logProbabilityStandardDeviation,
             sqrt(variance),
             accuracy: 0.000_000_000_001
@@ -2709,12 +2714,18 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         }
 
         XCTAssertNil(disabled.vocabularyStatistics?.probabilityMassRank)
+        XCTAssertNil(disabled.vocabularyStatistics?.probabilityMassRankTieProbability)
         let maxLogit = Double(logits.max() ?? 0)
         let weights = logits.map { exp(Double($0) - maxLogit) }
         let expected = (weights[1] + weights[2]) / 2 / weights.reduce(0, +)
         XCTAssertEqual(
             try XCTUnwrap(enabled.vocabularyStatistics?.probabilityMassRank),
             expected,
+            accuracy: 0.000_000_000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(enabled.vocabularyStatistics?.probabilityMassRankTieProbability),
+            (weights[1] + weights[2]) / weights.reduce(0, +),
             accuracy: 0.000_000_000_001
         )
     }
@@ -3175,9 +3186,14 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(curvatureStatistics.logProbabilityVariance, 0)
             XCTAssertTrue(curvatureStatistics.temperatureNormalizations.isEmpty)
             XCTAssertNil(curvatureStatistics.probabilityMassRank)
+            XCTAssertNil(curvatureStatistics.probabilityMassRankTieProbability)
             let massRankStatistics = try XCTUnwrap(probabilityMassRank.vocabularyStatistics)
             let massRank = try XCTUnwrap(massRankStatistics.probabilityMassRank)
+            let tieProbability = try XCTUnwrap(
+                massRankStatistics.probabilityMassRankTieProbability
+            )
             XCTAssertTrue((0...1).contains(massRank))
+            XCTAssertTrue((0...1).contains(tieProbability))
             XCTAssertTrue(massRankStatistics.temperatureNormalizations.isEmpty)
             let temperatureStatistics = try XCTUnwrap(temperature.vocabularyStatistics)
             XCTAssertEqual(temperatureStatistics.temperatureNormalizations.count, 3)

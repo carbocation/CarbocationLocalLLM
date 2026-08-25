@@ -771,8 +771,11 @@ When `includesProbabilityMassRank` is enabled, `probabilityMassRank` reports
 the mass assigned to tokens more likely than the observed token, plus half the
 mass tied with it. This midpoint tie rule gives a deterministic value in
 `[0, 1]`; an ancestral sample from the scoring distribution has an approximately
-uniform mass-rank distribution, so the scalar supports model-native head/tail
-diagnostics without exposing the vocabulary.
+uniform mass-rank distribution after jittering within the tie interval, so the
+scalar supports model-native head/tail diagnostics without exposing the
+vocabulary. `probabilityMassRankTieProbability` supplies the interval width;
+subtract half of it from the midpoint to recover the lower bound, then use a
+seeded uniform offset for deterministic, formally calibrated histograms.
 
 When enabled, entropy and log-probability moments are fused into likelihood
 scoring's existing vocabulary-normalization scan. Probability-mass rank adds
