@@ -57,7 +57,8 @@ extension LlamaEngine {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
-        let vocabularyTemperatures = try options.vocabularyStatistics.map {
+        let vocabularyStatisticsOptions = options.vocabularyStatistics
+        let vocabularyTemperatures = try vocabularyStatisticsOptions.map {
             try Self.calgacusValidatedTemperatures(
                 $0.temperatureNormalizationTemperatures
             )
@@ -158,7 +159,9 @@ extension LlamaEngine {
                         let metrics = try Self.calgacusTokenMetrics(
                             of: token,
                             in: logitsBuffer,
-                            vocabularyTemperatures: vocabularyTemperatures
+                            vocabularyTemperatures: vocabularyTemperatures,
+                            includesProbabilityMassRank:
+                                vocabularyStatisticsOptions?.includesProbabilityMassRank ?? false
                         )
                         rank = metrics.rank
                         negativeLogProbability = metrics.negativeLogProbability
@@ -438,7 +441,8 @@ extension LlamaEngine {
     static func calgacusTokenMetrics(
         of tokenID: Int32,
         in logits: UnsafeBufferPointer<Float>,
-        vocabularyTemperatures: [Double]
+        vocabularyTemperatures: [Double],
+        includesProbabilityMassRank: Bool = false
     ) throws -> (
         rank: Int,
         negativeLogProbability: Double,
@@ -471,6 +475,8 @@ extension LlamaEngine {
         var normalizer = 0.0
         var weightedShiftedLogit = 0.0
         var weightedSquaredShiftedLogit = 0.0
+        var moreLikelyWeight = 0.0
+        var tiedWeight = 0.0
         var temperatureNormalizers = [Double](
             repeating: 0,
             count: vocabularyTemperatures.count
@@ -485,6 +491,13 @@ extension LlamaEngine {
             normalizer += weight
             weightedShiftedLogit += weight * shiftedLogit
             weightedSquaredShiftedLogit += weight * shiftedLogit * shiftedLogit
+            if includesProbabilityMassRank {
+                if logit > targetLogit {
+                    moreLikelyWeight += weight
+                } else if logit == targetLogit {
+                    tiedWeight += weight
+                }
+            }
             for index in vocabularyTemperatures.indices
                 where vocabularyTemperatures[index] != 1
             {
@@ -505,6 +518,9 @@ extension LlamaEngine {
             0,
             expectedSquaredShiftedLogit - expectedShiftedLogit * expectedShiftedLogit
         )
+        let probabilityMassRank = includesProbabilityMassRank
+            ? min(1, max(0, (moreLikelyWeight + tiedWeight / 2) / normalizer))
+            : nil
         let temperatureNormalizations = zip(
             vocabularyTemperatures,
             temperatureNormalizers
@@ -529,6 +545,7 @@ extension LlamaEngine {
             LlamaTokenVocabularyStatistics(
                 expectedLogProbability: expectedLogProbability,
                 logProbabilityVariance: logProbabilityVariance,
+                probabilityMassRank: probabilityMassRank,
                 temperatureNormalizations: temperatureNormalizations
             )
         )

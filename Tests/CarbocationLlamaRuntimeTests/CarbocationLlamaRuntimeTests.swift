@@ -2619,6 +2619,7 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
         XCTAssertNil(options.vocabularyStatistics)
         XCTAssertNil(likelihood.vocabularyStatistics)
+        XCTAssertFalse(LlamaVocabularyStatisticsOptions().includesProbabilityMassRank)
     }
 
     func testCalgacusAdvancedMetricsPreserveLikelihoodAndSummarizeVocabulary() throws {
@@ -2630,7 +2631,8 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             try LlamaEngine.calgacusTokenMetrics(
                 of: 0,
                 in: $0,
-                vocabularyTemperatures: [0.5, 1, 2]
+                vocabularyTemperatures: [0.5, 1, 2],
+                includesProbabilityMassRank: true
             )
         }
 
@@ -2660,6 +2662,13 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
         XCTAssertEqual(statistics.entropy, -expectedLogProbability, accuracy: 0.000_000_000_001)
         XCTAssertEqual(statistics.logProbabilityVariance, variance, accuracy: 0.000_000_000_001)
+        let targetProbability = probabilities[0]
+        let moreLikelyProbability = probabilities[1] + probabilities[2]
+        XCTAssertEqual(
+            try XCTUnwrap(statistics.probabilityMassRank),
+            moreLikelyProbability + targetProbability / 2,
+            accuracy: 0.000_000_000_001
+        )
         XCTAssertEqual(
             statistics.logProbabilityStandardDeviation,
             sqrt(variance),
@@ -2679,6 +2688,35 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                 accuracy: 0.000_000_000_001
             )
         }
+    }
+
+    func testCalgacusProbabilityMassRankIsOptInAndHandlesTies() throws {
+        let logits: [Float] = [0, 1, 1, -1]
+        let disabled = try logits.withUnsafeBufferPointer {
+            try LlamaEngine.calgacusTokenMetrics(
+                of: 1,
+                in: $0,
+                vocabularyTemperatures: []
+            )
+        }
+        let enabled = try logits.withUnsafeBufferPointer {
+            try LlamaEngine.calgacusTokenMetrics(
+                of: 1,
+                in: $0,
+                vocabularyTemperatures: [],
+                includesProbabilityMassRank: true
+            )
+        }
+
+        XCTAssertNil(disabled.vocabularyStatistics?.probabilityMassRank)
+        let maxLogit = Double(logits.max() ?? 0)
+        let weights = logits.map { exp(Double($0) - maxLogit) }
+        let expected = (weights[1] + weights[2]) / 2 / weights.reduce(0, +)
+        XCTAssertEqual(
+            try XCTUnwrap(enabled.vocabularyStatistics?.probabilityMassRank),
+            expected,
+            accuracy: 0.000_000_000_001
+        )
     }
 
     func testCalgacusTemperatureValidationRejectsInvalidAndNormalizesOrder() throws {
@@ -3058,6 +3096,11 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         let curvatureOptions = LlamaTokenLikelihoodOptions(
             vocabularyStatistics: LlamaVocabularyStatisticsOptions()
         )
+        let probabilityMassRankOptions = LlamaTokenLikelihoodOptions(
+            vocabularyStatistics: LlamaVocabularyStatisticsOptions(
+                includesProbabilityMassRank: true
+            )
+        )
         let temperatureOptions = LlamaTokenLikelihoodOptions(
             vocabularyStatistics: LlamaVocabularyStatisticsOptions(
                 temperatureNormalizationTemperatures: [0.6, 0.8, 1.2]
@@ -3068,13 +3111,15 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
 
         var disabledDurations: [TimeInterval] = []
         var curvatureDurations: [TimeInterval] = []
+        var probabilityMassRankDurations: [TimeInterval] = []
         var temperatureDurations: [TimeInterval] = []
         var disabledResults: [LlamaTokenLikelihood] = []
         var curvatureResults: [LlamaTokenLikelihood] = []
+        var probabilityMassRankResults: [LlamaTokenLikelihood] = []
         var temperatureResults: [LlamaTokenLikelihood] = []
 
         for iteration in 0..<3 {
-            let modes = iteration.isMultiple(of: 2) ? [0, 1, 2] : [2, 1, 0]
+            let modes = iteration.isMultiple(of: 2) ? [0, 1, 2, 3] : [3, 2, 1, 0]
             for mode in modes {
                 let startedAt = Date()
                 switch mode {
@@ -3087,6 +3132,12 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
                         options: curvatureOptions
                     )
                     curvatureDurations.append(Date().timeIntervalSince(startedAt))
+                case 2:
+                    probabilityMassRankResults = try await engine.tokenLogLikelihoods(
+                        for: text,
+                        options: probabilityMassRankOptions
+                    )
+                    probabilityMassRankDurations.append(Date().timeIntervalSince(startedAt))
                 default:
                     temperatureResults = try await engine.tokenLogLikelihoods(
                         for: text,
@@ -3098,15 +3149,24 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         }
 
         XCTAssertEqual(disabledResults.count, curvatureResults.count)
+        XCTAssertEqual(disabledResults.count, probabilityMassRankResults.count)
         XCTAssertEqual(disabledResults.count, temperatureResults.count)
         for index in disabledResults.indices {
             let disabled = disabledResults[index]
             let curvature = curvatureResults[index]
+            let probabilityMassRank = probabilityMassRankResults[index]
             let temperature = temperatureResults[index]
             XCTAssertNil(disabled.vocabularyStatistics)
             XCTAssertEqual(curvature.tokenID, disabled.tokenID)
             XCTAssertEqual(curvature.rank, disabled.rank)
             XCTAssertEqual(curvature.logProbability, disabled.logProbability, accuracy: 0.000_000_000_001)
+            XCTAssertEqual(probabilityMassRank.tokenID, disabled.tokenID)
+            XCTAssertEqual(probabilityMassRank.rank, disabled.rank)
+            XCTAssertEqual(
+                probabilityMassRank.logProbability,
+                disabled.logProbability,
+                accuracy: 0.000_000_000_001
+            )
             XCTAssertEqual(temperature.tokenID, disabled.tokenID)
             XCTAssertEqual(temperature.rank, disabled.rank)
             XCTAssertEqual(temperature.logProbability, disabled.logProbability, accuracy: 0.000_000_000_001)
@@ -3114,6 +3174,11 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
             XCTAssertTrue(curvatureStatistics.expectedLogProbability.isFinite)
             XCTAssertGreaterThanOrEqual(curvatureStatistics.logProbabilityVariance, 0)
             XCTAssertTrue(curvatureStatistics.temperatureNormalizations.isEmpty)
+            XCTAssertNil(curvatureStatistics.probabilityMassRank)
+            let massRankStatistics = try XCTUnwrap(probabilityMassRank.vocabularyStatistics)
+            let massRank = try XCTUnwrap(massRankStatistics.probabilityMassRank)
+            XCTAssertTrue((0...1).contains(massRank))
+            XCTAssertTrue(massRankStatistics.temperatureNormalizations.isEmpty)
             let temperatureStatistics = try XCTUnwrap(temperature.vocabularyStatistics)
             XCTAssertEqual(temperatureStatistics.temperatureNormalizations.count, 3)
         }
@@ -3124,15 +3189,19 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         }
         let disabledMedian = median(disabledDurations)
         let curvatureMedian = median(curvatureDurations)
+        let probabilityMassRankMedian = median(probabilityMassRankDurations)
         let temperatureMedian = median(temperatureDurations)
         print(
             String(
                 format: "Likelihood statistics live timing: tokens=%d disabled=%.4fs "
-                    + "curvature=%.4fs (%+.1f%%) curvature+temperatures=%.4fs (%+.1f%%)",
+                    + "curvature=%.4fs (%+.1f%%) curvature+mass-rank=%.4fs (%+.1f%%) "
+                    + "curvature+temperatures=%.4fs (%+.1f%%)",
                 disabledResults.count,
                 disabledMedian,
                 curvatureMedian,
                 (curvatureMedian / disabledMedian - 1) * 100,
+                probabilityMassRankMedian,
+                (probabilityMassRankMedian / disabledMedian - 1) * 100,
                 temperatureMedian,
                 (temperatureMedian / disabledMedian - 1) * 100
             )

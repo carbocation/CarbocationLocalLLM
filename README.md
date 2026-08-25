@@ -740,7 +740,7 @@ without retaining or returning vocabulary logits:
 ```swift
 let options = LlamaTokenLikelihoodOptions(
     vocabularyStatistics: LlamaVocabularyStatisticsOptions(
-        temperatureNormalizationTemperatures: [0.6, 0.8, 1.2]
+        includesProbabilityMassRank: true
     )
 )
 let tokens = try await engine.tokenLogLikelihoods(for: text, options: options)
@@ -767,10 +767,18 @@ Fast-DetectGPT-style conditional-curvature statistic. Each requested
 by temperature-decoding tests such as TempTest. Temperatures must be finite and
 greater than zero and are returned deduplicated in ascending order.
 
+When `includesProbabilityMassRank` is enabled, `probabilityMassRank` reports
+the mass assigned to tokens more likely than the observed token, plus half the
+mass tied with it. This midpoint tie rule gives a deterministic value in
+`[0, 1]`; an ancestral sample from the scoring distribution has an approximately
+uniform mass-rank distribution, so the scalar supports model-native head/tail
+diagnostics without exposing the vocabulary.
+
 When enabled, entropy and log-probability moments are fused into likelihood
-scoring's existing vocabulary-normalization scan. Each non-unit requested
-temperature adds one scalar exponential per finite vocabulary logit. The raw
-logits remain owned by llama.cpp and are never copied into result values.
+scoring's existing vocabulary-normalization scan. Probability-mass rank adds
+only a comparison and conditional accumulation within that pass. Each non-unit
+requested temperature adds one scalar exponential per finite vocabulary logit.
+The raw logits remain owned by llama.cpp and are never copied into result values.
 
 ### How the binary release works
 

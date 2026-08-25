@@ -18,9 +18,17 @@ public struct LlamaVocabularyStatisticsOptions: Hashable, Sendable {
     /// `log(sum_v p(v)^(1 / temperature))`. Values are validated when scoring,
     /// then deduplicated and evaluated in ascending order.
     public var temperatureNormalizationTemperatures: [Double]
+    /// Whether to calculate the midpoint cumulative probability mass ahead of
+    /// the observed token. This is a probability-aware alternative to raw
+    /// vocabulary rank with a model-native uniform baseline.
+    public var includesProbabilityMassRank: Bool
 
-    public init(temperatureNormalizationTemperatures: [Double] = []) {
+    public init(
+        temperatureNormalizationTemperatures: [Double] = [],
+        includesProbabilityMassRank: Bool = false
+    ) {
         self.temperatureNormalizationTemperatures = temperatureNormalizationTemperatures
+        self.includesProbabilityMassRank = includesProbabilityMassRank
     }
 }
 
@@ -54,6 +62,9 @@ public struct LlamaTokenVocabularyStatistics: Hashable, Sendable {
     public var expectedLogProbability: Double
     /// Variance of log probability under the raw model distribution.
     public var logProbabilityVariance: Double
+    /// Probability mass assigned to tokens more likely than the observed
+    /// token, plus half the mass tied with it. Values are in `[0, 1]`.
+    public var probabilityMassRank: Double?
     /// Requested temperature-normalization terms, sorted by temperature.
     public var temperatureNormalizations: [LlamaTemperatureNormalization]
 
@@ -68,10 +79,12 @@ public struct LlamaTokenVocabularyStatistics: Hashable, Sendable {
     public init(
         expectedLogProbability: Double,
         logProbabilityVariance: Double,
+        probabilityMassRank: Double? = nil,
         temperatureNormalizations: [LlamaTemperatureNormalization] = []
     ) {
         self.expectedLogProbability = expectedLogProbability
         self.logProbabilityVariance = logProbabilityVariance
+        self.probabilityMassRank = probabilityMassRank
         self.temperatureNormalizations = temperatureNormalizations
     }
 
