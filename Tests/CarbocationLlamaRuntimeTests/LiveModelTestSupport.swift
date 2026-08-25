@@ -7,6 +7,7 @@ enum LiveModelTestProfile {
     case visionKVReset
     case audioTranscription
     case calgacusRoundTrip
+    case likelihoodStatistics
 
     var name: String {
         switch self {
@@ -20,6 +21,8 @@ enum LiveModelTestProfile {
             return "audio-transcription"
         case .calgacusRoundTrip:
             return "calgacus-round-trip"
+        case .likelihoodStatistics:
+            return "likelihood-statistics"
         }
     }
 
@@ -35,6 +38,8 @@ enum LiveModelTestProfile {
             return "audio input and transcription through a compatible multimodal projector"
         case .calgacusRoundTrip:
             return "text generation with the logits needed for a Calgacus encode/decode round trip"
+        case .likelihoodStatistics:
+            return "token likelihood scoring with opt-in compact full-vocabulary statistics"
         }
     }
 }

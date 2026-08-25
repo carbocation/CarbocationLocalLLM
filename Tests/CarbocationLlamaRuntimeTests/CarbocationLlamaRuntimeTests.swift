@@ -2606,6 +2606,97 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testCalgacusTokenMetricsSkipVocabularyStatisticsByDefault() throws {
+        let likelihood = LlamaTokenLikelihood(
+            index: 0,
+            tokenID: 1,
+            tokenBytes: Data("token".utf8),
+            byteRange: 0..<5,
+            logProbability: -0.25,
+            rank: 2
+        )
+        let options = LlamaTokenLikelihoodOptions()
+
+        XCTAssertNil(options.vocabularyStatistics)
+        XCTAssertNil(likelihood.vocabularyStatistics)
+    }
+
+    func testCalgacusAdvancedMetricsPreserveLikelihoodAndSummarizeVocabulary() throws {
+        let logits: [Float] = [0.5, 2.0, 2.0, -1.0]
+        let basic = try logits.withUnsafeBufferPointer {
+            try LlamaEngine.calgacusTokenMetrics(of: 0, in: $0)
+        }
+        let advanced = try logits.withUnsafeBufferPointer {
+            try LlamaEngine.calgacusTokenMetrics(
+                of: 0,
+                in: $0,
+                vocabularyTemperatures: [0.5, 1, 2]
+            )
+        }
+
+        XCTAssertEqual(advanced.rank, basic.rank)
+        XCTAssertEqual(
+            advanced.negativeLogProbability,
+            basic.negativeLogProbability,
+            accuracy: 0.000_000_000_001
+        )
+        let statistics = try XCTUnwrap(advanced.vocabularyStatistics)
+
+        let maxLogit = Double(logits.max() ?? 0)
+        let weights = logits.map { exp(Double($0) - maxLogit) }
+        let normalizer = weights.reduce(0, +)
+        let probabilities = weights.map { $0 / normalizer }
+        let logProbabilities = probabilities.map(log)
+        let expectedLogProbability = zip(probabilities, logProbabilities)
+            .reduce(0) { $0 + $1.0 * $1.1 }
+        let variance = zip(probabilities, logProbabilities).reduce(0) {
+            $0 + $1.0 * pow($1.1 - expectedLogProbability, 2)
+        }
+
+        XCTAssertEqual(
+            statistics.expectedLogProbability,
+            expectedLogProbability,
+            accuracy: 0.000_000_000_001
+        )
+        XCTAssertEqual(statistics.entropy, -expectedLogProbability, accuracy: 0.000_000_000_001)
+        XCTAssertEqual(statistics.logProbabilityVariance, variance, accuracy: 0.000_000_000_001)
+        XCTAssertEqual(
+            statistics.logProbabilityStandardDeviation,
+            sqrt(variance),
+            accuracy: 0.000_000_000_001
+        )
+        XCTAssertEqual(statistics.temperatureNormalizations.map(\.temperature), [0.5, 1, 2])
+        for temperature in [0.5, 1.0, 2.0] {
+            let normalization = try XCTUnwrap(
+                statistics.temperatureNormalization(at: temperature)
+            )
+            let expectedLogNormalizer = log(
+                probabilities.reduce(0) { $0 + pow($1, 1 / temperature) }
+            )
+            XCTAssertEqual(
+                normalization.logNormalizer,
+                expectedLogNormalizer,
+                accuracy: 0.000_000_000_001
+            )
+        }
+    }
+
+    func testCalgacusTemperatureValidationRejectsInvalidAndNormalizesOrder() throws {
+        XCTAssertEqual(
+            try LlamaEngine.calgacusValidatedTemperatures([1, 0.5, 1, 2]),
+            [0.5, 1, 2]
+        )
+        for temperature in [0, -1, .infinity, .nan] {
+            XCTAssertThrowsError(
+                try LlamaEngine.calgacusValidatedTemperatures([temperature])
+            ) { error in
+                guard case LlamaVocabularyStatisticsError.invalidTemperature = error else {
+                    return XCTFail("Expected invalidTemperature, got \(error)")
+                }
+            }
+        }
+    }
+
     func testLikelihoodBatchSizeBoundsLogitsMemoryAndHonorsOverrides() {
         XCTAssertEqual(
             LlamaEngine.calgacusLikelihoodBatchSize(
@@ -2943,6 +3034,110 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         XCTAssertEqual(decoded.secretText, secret)
+        await engine.unload()
+    }
+
+    func testLikelihoodStatisticsLiveParityAndOverheadWhenModelPathProvided() async throws {
+        let path = try LiveModelTestPolicy.requiredReadablePath(
+            "CLLM_LIKELIHOOD_TEST_MODEL_PATH",
+            for: .likelihoodStatistics
+        )
+        let engine = LlamaEngine(configuration: LlamaEngineConfiguration(
+            batchSizeLimit: 512,
+            promptReserveTokens: 0
+        ))
+        _ = try await engine.load(
+            modelAt: URL(fileURLWithPath: path),
+            displayName: "Likelihood Statistics Benchmark",
+            requestedContext: 2_048
+        )
+
+        let paragraph = "At dusk, the garden settled into shadow while a late bus turned the corner. "
+            + "A causal language model assigns every next token a distribution conditioned on its context."
+        let text = Array(repeating: paragraph, count: 8).joined(separator: " ")
+        let curvatureOptions = LlamaTokenLikelihoodOptions(
+            vocabularyStatistics: LlamaVocabularyStatisticsOptions()
+        )
+        let temperatureOptions = LlamaTokenLikelihoodOptions(
+            vocabularyStatistics: LlamaVocabularyStatisticsOptions(
+                temperatureNormalizationTemperatures: [0.6, 0.8, 1.2]
+            )
+        )
+
+        _ = try await engine.tokenLogLikelihoods(for: text)
+
+        var disabledDurations: [TimeInterval] = []
+        var curvatureDurations: [TimeInterval] = []
+        var temperatureDurations: [TimeInterval] = []
+        var disabledResults: [LlamaTokenLikelihood] = []
+        var curvatureResults: [LlamaTokenLikelihood] = []
+        var temperatureResults: [LlamaTokenLikelihood] = []
+
+        for iteration in 0..<3 {
+            let modes = iteration.isMultiple(of: 2) ? [0, 1, 2] : [2, 1, 0]
+            for mode in modes {
+                let startedAt = Date()
+                switch mode {
+                case 0:
+                    disabledResults = try await engine.tokenLogLikelihoods(for: text)
+                    disabledDurations.append(Date().timeIntervalSince(startedAt))
+                case 1:
+                    curvatureResults = try await engine.tokenLogLikelihoods(
+                        for: text,
+                        options: curvatureOptions
+                    )
+                    curvatureDurations.append(Date().timeIntervalSince(startedAt))
+                default:
+                    temperatureResults = try await engine.tokenLogLikelihoods(
+                        for: text,
+                        options: temperatureOptions
+                    )
+                    temperatureDurations.append(Date().timeIntervalSince(startedAt))
+                }
+            }
+        }
+
+        XCTAssertEqual(disabledResults.count, curvatureResults.count)
+        XCTAssertEqual(disabledResults.count, temperatureResults.count)
+        for index in disabledResults.indices {
+            let disabled = disabledResults[index]
+            let curvature = curvatureResults[index]
+            let temperature = temperatureResults[index]
+            XCTAssertNil(disabled.vocabularyStatistics)
+            XCTAssertEqual(curvature.tokenID, disabled.tokenID)
+            XCTAssertEqual(curvature.rank, disabled.rank)
+            XCTAssertEqual(curvature.logProbability, disabled.logProbability, accuracy: 0.000_000_000_001)
+            XCTAssertEqual(temperature.tokenID, disabled.tokenID)
+            XCTAssertEqual(temperature.rank, disabled.rank)
+            XCTAssertEqual(temperature.logProbability, disabled.logProbability, accuracy: 0.000_000_000_001)
+            let curvatureStatistics = try XCTUnwrap(curvature.vocabularyStatistics)
+            XCTAssertTrue(curvatureStatistics.expectedLogProbability.isFinite)
+            XCTAssertGreaterThanOrEqual(curvatureStatistics.logProbabilityVariance, 0)
+            XCTAssertTrue(curvatureStatistics.temperatureNormalizations.isEmpty)
+            let temperatureStatistics = try XCTUnwrap(temperature.vocabularyStatistics)
+            XCTAssertEqual(temperatureStatistics.temperatureNormalizations.count, 3)
+        }
+
+        func median(_ values: [TimeInterval]) -> TimeInterval {
+            let sorted = values.sorted()
+            return sorted[sorted.count / 2]
+        }
+        let disabledMedian = median(disabledDurations)
+        let curvatureMedian = median(curvatureDurations)
+        let temperatureMedian = median(temperatureDurations)
+        print(
+            String(
+                format: "Likelihood statistics live timing: tokens=%d disabled=%.4fs "
+                    + "curvature=%.4fs (%+.1f%%) curvature+temperatures=%.4fs (%+.1f%%)",
+                disabledResults.count,
+                disabledMedian,
+                curvatureMedian,
+                (curvatureMedian / disabledMedian - 1) * 100,
+                temperatureMedian,
+                (temperatureMedian / disabledMedian - 1) * 100
+            )
+        )
+
         await engine.unload()
     }
 

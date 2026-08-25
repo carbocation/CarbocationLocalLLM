@@ -732,6 +732,46 @@ Each result contains the token id, exact rendered bytes, its range in the input'
 
 Known text is scored with bounded teacher-forcing batches rather than one autoregressive decode per token. The runtime requests logits for every prediction position in each batch, scans those buffers without per-token copies, and caps the transient logits matrix at approximately 64 MiB. Progress advances after each completed inference batch. Exact floating-point scores can vary slightly with batch shape, backend, and quantization, so persist the model and runtime identity alongside scores that need to be compared over time.
 
+Full-vocabulary summaries are opt-in. Existing calls perform no entropy, moment,
+or temperature-normalization work and return `nil` in each token's
+`vocabularyStatistics`. Advanced callers can request compact scalar summaries
+without retaining or returning vocabulary logits:
+
+```swift
+let options = LlamaTokenLikelihoodOptions(
+    vocabularyStatistics: LlamaVocabularyStatisticsOptions(
+        temperatureNormalizationTemperatures: [0.6, 0.8, 1.2]
+    )
+)
+let tokens = try await engine.tokenLogLikelihoods(for: text, options: options)
+
+let observedLogProbability = tokens.reduce(0) { $0 + $1.logProbability }
+let expectedLogProbability = tokens.reduce(0) {
+    $0 + ($1.vocabularyStatistics?.expectedLogProbability ?? 0)
+}
+let logProbabilityVariance = tokens.reduce(0) {
+    $0 + ($1.vocabularyStatistics?.logProbabilityVariance ?? 0)
+}
+let conditionalCurvature = logProbabilityVariance > 0
+    ? (observedLogProbability - expectedLogProbability) / sqrt(logProbabilityVariance)
+    : 0
+```
+
+`expectedLogProbability` is the full-distribution expectation
+`sum_v p(v) log p(v)`; its negation is entropy in nats.
+`logProbabilityVariance` is `Var_p(log p(v))`. Together with the observed token
+log probability, these are sufficient for the same-model analytical form of a
+Fast-DetectGPT-style conditional-curvature statistic. Each requested
+`LlamaTemperatureNormalization` contains
+`log(sum_v p(v)^(1 / temperature))`, the per-position normalization input used
+by temperature-decoding tests such as TempTest. Temperatures must be finite and
+greater than zero and are returned deduplicated in ascending order.
+
+When enabled, entropy and log-probability moments are fused into likelihood
+scoring's existing vocabulary-normalization scan. Each non-unit requested
+temperature adds one scalar exponential per finite vocabulary logit. The raw
+logits remain owned by llama.cpp and are never copied into result values.
+
 ### How the binary release works
 
 For a published release tag such as `v0.3.0`, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`, links the products you chose, and builds your app.

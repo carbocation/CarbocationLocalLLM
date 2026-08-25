@@ -1,5 +1,87 @@
 import Foundation
 
+/// Optional work performed while scoring known text. The default value leaves
+/// full-vocabulary statistics disabled and preserves ordinary likelihood
+/// scoring behavior.
+public struct LlamaTokenLikelihoodOptions: Hashable, Sendable {
+    public var vocabularyStatistics: LlamaVocabularyStatisticsOptions?
+
+    public init(vocabularyStatistics: LlamaVocabularyStatisticsOptions? = nil) {
+        self.vocabularyStatistics = vocabularyStatistics
+    }
+}
+
+/// Compact summaries derived from each full next-token distribution. Raw
+/// vocabulary logits are never retained or returned.
+public struct LlamaVocabularyStatisticsOptions: Hashable, Sendable {
+    /// Temperatures for which to calculate the log normalization term
+    /// `log(sum_v p(v)^(1 / temperature))`. Values are validated when scoring,
+    /// then deduplicated and evaluated in ascending order.
+    public var temperatureNormalizationTemperatures: [Double]
+
+    public init(temperatureNormalizationTemperatures: [Double] = []) {
+        self.temperatureNormalizationTemperatures = temperatureNormalizationTemperatures
+    }
+}
+
+public enum LlamaVocabularyStatisticsError: Error, LocalizedError, Hashable, Sendable {
+    case invalidTemperature(Double)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidTemperature(let temperature):
+            return "Vocabulary-statistics temperatures must be finite and greater than zero; received \(temperature)."
+        }
+    }
+}
+
+/// One temperature-dependent normalization term from the model's raw
+/// next-token distribution.
+public struct LlamaTemperatureNormalization: Hashable, Sendable {
+    public var temperature: Double
+    public var logNormalizer: Double
+
+    public init(temperature: Double, logNormalizer: Double) {
+        self.temperature = temperature
+        self.logNormalizer = logNormalizer
+    }
+}
+
+/// Scalar statistics for one full next-token vocabulary distribution.
+public struct LlamaTokenVocabularyStatistics: Hashable, Sendable {
+    /// Expected log probability of a token drawn from the raw model
+    /// distribution. Its negation is the distribution entropy in nats.
+    public var expectedLogProbability: Double
+    /// Variance of log probability under the raw model distribution.
+    public var logProbabilityVariance: Double
+    /// Requested temperature-normalization terms, sorted by temperature.
+    public var temperatureNormalizations: [LlamaTemperatureNormalization]
+
+    public var entropy: Double {
+        -expectedLogProbability
+    }
+
+    public var logProbabilityStandardDeviation: Double {
+        sqrt(max(0, logProbabilityVariance))
+    }
+
+    public init(
+        expectedLogProbability: Double,
+        logProbabilityVariance: Double,
+        temperatureNormalizations: [LlamaTemperatureNormalization] = []
+    ) {
+        self.expectedLogProbability = expectedLogProbability
+        self.logProbabilityVariance = logProbabilityVariance
+        self.temperatureNormalizations = temperatureNormalizations
+    }
+
+    public func temperatureNormalization(
+        at temperature: Double
+    ) -> LlamaTemperatureNormalization? {
+        temperatureNormalizations.first { $0.temperature == temperature }
+    }
+}
+
 /// The loaded llama model's likelihood for one observed token, conditioned on
 /// every preceding token in the scored text.
 public struct LlamaTokenLikelihood: Hashable, Sendable, Identifiable {
@@ -13,6 +95,8 @@ public struct LlamaTokenLikelihood: Hashable, Sendable, Identifiable {
     public var logProbability: Double
     /// One-based rank in the model vocabulary, ordered by descending logit.
     public var rank: Int
+    /// Compact full-vocabulary summaries when explicitly requested.
+    public var vocabularyStatistics: LlamaTokenVocabularyStatistics?
 
     public var id: Int { index }
 
@@ -35,7 +119,8 @@ public struct LlamaTokenLikelihood: Hashable, Sendable, Identifiable {
         tokenBytes: Data,
         byteRange: Range<Int>,
         logProbability: Double,
-        rank: Int
+        rank: Int,
+        vocabularyStatistics: LlamaTokenVocabularyStatistics? = nil
     ) {
         self.index = index
         self.tokenID = tokenID
@@ -43,6 +128,7 @@ public struct LlamaTokenLikelihood: Hashable, Sendable, Identifiable {
         self.byteRange = byteRange
         self.logProbability = logProbability
         self.rank = rank
+        self.vocabularyStatistics = vocabularyStatistics
     }
 }
 

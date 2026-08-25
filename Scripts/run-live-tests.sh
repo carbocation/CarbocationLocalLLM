@@ -12,6 +12,7 @@ Usage:
   Scripts/run-live-tests.sh vision-kv-reset MODEL MMPROJ
   Scripts/run-live-tests.sh audio-transcription MODEL MMPROJ AUDIO_SAMPLE
   Scripts/run-live-tests.sh calgacus-round-trip MODEL
+  Scripts/run-live-tests.sh likelihood-statistics MODEL
   Scripts/run-live-tests.sh apple-intelligence
 
 Capability contracts:
@@ -25,6 +26,8 @@ Capability contracts:
     Audio input and transcription through the supplied compatible multimodal projector.
   calgacus-round-trip
     Text generation with the logits needed for a Calgacus encode/decode round trip.
+  likelihood-statistics
+    Token likelihood scoring with disabled/enabled parity and timing comparisons.
   apple-intelligence
     Apple Intelligence availability, preflight, and generation on an eligible system.
 
@@ -61,6 +64,7 @@ shift
 
 unset LLAMA_TEST_MODEL_PATH
 unset CALGACUS_TEST_MODEL_PATH
+unset CLLM_LIKELIHOOD_TEST_MODEL_PATH
 unset CLLM_COMMON_CHAT_LIVE_MODEL_PATH
 unset CLLM_VISION_MODEL_PATH
 unset CLLM_VISION_MMPROJ_PATH
@@ -110,6 +114,12 @@ case "$PROFILE" in
     require_file MODEL "$1"
     export CALGACUS_TEST_MODEL_PATH="$1"
     FILTERS+=("CarbocationLlamaRuntimeTests/testCalgacusLiveRoundTripWhenModelPathProvided")
+    ;;
+  likelihood-statistics)
+    require_argument_count 1 "$#"
+    require_file MODEL "$1"
+    export CLLM_LIKELIHOOD_TEST_MODEL_PATH="$1"
+    FILTERS+=("CarbocationLlamaRuntimeTests/testLikelihoodStatisticsLiveParityAndOverheadWhenModelPathProvided")
     ;;
   apple-intelligence)
     require_argument_count 0 "$#"

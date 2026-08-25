@@ -12,6 +12,24 @@ extension LlamaEngine {
     ) async throws -> [LlamaTokenLikelihood] {
         try await tokenLogLikelihoods(
             for: text,
+            options: LlamaTokenLikelihoodOptions(),
+            maximumBatchTokenCount: nil,
+            onProgress: onProgress
+        )
+    }
+
+    /// Scores known text and optionally returns compact statistics from each
+    /// full next-token vocabulary distribution. The default overload above
+    /// performs no full-vocabulary summary work beyond ordinary likelihood and
+    /// rank calculation.
+    public func tokenLogLikelihoods(
+        for text: String,
+        options: LlamaTokenLikelihoodOptions,
+        onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
+    ) async throws -> [LlamaTokenLikelihood] {
+        try await tokenLogLikelihoods(
+            for: text,
+            options: options,
             maximumBatchTokenCount: nil,
             onProgress: onProgress
         )
@@ -22,8 +40,27 @@ extension LlamaEngine {
         maximumBatchTokenCount: Int?,
         onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
     ) async throws -> [LlamaTokenLikelihood] {
+        try await tokenLogLikelihoods(
+            for: text,
+            options: LlamaTokenLikelihoodOptions(),
+            maximumBatchTokenCount: maximumBatchTokenCount,
+            onProgress: onProgress
+        )
+    }
+
+    func tokenLogLikelihoods(
+        for text: String,
+        options: LlamaTokenLikelihoodOptions,
+        maximumBatchTokenCount: Int?,
+        onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
+    ) async throws -> [LlamaTokenLikelihood] {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
+        }
+        let vocabularyTemperatures = try options.vocabularyStatistics.map {
+            try Self.calgacusValidatedTemperatures(
+                $0.temperatureNormalizationTemperatures
+            )
         }
         try acquireGenerationLease()
         defer { endGenerationLease() }
@@ -113,12 +150,28 @@ extension LlamaEngine {
                     count: vocabularySize
                 )
 
-                let metrics: (rank: Int, negativeLogProbability: Double)
+                let rank: Int
+                let negativeLogProbability: Double
+                let vocabularyStatistics: LlamaTokenVocabularyStatistics?
                 do {
-                    metrics = try Self.calgacusTokenMetrics(
-                        of: token,
-                        in: logitsBuffer
-                    )
+                    if let vocabularyTemperatures {
+                        let metrics = try Self.calgacusTokenMetrics(
+                            of: token,
+                            in: logitsBuffer,
+                            vocabularyTemperatures: vocabularyTemperatures
+                        )
+                        rank = metrics.rank
+                        negativeLogProbability = metrics.negativeLogProbability
+                        vocabularyStatistics = metrics.vocabularyStatistics
+                    } else {
+                        let metrics = try Self.calgacusTokenMetrics(
+                            of: token,
+                            in: logitsBuffer
+                        )
+                        rank = metrics.rank
+                        negativeLogProbability = metrics.negativeLogProbability
+                        vocabularyStatistics = nil
+                    }
                 } catch CalgacusError.invalidTokenID(let tokenID, let vocabularySize) {
                     throw LlamaTokenLikelihoodError.invalidTokenID(
                         tokenID,
@@ -134,8 +187,9 @@ extension LlamaEngine {
                     tokenID: token,
                     tokenBytes: tokenBytes,
                     byteRange: byteRange,
-                    logProbability: -metrics.negativeLogProbability,
-                    rank: metrics.rank
+                    logProbability: -negativeLogProbability,
+                    rank: rank,
+                    vocabularyStatistics: vocabularyStatistics
                 ))
             }
 
@@ -379,6 +433,116 @@ extension LlamaEngine {
             rank,
             maxLogit + log(normalizer) - Double(targetLogit)
         )
+    }
+
+    static func calgacusTokenMetrics(
+        of tokenID: Int32,
+        in logits: UnsafeBufferPointer<Float>,
+        vocabularyTemperatures: [Double]
+    ) throws -> (
+        rank: Int,
+        negativeLogProbability: Double,
+        vocabularyStatistics: LlamaTokenVocabularyStatistics?
+    ) {
+        guard tokenID >= 0, Int(tokenID) < logits.count else {
+            throw CalgacusError.invalidTokenID(tokenID, vocabularySize: logits.count)
+        }
+
+        let targetIndex = Int(tokenID)
+        let targetLogit = calgacusComparableLogit(logits[targetIndex])
+        var rank = 1
+        var maxLogit = -Double.infinity
+
+        for index in logits.indices {
+            let logit = calgacusComparableLogit(logits[index])
+            if index != targetIndex,
+               logit > targetLogit || (logit == targetLogit && index < targetIndex) {
+                rank += 1
+            }
+            if logit.isFinite {
+                maxLogit = max(maxLogit, Double(logit))
+            }
+        }
+
+        guard maxLogit.isFinite else {
+            return (rank, .infinity, nil)
+        }
+
+        var normalizer = 0.0
+        var weightedShiftedLogit = 0.0
+        var weightedSquaredShiftedLogit = 0.0
+        var temperatureNormalizers = [Double](
+            repeating: 0,
+            count: vocabularyTemperatures.count
+        )
+
+        for rawLogit in logits {
+            let logit = calgacusComparableLogit(rawLogit)
+            guard logit.isFinite else { continue }
+
+            let shiftedLogit = Double(logit) - maxLogit
+            let weight = exp(shiftedLogit)
+            normalizer += weight
+            weightedShiftedLogit += weight * shiftedLogit
+            weightedSquaredShiftedLogit += weight * shiftedLogit * shiftedLogit
+            for index in vocabularyTemperatures.indices
+                where vocabularyTemperatures[index] != 1
+            {
+                temperatureNormalizers[index] += exp(
+                    shiftedLogit / vocabularyTemperatures[index]
+                )
+            }
+        }
+        guard normalizer > 0 else {
+            return (rank, .infinity, nil)
+        }
+
+        let logNormalizer = log(normalizer)
+        let expectedShiftedLogit = weightedShiftedLogit / normalizer
+        let expectedSquaredShiftedLogit = weightedSquaredShiftedLogit / normalizer
+        let expectedLogProbability = expectedShiftedLogit - logNormalizer
+        let logProbabilityVariance = max(
+            0,
+            expectedSquaredShiftedLogit - expectedShiftedLogit * expectedShiftedLogit
+        )
+        let temperatureNormalizations = zip(
+            vocabularyTemperatures,
+            temperatureNormalizers
+        ).map { temperature, sum in
+            LlamaTemperatureNormalization(
+                temperature: temperature,
+                logNormalizer: temperature == 1
+                    ? 0
+                    : log(sum) - logNormalizer / temperature
+            )
+        }
+        let negativeLogProbability: Double
+        if targetLogit.isFinite {
+            negativeLogProbability = maxLogit + logNormalizer - Double(targetLogit)
+        } else {
+            negativeLogProbability = .infinity
+        }
+
+        return (
+            rank,
+            negativeLogProbability,
+            LlamaTokenVocabularyStatistics(
+                expectedLogProbability: expectedLogProbability,
+                logProbabilityVariance: logProbabilityVariance,
+                temperatureNormalizations: temperatureNormalizations
+            )
+        )
+    }
+
+    static func calgacusValidatedTemperatures(_ temperatures: [Double]) throws -> [Double] {
+        var uniqueTemperatures = Set<Double>()
+        for temperature in temperatures {
+            guard temperature.isFinite, temperature > 0 else {
+                throw LlamaVocabularyStatisticsError.invalidTemperature(temperature)
+            }
+            uniqueTemperatures.insert(temperature)
+        }
+        return uniqueTemperatures.sorted()
     }
 
     static func calgacusStats(for trace: [CalgacusTraceEntry]) -> CalgacusRankStats {
