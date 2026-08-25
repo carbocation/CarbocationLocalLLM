@@ -10,6 +10,18 @@ extension LlamaEngine {
         for text: String,
         onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
     ) async throws -> [LlamaTokenLikelihood] {
+        try await tokenLogLikelihoods(
+            for: text,
+            maximumBatchTokenCount: nil,
+            onProgress: onProgress
+        )
+    }
+
+    func tokenLogLikelihoods(
+        for text: String,
+        maximumBatchTokenCount: Int?,
+        onProgress: @escaping @Sendable (LlamaTokenLikelihoodProgress) async -> Void = { _ in }
+    ) async throws -> [LlamaTokenLikelihood] {
         guard let context, let vocabulary else {
             throw LLMEngineError.noModelLoaded
         }
@@ -42,55 +54,93 @@ extension LlamaEngine {
             )
         }
 
-        try prefillCalgacusContext(initialContextTokens, context: context)
+        guard let scoringInitialToken = initialContextTokens.last else {
+            throw LlamaTokenLikelihoodError.noInitialContext
+        }
+
+        // Every observed token is already known, so score with teacher forcing:
+        // [last initial token, x0, ..., x(n-2)] predicts [x0, ..., x(n-1)].
+        // Earlier initial tokens are prefetched once and retained in the KV cache.
+        try prefillCalgacusContext(Array(initialContextTokens.dropLast()), context: context)
+
+        let scoringInputs = [scoringInitialToken] + tokens.dropLast()
+        let vocabularySize = Int(llama_vocab_n_tokens(vocabulary))
+        guard vocabularySize > 0 else {
+            throw LlamaTokenLikelihoodError.logitsUnavailable
+        }
+        let scoringBatchSize = Self.calgacusLikelihoodBatchSize(
+            vocabularySize: vocabularySize,
+            contextBatchSize: Int(llama_n_batch(context)),
+            maximumBatchTokenCount: maximumBatchTokenCount
+        )
 
         var results: [LlamaTokenLikelihood] = []
         results.reserveCapacity(tokens.count)
         var renderedText = Data()
 
-        for (index, token) in tokens.enumerated() {
+        for range in Self.prefillRanges(
+            tokenCount: scoringInputs.count,
+            maxBatchSize: scoringBatchSize
+        ) {
             try Task.checkCancellation()
 
-            let logits: [Float]
-            do {
-                logits = try calgacusLogits(context: context, vocabulary: vocabulary)
-            } catch CalgacusError.logitsUnavailable {
-                throw LlamaTokenLikelihoodError.logitsUnavailable
+            var inputChunk = Array(scoringInputs[range])
+            var logitsRequests = [Int8](repeating: 1, count: inputChunk.count)
+            let decodeResult = inputChunk.withUnsafeMutableBufferPointer { inputBuffer in
+                logitsRequests.withUnsafeMutableBufferPointer { logitsBuffer in
+                    var batch = llama_batch_get_one(
+                        inputBuffer.baseAddress,
+                        Int32(inputBuffer.count)
+                    )
+                    batch.logits = logitsBuffer.baseAddress
+                    return llama_decode(context, batch)
+                }
+            }
+            guard decodeResult == 0 else {
+                throw LLMEngineError.decodeFailed
             }
 
-            let rank: Int
-            let negativeLogProbability: Double
-            do {
-                rank = try Self.calgacusRank(of: token, in: logits)
-                negativeLogProbability = try Self.calgacusNegativeLogProbability(
-                    of: token,
-                    in: logits
-                )
-            } catch CalgacusError.invalidTokenID(let tokenID, let vocabularySize) {
-                throw LlamaTokenLikelihoodError.invalidTokenID(
-                    tokenID,
-                    vocabularySize: vocabularySize
-                )
-            }
+            for localIndex in inputChunk.indices {
+                try Task.checkCancellation()
 
-            let tokenBytes = tokenToPiece(vocab: vocabulary, token: token)
-            let byteRange = renderedText.count..<(renderedText.count + tokenBytes.count)
-            renderedText.append(tokenBytes)
-            results.append(LlamaTokenLikelihood(
-                index: index,
-                tokenID: token,
-                tokenBytes: tokenBytes,
-                byteRange: byteRange,
-                logProbability: -negativeLogProbability,
-                rank: rank
-            ))
+                let index = range.lowerBound + localIndex
+                let token = tokens[index]
+                guard let logits = llama_get_logits_ith(context, Int32(localIndex)) else {
+                    throw LlamaTokenLikelihoodError.logitsUnavailable
+                }
+                let logitsBuffer = UnsafeBufferPointer(
+                    start: logits,
+                    count: vocabularySize
+                )
 
-            if index < tokens.count - 1 {
-                try decodeCalgacusToken(token, context: context)
+                let metrics: (rank: Int, negativeLogProbability: Double)
+                do {
+                    metrics = try Self.calgacusTokenMetrics(
+                        of: token,
+                        in: logitsBuffer
+                    )
+                } catch CalgacusError.invalidTokenID(let tokenID, let vocabularySize) {
+                    throw LlamaTokenLikelihoodError.invalidTokenID(
+                        tokenID,
+                        vocabularySize: vocabularySize
+                    )
+                }
+
+                let tokenBytes = tokenToPiece(vocab: vocabulary, token: token)
+                let byteRange = renderedText.count..<(renderedText.count + tokenBytes.count)
+                renderedText.append(tokenBytes)
+                results.append(LlamaTokenLikelihood(
+                    index: index,
+                    tokenID: token,
+                    tokenBytes: tokenBytes,
+                    byteRange: byteRange,
+                    logProbability: -metrics.negativeLogProbability,
+                    rank: metrics.rank
+                ))
             }
 
             await onProgress(LlamaTokenLikelihoodProgress(
-                completedTokenCount: index + 1,
+                completedTokenCount: range.upperBound,
                 totalTokenCount: tokens.count
             ))
         }
@@ -99,6 +149,23 @@ extension LlamaEngine {
             throw LlamaTokenLikelihoodError.tokenRenderingMismatch
         }
         return results
+    }
+
+    static func calgacusLikelihoodBatchSize(
+        vocabularySize: Int,
+        contextBatchSize: Int,
+        maximumBatchTokenCount: Int? = nil,
+        logitsMemoryBudget: Int = 64 * 1_024 * 1_024
+    ) -> Int {
+        let validVocabularySize = max(1, vocabularySize)
+        let (bytesPerRow, overflowed) = validVocabularySize.multipliedReportingOverflow(
+            by: MemoryLayout<Float>.stride
+        )
+        let memoryBound = overflowed
+            ? 1
+            : max(1, max(1, logitsMemoryBudget) / max(1, bytesPerRow))
+        let requestedBound = maximumBatchTokenCount.map { max(1, $0) } ?? Int.max
+        return max(1, min(max(1, contextBatchSize), memoryBound, requestedBound))
     }
 
     public func encodeCalgacus(
@@ -267,6 +334,51 @@ extension LlamaEngine {
         }
 
         return maxLogit + log(normalizer) - targetLogit
+    }
+
+    static func calgacusTokenMetrics(
+        of tokenID: Int32,
+        in logits: UnsafeBufferPointer<Float>
+    ) throws -> (rank: Int, negativeLogProbability: Double) {
+        guard tokenID >= 0, Int(tokenID) < logits.count else {
+            throw CalgacusError.invalidTokenID(tokenID, vocabularySize: logits.count)
+        }
+
+        let targetIndex = Int(tokenID)
+        let targetLogit = calgacusComparableLogit(logits[targetIndex])
+        var rank = 1
+        var maxLogit = -Double.infinity
+
+        for index in logits.indices {
+            let logit = calgacusComparableLogit(logits[index])
+            if index != targetIndex,
+               logit > targetLogit || (logit == targetLogit && index < targetIndex) {
+                rank += 1
+            }
+            if logit.isFinite {
+                maxLogit = max(maxLogit, Double(logit))
+            }
+        }
+
+        guard maxLogit.isFinite, targetLogit.isFinite else {
+            return (rank, .infinity)
+        }
+
+        var normalizer = 0.0
+        for rawLogit in logits {
+            let logit = calgacusComparableLogit(rawLogit)
+            if logit.isFinite {
+                normalizer += exp(Double(logit) - maxLogit)
+            }
+        }
+        guard normalizer > 0 else {
+            return (rank, .infinity)
+        }
+
+        return (
+            rank,
+            maxLogit + log(normalizer) - Double(targetLogit)
+        )
     }
 
     static func calgacusStats(for trace: [CalgacusTraceEntry]) -> CalgacusRankStats {

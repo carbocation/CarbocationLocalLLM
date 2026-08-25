@@ -730,6 +730,8 @@ let perplexity = exp(meanNegativeLogProbability)
 
 Each result contains the token id, exact rendered bytes, its range in the input's UTF-8 bytes, raw log-probability, and one-based vocabulary rank. The progress callback reports completed and total observed-token counts, plus a derived fraction. Scores use the model logits before sampling transforms and condition each token on every preceding token. The entire text must fit in the loaded context; this API does not truncate or use a sliding window. Word segmentation, aggregation, calibration, and classification remain app-owned. Apple Intelligence does not expose logits through this package.
 
+Known text is scored with bounded teacher-forcing batches rather than one autoregressive decode per token. The runtime requests logits for every prediction position in each batch, scans those buffers without per-token copies, and caps the transient logits matrix at approximately 64 MiB. Progress advances after each completed inference batch. Exact floating-point scores can vary slightly with batch shape, backend, and quantization, so persist the model and runtime identity alongside scores that need to be compared over time.
+
 ### How the binary release works
 
 For a published release tag such as `v0.3.0`, Xcode resolves the package from GitHub, downloads `llama.xcframework.zip` from the release asset URL recorded in that tag's `Package.swift`, links the products you chose, and builds your app.

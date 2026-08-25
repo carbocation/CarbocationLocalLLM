@@ -2591,6 +2591,50 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
     }
 
+    func testCalgacusTokenMetricsMatchSeparateCalculations() throws {
+        let logits: [Float] = [0.5, 2.0, 2.0, -1.0]
+
+        let metrics = try logits.withUnsafeBufferPointer {
+            try LlamaEngine.calgacusTokenMetrics(of: 0, in: $0)
+        }
+
+        XCTAssertEqual(metrics.rank, try LlamaEngine.calgacusRank(of: 0, in: logits))
+        XCTAssertEqual(
+            metrics.negativeLogProbability,
+            try LlamaEngine.calgacusNegativeLogProbability(of: 0, in: logits),
+            accuracy: 0.000_001
+        )
+    }
+
+    func testLikelihoodBatchSizeBoundsLogitsMemoryAndHonorsOverrides() {
+        XCTAssertEqual(
+            LlamaEngine.calgacusLikelihoodBatchSize(
+                vocabularySize: 100,
+                contextBatchSize: 32,
+                logitsMemoryBudget: 4_000
+            ),
+            10
+        )
+        XCTAssertEqual(
+            LlamaEngine.calgacusLikelihoodBatchSize(
+                vocabularySize: 100,
+                contextBatchSize: 32,
+                maximumBatchTokenCount: 3,
+                logitsMemoryBudget: 4_000
+            ),
+            3
+        )
+        XCTAssertEqual(
+            LlamaEngine.calgacusLikelihoodBatchSize(
+                vocabularySize: 100,
+                contextBatchSize: 0,
+                maximumBatchTokenCount: 0,
+                logitsMemoryBudget: 0
+            ),
+            1
+        )
+    }
+
     func testLlamaTokenLikelihoodProvidesDerivedValues() {
         let likelihood = LlamaTokenLikelihood(
             index: 2,
@@ -2851,11 +2895,32 @@ final class CarbocationLlamaRuntimeTests: XCTestCase {
         )
 
         let secret = "The recipe is simple."
-        let likelihoods = try await engine.tokenLogLikelihoods(for: secret)
+        let likelihoodText = Array(repeating: secret, count: 8).joined(separator: " ")
+        let singleTokenStartedAt = Date()
+        let singleTokenLikelihoods = try await engine.tokenLogLikelihoods(
+            for: likelihoodText,
+            maximumBatchTokenCount: 1
+        )
+        let singleTokenDuration = Date().timeIntervalSince(singleTokenStartedAt)
+        let batchedStartedAt = Date()
+        let likelihoods = try await engine.tokenLogLikelihoods(for: likelihoodText)
+        let batchedDuration = Date().timeIntervalSince(batchedStartedAt)
+        print(
+            "Token likelihood live check: single=\(singleTokenDuration)s "
+                + "batched=\(batchedDuration)s tokens=\(likelihoods.count)"
+        )
         XCTAssertFalse(likelihoods.isEmpty)
+        XCTAssertEqual(likelihoods.count, singleTokenLikelihoods.count)
+        for (batched, singleToken) in zip(likelihoods, singleTokenLikelihoods) {
+            XCTAssertEqual(batched.tokenID, singleToken.tokenID)
+            XCTAssertEqual(batched.tokenBytes, singleToken.tokenBytes)
+            XCTAssertEqual(batched.byteRange, singleToken.byteRange)
+            XCTAssertGreaterThan(batched.rank, 0)
+            XCTAssertTrue(batched.logProbability.isFinite)
+        }
         XCTAssertEqual(
             likelihoods.reduce(into: Data()) { $0.append($1.tokenBytes) },
-            Data(secret.utf8)
+            Data(likelihoodText.utf8)
         )
         XCTAssertTrue(likelihoods.allSatisfy { $0.logProbability.isFinite })
         XCTAssertTrue(likelihoods.allSatisfy { $0.rank > 0 })
